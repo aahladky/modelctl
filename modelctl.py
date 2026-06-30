@@ -893,7 +893,7 @@ def generate_artifacts(profile):
     return ok
 
 
-DEFAULT_HEADER = "healthCheckTimeout: 60\nglobalTTL: 0\n"
+DEFAULT_HEADER = "healthCheckTimeout: 400\nglobalTTL: 0\n"
 
 
 def _file_hash(path: Path) -> str:
