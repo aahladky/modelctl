@@ -138,6 +138,19 @@ class TestSyncRouterPreset(unittest.TestCase):
         content = self.router_path.read_text()
         self.assertIn("[Qwythos-9B-Q4]", content)
 
+    def test_backs_up_existing_preset_before_overwrite(self):
+        self.router_path.write_text("[stale-old-content]\n")
+
+        with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
+             mock.patch.object(modelctl, "ROUTER_PRESET_PATH", self.router_path), \
+             mock.patch.object(modelctl, "preflight", return_value=(True, "llama-server", {}, [])):
+            modelctl.sync_router_preset()
+
+        backup_path = self.router_path.with_suffix(self.router_path.suffix + ".bak")
+        self.assertTrue(backup_path.exists())
+        self.assertEqual(backup_path.read_text(), "[stale-old-content]\n")
+        self.assertIn("[Qwythos-9B-Q4]", self.router_path.read_text())
+
 
 if __name__ == "__main__":
     unittest.main()

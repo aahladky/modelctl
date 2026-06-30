@@ -38,6 +38,8 @@ LLAMA_SERVER_RESOLVED = _resolved is not None
 LLAMA_SWAP_CONFIG = Path(os.environ.get("MODELCTL_LLAMA_SWAP_CONFIG", Path.home() / "llama-swap" / "config.yaml"))
 LLAMA_SWAP_HEADER = Path(os.environ.get("MODELCTL_LLAMA_SWAP_HEADER", Path.home() / "llama-swap" / "config.header.yaml"))
 ROUTER_PRESET_PATH = Path(os.environ.get("MODELCTL_ROUTER_PRESET", Path.home() / "llama-router" / "router.preset.ini"))
+# Not consumed by modelctl itself -- read by the operator when launching the router
+# process by hand, e.g. `llama-server --port $MODELCTL_ROUTER_PORT --models-preset ...`.
 ROUTER_PORT = os.environ.get("MODELCTL_ROUTER_PORT", "7071")
 
 # Hermes Agent integration: modelctl can keep Hermes' custom_providers list
@@ -680,8 +682,7 @@ def cmd_pull(args):
         generate_artifacts(profile)
         print(f"-> saved profile '{name}'")
 
-    sync_llama_swap_config()
-    sync_router_preset()
+    sync_all_backends()
     if not args.no_hermes:
         sync_hermes_custom_providers()
     print(f"\nDone. {len(chosen_groups)} profile(s) created and pushed to {LLAMA_SWAP_CONFIG}.")
@@ -991,10 +992,22 @@ def sync_router_preset():
         print("Router preset unchanged -- skipping write.")
         return
 
+    if ROUTER_PRESET_PATH.exists():
+        backup = ROUTER_PRESET_PATH.with_suffix(ROUTER_PRESET_PATH.suffix + ".bak")
+        shutil.copy2(ROUTER_PRESET_PATH, backup)
+        print(f"(previous router preset backed up to {backup})")
+
     ROUTER_PRESET_PATH.write_text(body)
     print(f"Wrote router preset for {len(profiles)} profile(s) -> {ROUTER_PRESET_PATH}")
     if any_unresolved:
         print("\nNOTE: at least one profile above couldn't be fully resolved for router mode.")
+
+
+def sync_all_backends():
+    """Regenerate every backend's config from the current profiles.
+    Single place to extend if a third backend is ever added."""
+    sync_llama_swap_config()
+    sync_router_preset()
 
 
 def _sync_hermes_context_cache(profiles):
@@ -1035,8 +1048,7 @@ def cmd_defaults(args):
 
 
 def cmd_sync(args):
-    sync_llama_swap_config()
-    sync_router_preset()
+    sync_all_backends()
     if not args.no_hermes:
         sync_hermes_custom_providers(dry_run=args.hermes_dry_run)
     n = len(list(PROFILES_DIR.glob("*.json")))
@@ -1066,8 +1078,7 @@ def cmd_edit(args):
     warn_if_env_empty(profile["env"])
     save_profile(profile)
     generate_artifacts(profile)
-    sync_llama_swap_config()
-    sync_router_preset()
+    sync_all_backends()
     if not args.no_hermes:
         sync_hermes_custom_providers()
     print("Updated, regenerated artifacts, and pushed to llama-swap config.")
@@ -1076,8 +1087,7 @@ def cmd_edit(args):
 def cmd_regen(args):
     profile = load_profile(args.name)
     generate_artifacts(profile)
-    sync_llama_swap_config()
-    sync_router_preset()
+    sync_all_backends()
     if not args.no_hermes:
         sync_hermes_custom_providers()
     print(f"Regenerated artifacts in {profile['artifacts_dir']} and pushed to llama-swap config.")
