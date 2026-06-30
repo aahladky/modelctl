@@ -804,11 +804,17 @@ def render_router_preset(profile):
     Mirrors render_llama_swap_entry but targets `llama-server --models-preset`
     instead of llama-swap. Runs through the same preflight() resolution so
     binary/env issues are caught the same way for both backends."""
-    ok, effective_bin, effective_env, messages = preflight(profile, auto_fix=True)
+    # Unlike render_llama_swap_entry, router mode shares one binary/env across
+    # all spawned models (the router itself is the process llama-swap-style
+    # YAML would otherwise point `cmd:` at), so effective_bin/effective_env
+    # have nothing to attach to in a per-model INI section -- only ok/messages
+    # (file existence, device support, etc.) are needed here.
+    ok, _, _, messages = preflight(profile, auto_fix=True)
     cfg = profile["config"]
 
     lines = [f"[{profile['name']}]"]
     lines.append(f"model = {profile['model_path']}")
+    lines.append("ngl = 999")
     lines.append(f"ctx-size = {cfg['ctx']}")
     lines.append("jinja = true")
     lines.append("parallel = 1")
@@ -823,6 +829,12 @@ def render_router_preset(profile):
     if cfg.get("kv_quant"):
         lines.append(f"cache-type-k = {cfg['kv_quant']}")
         lines.append(f"cache-type-v = {cfg['kv_quant']}")
+    if cfg.get("extra"):
+        # build_server_args shlex.splits cfg["extra"] into discrete CLI
+        # tokens; the INI format has no equivalent structured way to splice
+        # in arbitrary raw flags, so store the raw string verbatim as a
+        # single extra-args line instead.
+        lines.append(f"extra-args = {cfg['extra']}")
     return "\n".join(lines) + "\n", ok, messages
 
 

@@ -89,7 +89,26 @@ class TestRenderRouterPreset(unittest.TestCase):
         self.assertIn("split-mode = layer", text)
         self.assertIn("tensor-split = 4,1", text)
         self.assertIn("jinja = true", text)
+        self.assertIn("ngl = 999", text)
         self.assertIn("mmproj = /home/aaron/models/mmproj-Qwythos-9B-Claude-Mythos-5-1M-F16.gguf", text)
+
+    def test_emits_extra_args_line_when_extra_configured(self):
+        profile = {
+            "name": "Qwythos-9B-Q4",
+            "model_path": "/home/aaron/models/Qwythos-9B-Claude-Mythos-5-1M-Q4_K_M.gguf",
+            "mmproj_path": None,
+            "config": {
+                "flash_attn": "auto",
+                "ctx": "64000",
+                "split_mode": "layer",
+                "tensor_split": "4,1",
+                "kv_quant": "q8_0",
+                "ttl": "3600",
+                "extra": "--some-flag value",
+            },
+        }
+        text, ok, messages = modelctl.render_router_preset(profile)
+        self.assertIn("extra-args = --some-flag value", text)
 
 
 if __name__ == "__main__":
