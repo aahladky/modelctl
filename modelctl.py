@@ -799,6 +799,33 @@ def render_llama_swap_entry(profile):
     return "\n".join(lines) + "\n", ok, messages
 
 
+def render_router_preset(profile):
+    """Render one [section] of the router-mode preset.ini for this profile.
+    Mirrors render_llama_swap_entry but targets `llama-server --models-preset`
+    instead of llama-swap. Runs through the same preflight() resolution so
+    binary/env issues are caught the same way for both backends."""
+    ok, effective_bin, effective_env, messages = preflight(profile, auto_fix=True)
+    cfg = profile["config"]
+
+    lines = [f"[{profile['name']}]"]
+    lines.append(f"model = {profile['model_path']}")
+    lines.append(f"ctx-size = {cfg['ctx']}")
+    lines.append("jinja = true")
+    lines.append("parallel = 1")
+    lines.append(f"flash-attn = {cfg['flash_attn']}")
+    if cfg.get("split_mode") and cfg.get("tensor_split"):
+        lines.append(f"split-mode = {cfg['split_mode']}")
+        lines.append(f"tensor-split = {cfg['tensor_split']}")
+    elif cfg.get("device"):
+        lines.append(f"device = {cfg['device']}")
+    if profile.get("mmproj_path"):
+        lines.append(f"mmproj = {profile['mmproj_path']}")
+    if cfg.get("kv_quant"):
+        lines.append(f"cache-type-k = {cfg['kv_quant']}")
+        lines.append(f"cache-type-v = {cfg['kv_quant']}")
+    return "\n".join(lines) + "\n", ok, messages
+
+
 def args_to_shell_line(args) -> str:
     """Render a flat argument list as a shell-safe command line."""
     return " ".join(shlex.quote(str(a)) for a in args)

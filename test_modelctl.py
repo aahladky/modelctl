@@ -67,5 +67,30 @@ class TestBuildServerArgs(unittest.TestCase):
         self.assertEqual(args[args.index("--parallel") + 1], "1")
 
 
+class TestRenderRouterPreset(unittest.TestCase):
+    def test_emits_ini_section_with_device_and_ctx(self):
+        profile = {
+            "name": "Qwythos-9B-Q4",
+            "model_path": "/home/aaron/models/Qwythos-9B-Claude-Mythos-5-1M-Q4_K_M.gguf",
+            "mmproj_path": "/home/aaron/models/mmproj-Qwythos-9B-Claude-Mythos-5-1M-F16.gguf",
+            "config": {
+                "flash_attn": "auto",
+                "ctx": "64000",
+                "split_mode": "layer",
+                "tensor_split": "4,1",
+                "kv_quant": "q8_0",
+                "ttl": "3600",
+                "extra": "",
+            },
+        }
+        text, ok, messages = modelctl.render_router_preset(profile)
+        self.assertIn("[Qwythos-9B-Q4]", text)
+        self.assertIn("ctx-size = 64000", text)
+        self.assertIn("split-mode = layer", text)
+        self.assertIn("tensor-split = 4,1", text)
+        self.assertIn("jinja = true", text)
+        self.assertIn("mmproj = /home/aaron/models/mmproj-Qwythos-9B-Claude-Mythos-5-1M-F16.gguf", text)
+
+
 if __name__ == "__main__":
     unittest.main()
