@@ -111,5 +111,33 @@ class TestRenderRouterPreset(unittest.TestCase):
         self.assertIn("extra-args = --some-flag value", text)
 
 
+class TestSyncRouterPreset(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.profiles_dir = Path(self.tmp.name) / "profiles"
+        self.profiles_dir.mkdir()
+        self.router_path = Path(self.tmp.name) / "router.preset.ini"
+
+        (self.profiles_dir / "Qwythos-9B-Q4.json").write_text(json.dumps({
+            "name": "Qwythos-9B-Q4",
+            "model_path": "/home/aaron/models/q4.gguf",
+            "mmproj_path": None,
+            "config": {
+                "flash_attn": "auto", "ctx": "64000", "split_mode": "layer",
+                "tensor_split": "4,1", "kv_quant": "q8_0", "ttl": "3600", "extra": "",
+            },
+        }))
+
+    def test_writes_all_profile_sections(self):
+        with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
+             mock.patch.object(modelctl, "ROUTER_PRESET_PATH", self.router_path), \
+             mock.patch.object(modelctl, "preflight", return_value=(True, "llama-server", {}, [])):
+            modelctl.sync_router_preset()
+
+        content = self.router_path.read_text()
+        self.assertIn("[Qwythos-9B-Q4]", content)
+
+
 if __name__ == "__main__":
     unittest.main()

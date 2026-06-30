@@ -37,6 +37,8 @@ LLAMA_SERVER_BIN = _resolved or "llama-server"
 LLAMA_SERVER_RESOLVED = _resolved is not None
 LLAMA_SWAP_CONFIG = Path(os.environ.get("MODELCTL_LLAMA_SWAP_CONFIG", Path.home() / "llama-swap" / "config.yaml"))
 LLAMA_SWAP_HEADER = Path(os.environ.get("MODELCTL_LLAMA_SWAP_HEADER", Path.home() / "llama-swap" / "config.header.yaml"))
+ROUTER_PRESET_PATH = Path(os.environ.get("MODELCTL_ROUTER_PRESET", Path.home() / "llama-router" / "router.preset.ini"))
+ROUTER_PORT = os.environ.get("MODELCTL_ROUTER_PORT", "7071")
 
 # Hermes Agent integration: modelctl can keep Hermes' custom_providers list
 # in sync with saved profiles so pulled models show up in `hermes model`.
@@ -679,6 +681,7 @@ def cmd_pull(args):
         print(f"-> saved profile '{name}'")
 
     sync_llama_swap_config()
+    sync_router_preset()
     if not args.no_hermes:
         sync_hermes_custom_providers()
     print(f"\nDone. {len(chosen_groups)} profile(s) created and pushed to {LLAMA_SWAP_CONFIG}.")
@@ -961,6 +964,39 @@ def sync_llama_swap_config():
     _sync_hermes_context_cache(profiles)
 
 
+def sync_router_preset():
+    """Rebuild router.preset.ini from every saved profile. Mirrors
+    sync_llama_swap_config's change-detection-before-write guard so it
+    doesn't force an unnecessary router reload."""
+    ROUTER_PRESET_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    profiles = sorted(PROFILES_DIR.glob("*.json"))
+    body = ""
+    any_unresolved = False
+    for p in profiles:
+        profile = json.loads(p.read_text())
+        entry, ok, messages = render_router_preset(profile)
+        if messages:
+            print(f"'{profile['name']}' (router preset):")
+            for m in messages:
+                print(f"  {m}")
+        if not ok:
+            any_unresolved = True
+        body += entry + "\n"
+
+    import hashlib
+    new_hash = hashlib.sha256(body.encode()).hexdigest()
+    old_hash = _file_hash(ROUTER_PRESET_PATH)
+    if new_hash == old_hash:
+        print("Router preset unchanged -- skipping write.")
+        return
+
+    ROUTER_PRESET_PATH.write_text(body)
+    print(f"Wrote router preset for {len(profiles)} profile(s) -> {ROUTER_PRESET_PATH}")
+    if any_unresolved:
+        print("\nNOTE: at least one profile above couldn't be fully resolved for router mode.")
+
+
 def _sync_hermes_context_cache(profiles):
     """Write per-model context lengths to Hermes' context_length_cache.yaml.
 
@@ -1000,6 +1036,7 @@ def cmd_defaults(args):
 
 def cmd_sync(args):
     sync_llama_swap_config()
+    sync_router_preset()
     if not args.no_hermes:
         sync_hermes_custom_providers(dry_run=args.hermes_dry_run)
     n = len(list(PROFILES_DIR.glob("*.json")))
@@ -1030,6 +1067,7 @@ def cmd_edit(args):
     save_profile(profile)
     generate_artifacts(profile)
     sync_llama_swap_config()
+    sync_router_preset()
     if not args.no_hermes:
         sync_hermes_custom_providers()
     print("Updated, regenerated artifacts, and pushed to llama-swap config.")
@@ -1039,6 +1077,7 @@ def cmd_regen(args):
     profile = load_profile(args.name)
     generate_artifacts(profile)
     sync_llama_swap_config()
+    sync_router_preset()
     if not args.no_hermes:
         sync_hermes_custom_providers()
     print(f"Regenerated artifacts in {profile['artifacts_dir']} and pushed to llama-swap config.")
