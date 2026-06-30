@@ -215,27 +215,27 @@ def sync_hermes_custom_providers(dry_run: bool = False):
         provider_name = "LocalLlama"
 
     profiles = sorted(PROFILES_DIR.glob("*.json"))
-    new_providers = []
-    seen_models = set()
+    models_map = {}
     for p in profiles:
         profile = json.loads(p.read_text())
         name = profile.get("name")
         if not name:
             continue
         # llama-swap exposes models by profile name at /v1/models.
-        new_providers.append({"name": provider_name, "base_url": base_url, "model": name})
-        seen_models.add(name)
+        ctx = profile.get("config", {}).get("ctx")
+        models_map[name] = {"context_length": int(ctx)} if ctx else {}
 
-    if not new_providers:
+    if not models_map:
         print("No saved profiles -- leaving Hermes custom_providers unchanged.")
         return False
 
-    # Replace the whole custom_providers list, but preserve any non-llama-swap
-    # custom providers that point at a different base URL (e.g. Ollama on another port).
-    kept = [cp for cp in existing
-            if cp.get("base_url", "").rstrip("/") + "/" != base_url
-            and cp.get("model") not in seen_models]
-    final = kept + new_providers
+    new_provider = {"name": provider_name, "base_url": base_url, "models": models_map}
+
+    # Replace just the entry/entries for this base URL, but preserve any
+    # non-llama-swap custom providers that point at a different base URL
+    # (e.g. Ollama on another port).
+    kept = [cp for cp in existing if cp.get("base_url", "").rstrip("/") + "/" != base_url]
+    final = kept + [new_provider]
 
     if final == existing:
         print("Hermes custom_providers already up to date.")
@@ -246,11 +246,15 @@ def sync_hermes_custom_providers(dry_run: bool = False):
     if dry_run:
         print("Would write the following custom_providers to Hermes config:")
         for cp in final:
-            print(f"  - {cp['name']}: {cp['model']} @ {cp['base_url']}")
+            if "models" in cp:
+                model_list = ", ".join(cp["models"].keys())
+                print(f"  - {cp['name']} @ {cp['base_url']}: models = [{model_list}]")
+            else:
+                print(f"  - {cp.get('name')} @ {cp.get('base_url')}")
         return True
 
     write_hermes_config(cfg)
-    print(f"Synced {len(new_providers)} model(s) to Hermes custom_providers @ {HERMES_CONFIG}")
+    print(f"Synced {len(models_map)} model(s) to Hermes custom_providers @ {HERMES_CONFIG}")
     print(f"  provider: {provider_name}, base_url: {base_url}")
     return True
 
