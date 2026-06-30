@@ -746,6 +746,8 @@ def build_server_args(profile):
         "-ngl", "999",
         "--flash-attn", cfg['flash_attn'],
         "-c", cfg['ctx'],
+        "--jinja",
+        "--parallel", "1",
     ]
     # Prefer GPU split if configured. If not, fall back to explicit device.
     # Legacy profiles without either field will simply omit --device; the

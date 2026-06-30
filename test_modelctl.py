@@ -46,5 +46,26 @@ class TestSyncHermesCustomProviders(unittest.TestCase):
         )
 
 
+class TestBuildServerArgs(unittest.TestCase):
+    def test_jinja_and_parallel_always_present(self):
+        profile = {
+            "model_path": "/home/aaron/models/test.gguf",
+            "mmproj_path": None,
+            "config": {
+                "flash_attn": "auto",
+                "ctx": "64000",
+                "split_mode": "layer",
+                "tensor_split": "4,1",
+                "kv_quant": "q8_0",
+                "ttl": "3600",
+                "extra": "",
+            },
+        }
+        args = modelctl.build_server_args(profile)
+        self.assertIn("--jinja", args)
+        self.assertIn("--parallel", args)
+        self.assertEqual(args[args.index("--parallel") + 1], "1")
+
+
 if __name__ == "__main__":
     unittest.main()
