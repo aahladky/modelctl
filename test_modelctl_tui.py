@@ -1,6 +1,8 @@
 import unittest
 
-from modelctl_tui import WizardState, next_screen_after
+from textual.widgets import Static
+
+from modelctl_tui import PullWizardApp, StepIndicator, WizardState, next_screen_after
 
 
 class TestNextScreenAfter(unittest.TestCase):
@@ -35,6 +37,21 @@ class TestNextScreenAfter(unittest.TestCase):
         self.assertEqual(next_screen_after("configure", state), "name")
         self.assertEqual(next_screen_after("name", state), "download")
         self.assertEqual(next_screen_after("download", state), "summary")
+
+
+class TestStepIndicator(unittest.TestCase):
+    def test_renders_all_steps_with_current_marked(self):
+        indicator = StepIndicator(current="quant")
+        rendered = str(indicator.render())
+        for step in ["search", "quant", "vision_mtp", "configure", "name", "download", "summary"]:
+            self.assertIn(step, rendered)
+
+
+class TestPullWizardAppBoots(unittest.IsolatedAsyncioTestCase):
+    async def test_app_starts_on_search_screen(self):
+        app = PullWizardApp()
+        async with app.run_test() as pilot:
+            self.assertEqual(app.screen.name, "search")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,10 @@ See docs/superpowers/specs/2026-07-01-modelctl-tui-pull-wizard-design.md.
 """
 from dataclasses import dataclass, field
 
+from textual.app import App, ComposeResult
+from textual.screen import Screen
+from textual.widgets import Static
+
 import modelctl
 
 STEP_ORDER = ["search", "quant", "vision_mtp", "configure", "name", "download", "summary"]
@@ -41,3 +45,36 @@ def next_screen_after(current: str, state: WizardState) -> str:
         if not has_extras:
             return STEP_ORDER[idx + 2]  # skip straight to "configure"
     return nxt
+
+
+class StepIndicator(Static):
+    """Breadcrumb shown at the top of every wizard screen, e.g.
+    'search > [quant] > vision_mtp > configure > name > download > summary'
+    with the current step bracketed. Takes the current step name as a
+    constructor arg -- no shared mutable state, just a label."""
+
+    def __init__(self, current: str):
+        self.current = current
+        super().__init__()
+
+    def render(self) -> str:
+        parts = [f"[{s}]" if s == self.current else s for s in STEP_ORDER]
+        return " > ".join(parts)
+
+
+class SearchScreen(Screen):
+    """Placeholder for Task 4."""
+    name = "search"
+
+    def compose(self) -> ComposeResult:
+        yield StepIndicator(current="search")
+
+
+class PullWizardApp(App):
+    """Entry point for `modelctl pull --tui`. Pushes SearchScreen first;
+    each subsequent screen is pushed by the previous one via
+    next_screen_after(), carrying a shared WizardState forward."""
+
+    def on_mount(self) -> None:
+        self.state = WizardState()
+        self.push_screen(SearchScreen())
