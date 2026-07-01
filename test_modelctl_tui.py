@@ -3,7 +3,7 @@ from unittest import mock
 
 from textual.widgets import Input, ListView, Static
 
-from modelctl_tui import PullWizardApp, StepIndicator, WizardState, next_screen_after
+from modelctl_tui import PullWizardApp, QuantPickScreen, StepIndicator, WizardState, next_screen_after
 
 
 class TestNextScreenAfter(unittest.TestCase):
@@ -120,6 +120,51 @@ class TestSearchScreen(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("failed", str(status.render()).lower())
                 # Confirm we can still interact with the screen afterwards.
                 self.assertEqual(app.screen.STEP, "search")
+
+
+class TestQuantPickScreen(unittest.IsolatedAsyncioTestCase):
+    def _state_with_contents(self, mmproj=None, mtp=None):
+        return WizardState(
+            repo_id="unsloth/Qwen3.5-35B-A3B-GGUF",
+            repo_contents={
+                "quant_groups": [
+                    {"label": "Q4_K_M", "files": ["a.gguf"], "sharded": False, "total_size": 100},
+                    {"label": "Q5_K_M", "files": ["b.gguf"], "sharded": False, "total_size": 120},
+                ],
+                "mmproj_files": mmproj or [],
+                "mtp_files": mtp or [],
+            },
+        )
+
+    async def test_lists_quant_groups_from_state(self):
+        app = PullWizardApp()
+        async with app.run_test() as pilot:
+            app.state = self._state_with_contents()
+            await app.push_screen(QuantPickScreen())
+            await pilot.pause()
+            options = app.screen.query_one("#quant-options", ListView)
+            self.assertEqual(len(options.children), 2)
+
+    async def test_picking_quant_with_no_extras_skips_to_configure(self):
+        app = PullWizardApp()
+        async with app.run_test() as pilot:
+            app.state = self._state_with_contents()  # no mmproj/mtp
+            await app.push_screen(QuantPickScreen())
+            await pilot.pause()
+            await pilot.click("ListItem")
+            await pilot.pause()
+            self.assertEqual(app.state.quant_group["label"], "Q4_K_M")
+            self.assertEqual(app.screen.STEP, "configure")
+
+    async def test_picking_quant_with_mmproj_goes_to_vision_mtp(self):
+        app = PullWizardApp()
+        async with app.run_test() as pilot:
+            app.state = self._state_with_contents(mmproj=[{"name": "mmproj-F16.gguf", "size": 500}])
+            await app.push_screen(QuantPickScreen())
+            await pilot.pause()
+            await pilot.click("ListItem")
+            await pilot.pause()
+            self.assertEqual(app.screen.STEP, "vision_mtp")
 
 
 if __name__ == "__main__":

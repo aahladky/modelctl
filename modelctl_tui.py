@@ -116,16 +116,51 @@ class SearchScreen(Screen):
 
 
 class QuantPickScreen(Screen):
-    """Placeholder for Task 5."""
+    """Second wizard screen: pick a quant group from the repo contents
+    already fetched by SearchScreen. No network I/O here -- just reads
+    self.app.state.repo_contents -- so no background worker is needed."""
     STEP = "quant"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="quant")
+        yield ListView(id="quant-options")
+
+    def on_mount(self) -> None:
+        groups = (self.app.state.repo_contents or {}).get("quant_groups", [])
+        self._groups = groups
+        options = self.query_one("#quant-options", ListView)
+        for g in groups:
+            size = modelctl._format_size(g.get("total_size"))
+            options.append(ListItem(Label(f"{g['label']} ({size})")))
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        index = self.query_one("#quant-options", ListView).index
+        self.app.state.quant_group = self._groups[index]
+        next_step = next_screen_after("quant", self.app.state)
+        self.app.push_screen(SCREENS_BY_NAME[next_step]())
+
+
+class VisionMtpScreen(Screen):
+    """Placeholder for Task 6."""
+    STEP = "vision_mtp"
+
+    def compose(self) -> ComposeResult:
+        yield StepIndicator(current="vision_mtp")
+
+
+class ConfigureScreen(Screen):
+    """Placeholder for Task 7."""
+    STEP = "configure"
+
+    def compose(self) -> ComposeResult:
+        yield StepIndicator(current="configure")
 
 
 SCREENS_BY_NAME = {
     "search": SearchScreen,
     "quant": QuantPickScreen,
+    "vision_mtp": VisionMtpScreen,
+    "configure": ConfigureScreen,
 }
 
 
