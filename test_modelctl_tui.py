@@ -67,6 +67,7 @@ class TestSearchScreen(unittest.IsolatedAsyncioTestCase):
             async with app.run_test() as pilot:
                 await pilot.click("#search-input")
                 await pilot.press(*"qwen3.5", "enter")
+                await app.workers.wait_for_complete()
                 await pilot.pause()
                 mock_search.assert_called_once()
                 results_view = app.screen.query_one("#search-results", ListView)
@@ -82,12 +83,43 @@ class TestSearchScreen(unittest.IsolatedAsyncioTestCase):
             async with app.run_test() as pilot:
                 await pilot.click("#search-input")
                 await pilot.press(*"qwen3.5", "enter")
+                await app.workers.wait_for_complete()
                 await pilot.pause()
                 await pilot.click("ListItem")
                 await pilot.pause()
                 self.assertEqual(app.state.repo_id, "unsloth/Qwen3.5-35B-A3B-GGUF")
                 self.assertEqual(app.state.repo_contents, fake_results[0]["contents"])
                 self.assertEqual(app.screen.STEP, "quant")
+
+    async def test_no_results_shows_status_message(self):
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.search_models", return_value=[]):
+            async with app.run_test() as pilot:
+                await pilot.click("#search-input")
+                await pilot.press(*"nonexistentmodel12345", "enter")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                status = app.screen.query_one("#search-status", Static)
+                self.assertIn("No results", str(status.render()))
+
+    async def test_search_exception_does_not_crash_app(self):
+        app = PullWizardApp()
+        with mock.patch(
+            "modelctl_tui.modelctl.search_models",
+            side_effect=Exception("network error"),
+        ):
+            async with app.run_test() as pilot:
+                await pilot.click("#search-input")
+                await pilot.press(*"qwen3.5", "enter")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                # The app must still be alive and responsive, not torn down
+                # by an uncaught exception from the search worker.
+                self.assertTrue(app.is_running)
+                status = app.screen.query_one("#search-status", Static)
+                self.assertIn("failed", str(status.render()).lower())
+                # Confirm we can still interact with the screen afterwards.
+                self.assertEqual(app.screen.STEP, "search")
 
 
 if __name__ == "__main__":

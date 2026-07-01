@@ -9,6 +9,7 @@ See docs/superpowers/specs/2026-07-01-modelctl-tui-pull-wizard-design.md.
 """
 from dataclasses import dataclass, field
 
+from textual import work
 from textual.app import App, ComposeResult
 from textual.screen import Screen
 from textual.widgets import Input, Label, ListItem, ListView, Static
@@ -69,19 +70,41 @@ class SearchScreen(Screen):
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="search")
         yield Input(placeholder="Search Hugging Face...", id="search-input")
+        yield Static("", id="search-status")
         yield ListView(id="search-results")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         query = event.value.strip()
         if not query:
             return
-        results = modelctl.search_models(query, limit=15, enrich=True)
+        self.query_one("#search-status", Static).update("Searching...")
+        self.run_search(query)
+
+    @work(thread=True)
+    def run_search(self, query: str) -> None:
+        """Runs search_models() on a worker thread -- it can make up to
+        15+ sequential HTTP round-trips against the real Hugging Face API
+        (list_models + get_repo_contents per hit when enrich=True), which
+        would otherwise freeze the whole Textual event loop. Any exception
+        is caught here so a network hiccup can't take down the app."""
+        try:
+            results = modelctl.search_models(query, limit=15, enrich=True)
+        except Exception as e:
+            self.app.call_from_thread(self._on_search_failure, str(e))
+            return
+        self.app.call_from_thread(self._on_search_success, results)
+
+    def _on_search_success(self, results: list) -> None:
         self._results = results
+        self.query_one("#search-status", Static).update("" if results else "No results.")
         results_view = self.query_one("#search-results", ListView)
         results_view.clear()
         for r in results:
             label = f"{r['repo_id']} ({r['downloads']:,} downloads)"
             results_view.append(ListItem(Label(label)))
+
+    def _on_search_failure(self, message: str) -> None:
+        self.query_one("#search-status", Static).update(f"Search failed: {message}")
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         index = self.query_one("#search-results", ListView).index
