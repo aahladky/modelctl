@@ -556,24 +556,133 @@ def slugify(s: str) -> str:
     return s.strip("-")
 
 
+def search_models(query, tags=None, min_gb=None, max_gb=None, sort="downloads", limit=15, enrich=True):
+    """Search Hugging Face for candidate model repos. Returns a list of
+    plain dicts (repo_id, downloads, likes, is_gguf, has_mtp, contents) --
+    no printing or prompting here, so this is safe to call from any UI (the
+    current CLI, or a future TUI) without dragging print()/input() along.
+
+    tags: currently only "mtp" is recognized -- a cheap repo-name filter
+    (no extra API calls), requiring "mtp" to appear in the repo id.
+    min_gb/max_gb: filters to repos with at least one quant whose total
+    size falls in this range. Requires fetching each candidate's file
+    listing (via get_repo_contents), so this is the expensive path --
+    only paid for when actually requested.
+    enrich: when True (the default, since "see quants before pulling" is
+    the whole point of this function existing), populates `contents` via
+    get_repo_contents() for every result. Set False for a fast, cheap
+    search (e.g. live-filter-as-you-type in a future TUI), then enrich
+    only the one item actually selected.
+    """
+    tags = tags or []
+    want_mtp = "mtp" in tags
+    need_contents = enrich or min_gb is not None or max_gb is not None
+
+    hits = api.list_models(search=query, limit=limit, sort=sort)
+    results = []
+    for m in hits:
+        model_tags = m.tags or []
+        is_gguf = any("gguf" in t.lower() for t in model_tags) or "gguf" in m.id.lower()
+        has_mtp = "mtp" in m.id.lower()
+        if want_mtp and not has_mtp:
+            continue
+
+        contents = None
+        if need_contents:
+            try:
+                contents = get_repo_contents(m.id)
+            except Exception:
+                contents = None
+
+        if min_gb is not None or max_gb is not None:
+            if not _has_quant_in_range(contents, min_gb, max_gb):
+                continue
+
+        results.append({
+            "repo_id": m.id,
+            "downloads": m.downloads or 0,
+            "likes": m.likes or 0,
+            "is_gguf": is_gguf,
+            "has_mtp": has_mtp,
+            "contents": contents if enrich else None,
+        })
+    return results
+
+
+def _has_quant_in_range(contents, min_gb, max_gb) -> bool:
+    if not contents:
+        return False
+    min_bytes = min_gb * 1024 ** 3 if min_gb is not None else 0
+    max_bytes = max_gb * 1024 ** 3 if max_gb is not None else float("inf")
+    for g in contents.get("quant_groups", []):
+        size = g.get("total_size")
+        if size is not None and min_bytes <= size <= max_bytes:
+            return True
+    return False
+
+
+def _quant_suffixes(quant_groups):
+    """Best-effort short quant labels for a compact table column -- strips
+    the longest common prefix across THIS repo's own quant labels, so
+    'Qwen3.5-35B-A3B-Q4_K_M' / 'Qwen3.5-35B-A3B-UD-Q4_K_M' display as
+    'Q4_K_M' / 'UD-Q4_K_M' rather than repeating the model name in every
+    column -- while still distinguishing UD (Unsloth Dynamic) variants
+    from plain ones of the same quant, since a common-prefix-only strip
+    (rather than assuming any fixed quant naming pattern) can't accidentally
+    swallow a distinguishing token the way pattern matching against known
+    quant suffixes can."""
+    labels = [g["label"] for g in quant_groups]
+    if not labels:
+        return []
+    if len(labels) == 1:
+        base = strip_quant_from_label(labels[0])
+        if base and labels[0].startswith(base):
+            return [labels[0][len(base):].strip("-_. ") or labels[0]]
+        return [labels[0]]
+
+    prefix = os.path.commonprefix(labels)
+    cut = prefix.rfind("-")
+    prefix = prefix[:cut + 1] if cut != -1 else ""
+    return [label[len(prefix):] or label for label in labels]
+
+
+def _format_size(num_bytes):
+    if num_bytes is None:
+        return "?"
+    gb = num_bytes / (1024 ** 3)
+    return f"{gb:.1f}GB"
+
+
 def cmd_search(args):
     query = " ".join(args.query)
-    print(f"Searching Hugging Face for: {query}\n")
-    models = api.list_models(search=query, limit=args.limit, sort="downloads")
-    rows = []
-    for m in models:
-        tags = m.tags or []
-        gguf_hint = "GGUF" if any("gguf" in t.lower() for t in tags) or "gguf" in m.id.lower() else ""
-        rows.append((m.id, m.downloads or 0, m.likes or 0, gguf_hint))
+    extras = []
+    if args.tag:
+        extras.append(f"{'/'.join(args.tag)}-tagged")
+    if args.min_gb is not None or args.max_gb is not None:
+        extras.append(f"{args.min_gb or 0}-{args.max_gb if args.max_gb is not None else '∞'}GB")
+    suffix = f" ({', '.join(extras)})" if extras else ""
+    print(f"Searching Hugging Face for: {query}{suffix}\n")
 
-    if not rows:
+    results = search_models(
+        query, tags=args.tag, min_gb=args.min_gb, max_gb=args.max_gb,
+        sort=args.sort, limit=args.limit, enrich=True,
+    )
+
+    if not results:
         print("No results.")
         return
 
-    print(f"{'REPO':<55} {'DOWNLOADS':>10} {'LIKES':>6}  TAG")
-    for repo_id, downloads, likes, hint in rows:
-        print(f"{repo_id:<55} {downloads:>10,} {likes:>6,}  {hint}")
-    print(f"\n{len(rows)} results. Use: modelctl pull <repo_id>")
+    print(f"{'REPO':<50} {'DOWNLOADS':>10} {'LIKES':>6}  {'QUANTS AVAILABLE':<32} {'MTP':<4} VISION")
+    for r in results:
+        contents = r["contents"] or {}
+        quant_groups = contents.get("quant_groups", [])
+        quant_col = ", ".join(_quant_suffixes(quant_groups)[:4])
+        if len(quant_groups) > 4:
+            quant_col += f" (+{len(quant_groups) - 4} more)"
+        mtp_col = "yes" if r["has_mtp"] else "no"
+        vision_col = "yes" if contents.get("mmproj_files") else "no"
+        print(f"{r['repo_id']:<50} {r['downloads']:>10,} {r['likes']:>6,}  {quant_col:<32} {mtp_col:<4} {vision_col}")
+    print(f"\n{len(results)} results. Use: modelctl pull <repo_id>")
 
 
 SHARD_RE = re.compile(r"^(.*)-(\d{5})-of-(\d{5})\.gguf$", re.IGNORECASE)
@@ -582,6 +691,35 @@ SHARD_RE = re.compile(r"^(.*)-(\d{5})-of-(\d{5})\.gguf$", re.IGNORECASE)
 def list_gguf_files(repo_id: str):
     files = api.list_repo_files(repo_id)
     return [f for f in files if f.endswith(".gguf")]
+
+
+def get_repo_contents(repo_id: str) -> dict:
+    """Fetch and categorize a repo's GGUF files -- quant groups, mmproj
+    files, and MTP companion files -- with sizes where available. Pure
+    data, no printing/prompting, so both cmd_pull's interactive picker and
+    search_models()'s enrichment can share this instead of duplicating the
+    same mmproj/MTP/quant separation logic in two places."""
+    gguf_files = list_gguf_files(repo_id)
+    sizes = _repo_file_sizes(repo_id)
+
+    # Three strictly separate lists -- a file can only ever appear in one of
+    # these. MTP checked first since "mtp" and "mmproj" filenames don't
+    # overlap in practice, but excluding whichever runs first from the
+    # other keeps it that way regardless.
+    mmproj_files = [f for f in gguf_files if "mmproj" in f.lower()]
+    mtp_files = [f for f in gguf_files if "mtp" in f.lower() and f not in mmproj_files]
+    quant_files = [f for f in gguf_files if f not in mmproj_files and f not in mtp_files]
+    quant_groups = group_files(quant_files)
+
+    for g in quant_groups:
+        file_sizes = [sizes[f] for f in g["files"] if f in sizes]
+        g["total_size"] = sum(file_sizes) if len(file_sizes) == len(g["files"]) else None
+
+    return {
+        "quant_groups": quant_groups,
+        "mmproj_files": [{"name": f, "size": sizes.get(f)} for f in mmproj_files],
+        "mtp_files": [{"name": f, "size": sizes.get(f)} for f in mtp_files],
+    }
 
 
 def group_files(gguf_files):
@@ -604,6 +742,10 @@ def group_files(gguf_files):
     for key in order:
         parts = [groups[key][i] for i in sorted(groups[key])]
         label = key if len(parts) > 1 else re.sub(r"\.gguf$", "", parts[0], flags=re.IGNORECASE)
+        # Some repos (e.g. unsloth/Qwen3.5-35B-A3B-GGUF's BF16/ subfolder)
+        # ship files inside a subdirectory -- strip that prefix so it doesn't
+        # leak into the display label or the stored profile's "file" field.
+        label = label.rsplit("/", 1)[-1]
         result.append({"label": label, "files": parts, "sharded": len(parts) > 1})
     return result
 
@@ -632,19 +774,24 @@ def parse_selection(s: str, max_index: int):
     return out
 
 
-def _remote_file_size(repo_id: str, filename: str):
-    """Best-effort lookup of a repo file's size via the HF API, used to
-    verify a local file actually belongs to this repo before reusing it.
-    Returns None (not False) on any failure so callers fall back to the old
-    trust-it behavior rather than force a redundant download when offline."""
+def _repo_file_sizes(repo_id: str) -> dict:
+    """Best-effort map of {filename: size_bytes} for every file in a repo,
+    fetched in a single HF API call. Returns {} on any failure so callers
+    degrade gracefully (missing sizes, not a crash) rather than forcing a
+    hard dependency on API availability for basic search/browse to work."""
     try:
         info = api.model_info(repo_id, files_metadata=True)
-        for sib in info.siblings:
-            if sib.rfilename == filename:
-                return sib.size
+        return {sib.rfilename: sib.size for sib in info.siblings if sib.size is not None}
     except Exception:
-        pass
-    return None
+        return {}
+
+
+def _remote_file_size(repo_id: str, filename: str):
+    """Best-effort lookup of a single repo file's size via the HF API, used
+    to verify a local file actually belongs to this repo before reusing it.
+    Returns None (not False) on any failure so callers fall back to the old
+    trust-it behavior rather than force a redundant download when offline."""
+    return _repo_file_sizes(repo_id).get(filename)
 
 
 def download_if_needed(repo_id: str, filename: str, dest_dir: Path) -> str:
@@ -682,28 +829,27 @@ def cmd_pull(args):
     repo_id = args.repo_id
     print(f"Fetching file list for {repo_id} ...")
     try:
-        gguf_files = list_gguf_files(repo_id)
+        contents = get_repo_contents(repo_id)
     except Exception as e:
         print(f"Error: couldn't list files for '{repo_id}': {e}")
         sys.exit(1)
 
-    if not gguf_files:
+    groups = contents["quant_groups"]
+    mmproj_files = contents["mmproj_files"]
+    mtp_files = contents["mtp_files"]
+
+    if not groups and not mmproj_files and not mtp_files:
         print("No .gguf files found in this repo.")
         sys.exit(1)
-
-    # Three strictly separate lists -- a file can only ever appear in one of
-    # these, so there's no way to pick the same mmproj/MTP file from two menus.
-    # MTP checked first since "mtp" and "mmproj" filenames don't overlap in
-    # practice, but excluding whichever runs first from the other keeps it that way.
-    mmproj_files = [f for f in gguf_files if "mmproj" in f.lower()]
-    mtp_files = [f for f in gguf_files if "mtp" in f.lower() and f not in mmproj_files]
-    quant_files = [f for f in gguf_files if f not in mmproj_files and f not in mtp_files]
-    groups = group_files(quant_files)
+    if not groups:
+        print("No selectable model/quant files found in this repo (only mmproj/MTP files present).")
+        sys.exit(1)
 
     print(f"\n=== Model files ({len(groups)}) ===")
     for i, g in enumerate(groups):
         tag = f"  [{len(g['files'])}-part split]" if g["sharded"] else ""
-        print(f"  [{i}] {g['label']}{tag}")
+        size = f"  ({_format_size(g['total_size'])})" if g.get("total_size") is not None else ""
+        print(f"  [{i}] {g['label']}{tag}{size}")
 
     raw = input("\nPick model file number(s) -- comma list, range (3-5), or 'all': ").strip()
     try:
@@ -720,11 +866,12 @@ def cmd_pull(args):
     if mmproj_files:
         print(f"\n=== Vision/mmproj files ({len(mmproj_files)}) -- separate list, pick at most one ===")
         for i, f in enumerate(mmproj_files):
-            print(f"  [{i}] {f}")
+            size = f"  ({_format_size(f['size'])})" if f.get("size") is not None else ""
+            print(f"  [{i}] {f['name']}{size}")
         mi = prompt_pick("mmproj", "Pick mmproj number, or blank to skip: ")
         if mi != -1:
             if 0 <= mi < len(mmproj_files):
-                mmproj_chosen = mmproj_files[mi]
+                mmproj_chosen = mmproj_files[mi]["name"]
             else:
                 print(f"  index {mi} isn't in the mmproj list, skipping mmproj.")
 
@@ -734,11 +881,12 @@ def cmd_pull(args):
         print("  (most MTP-capable models bundle these in the main file -- this list is for")
         print("   repos that ship a separate companion file, e.g. Gemma 4's '-mtp.gguf' pairing)")
         for i, f in enumerate(mtp_files):
-            print(f"  [{i}] {f}")
+            size = f"  ({_format_size(f['size'])})" if f.get("size") is not None else ""
+            print(f"  [{i}] {f['name']}{size}")
         ti = prompt_pick("MTP", "Pick MTP file number, or blank to skip: ")
         if ti != -1:
             if 0 <= ti < len(mtp_files):
-                mtp_chosen = mtp_files[ti]
+                mtp_chosen = mtp_files[ti]["name"]
             else:
                 print(f"  index {ti} isn't in the MTP list, skipping MTP.")
 
@@ -1338,6 +1486,14 @@ def main():
     p_search = sub.add_parser("search", help="search Hugging Face for models")
     p_search.add_argument("query", nargs="+")
     p_search.add_argument("--limit", type=int, default=15)
+    p_search.add_argument("--tag", action="append", choices=["mtp"],
+                           help="filter to repos matching this tag (repeatable); currently only 'mtp' is supported")
+    p_search.add_argument("--min-gb", type=float, default=None,
+                           help="only show repos with at least one quant at or above this size in GB")
+    p_search.add_argument("--max-gb", type=float, default=None,
+                           help="only show repos with at least one quant at or below this size in GB")
+    p_search.add_argument("--sort", default="downloads", choices=["downloads", "likes", "lastModified"],
+                           help="sort order for results (default: downloads)")
     p_search.set_defaults(func=cmd_search)
 
     p_pull = sub.add_parser("pull", help="pull a model from a HF repo and configure it")

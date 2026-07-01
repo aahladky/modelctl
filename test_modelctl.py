@@ -459,6 +459,160 @@ class TestSyncRouterPreset(unittest.TestCase):
         self.assertIn("[Qwythos-9B-Q4]", self.router_path.read_text())
 
 
+class TestRepoFileSizes(unittest.TestCase):
+    def test_returns_size_map_from_model_info(self):
+        fake_sibling_a = mock.Mock(rfilename="model-Q4_K_M.gguf", size=1000)
+        fake_sibling_b = mock.Mock(rfilename="mmproj-F16.gguf", size=500)
+        fake_info = mock.Mock(siblings=[fake_sibling_a, fake_sibling_b])
+        with mock.patch.object(modelctl.api, "model_info", return_value=fake_info):
+            sizes = modelctl._repo_file_sizes("some/repo")
+        self.assertEqual(sizes, {"model-Q4_K_M.gguf": 1000, "mmproj-F16.gguf": 500})
+
+    def test_returns_empty_dict_on_api_failure(self):
+        with mock.patch.object(modelctl.api, "model_info", side_effect=Exception("network error")):
+            self.assertEqual(modelctl._repo_file_sizes("some/repo"), {})
+
+    def test_skips_siblings_with_no_size(self):
+        fake_sibling = mock.Mock(rfilename="README.md", size=None)
+        fake_info = mock.Mock(siblings=[fake_sibling])
+        with mock.patch.object(modelctl.api, "model_info", return_value=fake_info):
+            self.assertEqual(modelctl._repo_file_sizes("some/repo"), {})
+
+
+class TestGroupFiles(unittest.TestCase):
+    def test_strips_directory_prefix_from_label(self):
+        """unsloth/Qwen3.5-35B-A3B-GGUF ships a BF16/ subfolder -- the label
+        must not leak that path component, since it's used both for display
+        and as the stored profile 'file' field."""
+        groups = modelctl.group_files(["BF16/Qwen3.5-35B-A3B-BF16.gguf"])
+        self.assertEqual(groups[0]["label"], "Qwen3.5-35B-A3B-BF16")
+
+    def test_sharded_files_in_subfolder_also_strip_prefix(self):
+        groups = modelctl.group_files([
+            "BF16/model-00001-of-00002.gguf",
+            "BF16/model-00002-of-00002.gguf",
+        ])
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["label"], "model")
+
+    def test_flat_files_unaffected(self):
+        groups = modelctl.group_files(["model-Q4_K_M.gguf"])
+        self.assertEqual(groups[0]["label"], "model-Q4_K_M")
+
+
+class TestGetRepoContents(unittest.TestCase):
+    def test_separates_quants_mmproj_and_mtp_with_sizes(self):
+        files = [
+            "model-Q4_K_M.gguf",
+            "model-Q8_0.gguf",
+            "mmproj-F16.gguf",
+            "model-mtp.gguf",
+        ]
+        sizes = {
+            "model-Q4_K_M.gguf": 1000,
+            "model-Q8_0.gguf": 2000,
+            "mmproj-F16.gguf": 500,
+            "model-mtp.gguf": 100,
+        }
+        with mock.patch.object(modelctl, "list_gguf_files", return_value=files), \
+             mock.patch.object(modelctl, "_repo_file_sizes", return_value=sizes):
+            contents = modelctl.get_repo_contents("some/repo")
+
+        quant_labels = {g["label"] for g in contents["quant_groups"]}
+        self.assertEqual(quant_labels, {"model-Q4_K_M", "model-Q8_0"})
+        self.assertEqual(contents["mmproj_files"], [{"name": "mmproj-F16.gguf", "size": 500}])
+        self.assertEqual(contents["mtp_files"], [{"name": "model-mtp.gguf", "size": 100}])
+
+    def test_quant_group_total_size_sums_all_shards(self):
+        files = [
+            "model-Q4_K_M-00001-of-00002.gguf",
+            "model-Q4_K_M-00002-of-00002.gguf",
+        ]
+        sizes = {
+            "model-Q4_K_M-00001-of-00002.gguf": 1000,
+            "model-Q4_K_M-00002-of-00002.gguf": 1500,
+        }
+        with mock.patch.object(modelctl, "list_gguf_files", return_value=files), \
+             mock.patch.object(modelctl, "_repo_file_sizes", return_value=sizes):
+            contents = modelctl.get_repo_contents("some/repo")
+
+        self.assertEqual(len(contents["quant_groups"]), 1)
+        self.assertEqual(contents["quant_groups"][0]["total_size"], 2500)
+
+    def test_missing_size_data_yields_none_total(self):
+        with mock.patch.object(modelctl, "list_gguf_files", return_value=["model-Q4_K_M.gguf"]), \
+             mock.patch.object(modelctl, "_repo_file_sizes", return_value={}):
+            contents = modelctl.get_repo_contents("some/repo")
+        self.assertIsNone(contents["quant_groups"][0]["total_size"])
+
+
+class TestQuantSuffixes(unittest.TestCase):
+    def test_strips_common_prefix_between_same_family_quants(self):
+        groups = [{"label": "Qwen3.5-35B-A3B-UD-Q4_K_M"}, {"label": "Qwen3.5-35B-A3B-UD-Q8_0"}]
+        self.assertEqual(modelctl._quant_suffixes(groups), ["Q4_K_M", "Q8_0"])
+
+    def test_preserves_ud_as_a_distinguishing_variant(self):
+        """The real case this exists for: Qwen3.5-35B-A3B-GGUF ships both a
+        plain Q4_K_M and an Unsloth-Dynamic UD-Q4_K_M -- these must not
+        collapse to the same displayed label."""
+        groups = [{"label": "Qwen3.5-35B-A3B-Q4_K_M"}, {"label": "Qwen3.5-35B-A3B-UD-Q4_K_M"}]
+        self.assertEqual(modelctl._quant_suffixes(groups), ["Q4_K_M", "UD-Q4_K_M"])
+
+    def test_single_label_uses_strip_quant_from_label(self):
+        groups = [{"label": "Qwen3.5-35B-A3B-Q4_K_M"}]
+        self.assertEqual(modelctl._quant_suffixes(groups), ["Q4_K_M"])
+
+    def test_empty_list(self):
+        self.assertEqual(modelctl._quant_suffixes([]), [])
+
+
+class TestSearchModels(unittest.TestCase):
+    def _fake_hit(self, repo_id, downloads=100, likes=5, tags=None):
+        return mock.Mock(id=repo_id, downloads=downloads, likes=likes, tags=tags or ["gguf"])
+
+    def test_basic_search_returns_plain_results_without_contents_by_default_disabled(self):
+        hits = [self._fake_hit("unsloth/model-a-GGUF")]
+        with mock.patch.object(modelctl.api, "list_models", return_value=hits):
+            results = modelctl.search_models("model", enrich=False)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["repo_id"], "unsloth/model-a-GGUF")
+        self.assertIsNone(results[0]["contents"])
+
+    def test_enrich_true_populates_contents(self):
+        hits = [self._fake_hit("unsloth/model-a-GGUF")]
+        fake_contents = {"quant_groups": [], "mmproj_files": [], "mtp_files": []}
+        with mock.patch.object(modelctl.api, "list_models", return_value=hits), \
+             mock.patch.object(modelctl, "get_repo_contents", return_value=fake_contents):
+            results = modelctl.search_models("model", enrich=True)
+        self.assertEqual(results[0]["contents"], fake_contents)
+
+    def test_mtp_tag_filters_out_non_mtp_repos(self):
+        hits = [
+            self._fake_hit("unsloth/model-a-GGUF"),
+            self._fake_hit("unsloth/model-a-MTP-GGUF"),
+        ]
+        with mock.patch.object(modelctl.api, "list_models", return_value=hits):
+            results = modelctl.search_models("model", tags=["mtp"], enrich=False)
+        self.assertEqual([r["repo_id"] for r in results], ["unsloth/model-a-MTP-GGUF"])
+
+    def test_size_filter_keeps_only_repos_with_a_quant_in_range(self):
+        hits = [
+            self._fake_hit("repo/small"),
+            self._fake_hit("repo/big"),
+        ]
+        small_contents = {"quant_groups": [{"label": "x", "total_size": 2 * 1024**3}]}
+        big_contents = {"quant_groups": [{"label": "x", "total_size": 20 * 1024**3}]}
+
+        def fake_get_contents(repo_id):
+            return small_contents if repo_id == "repo/small" else big_contents
+
+        with mock.patch.object(modelctl.api, "list_models", return_value=hits), \
+             mock.patch.object(modelctl, "get_repo_contents", side_effect=fake_get_contents):
+            results = modelctl.search_models("x", min_gb=15, max_gb=25)
+
+        self.assertEqual([r["repo_id"] for r in results], ["repo/big"])
+
+
 class TestDownloadIfNeeded(unittest.TestCase):
     """Regression coverage for the cross-repo filename collision: two
     different HF repos can both ship a file named e.g. 'mmproj-F16.gguf'.
