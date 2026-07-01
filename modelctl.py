@@ -221,6 +221,98 @@ def get_router_base_url(swap_base_url: str = None) -> str:
     return swap_base_url  # fallback: couldn't parse, reuse the same URL
 
 
+def router_root_url() -> str:
+    """Router base URL without the /v1 suffix. get_router_base_url() returns
+    the OpenAI-compatible base (.../v1/) that Hermes and friends talk to, but
+    the router's own control endpoints (/v1/models is the exception -- /models/
+    load, /models/unload) live at the router's root, not under /v1."""
+    v1_url = get_router_base_url()
+    root = re.sub(r"v1/?$", "", v1_url)
+    if not root.endswith("/"):
+        root += "/"
+    return root
+
+
+def router_status() -> list:
+    """Query the router-mode llama-server's live /v1/models endpoint and
+    merge in each profile's static GPU placement (device, or split-mode +
+    tensor-split) so 'what's loaded, and on which GPU(s)' is one call. Pure
+    data, no printing -- same reasoning as search_models(): keep this usable
+    by a future TUI without dragging a CLI-shaped API along with it.
+
+    Raises RuntimeError if the router can't be reached at all (unlike the
+    HF-lookup helpers, there's no sane empty-result fallback here -- "the
+    router is down" is worth surfacing distinctly from "it's up with no
+    models registered")."""
+    url = router_root_url().rstrip("/") + "/v1/models"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            data = json.loads(r.read())
+    except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+        raise RuntimeError(f"couldn't reach router at {url}: {e}")
+
+    gpu_by_name = {}
+    for p in sorted(PROFILES_DIR.glob("*.json")):
+        profile = json.loads(p.read_text())
+        cfg = profile.get("config", {})
+        if cfg.get("split_mode") and cfg.get("tensor_split"):
+            gpu_by_name[profile["name"]] = f"split {cfg['tensor_split']} ({cfg['split_mode']})"
+        elif cfg.get("device"):
+            gpu_by_name[profile["name"]] = cfg["device"]
+
+    rows = []
+    for m in data.get("data", []):
+        status = m.get("status", {})
+        rows.append({
+            "name": m["id"],
+            "status": status.get("value", "unknown"),
+            "failed": bool(status.get("failed")),
+            "exit_code": status.get("exit_code"),
+            "gpu": gpu_by_name.get(m["id"], "?"),
+            # "preset" = one of modelctl's own profiles; "cache" = something
+            # the router picked up on its own (e.g. a prior --hf-repo pull),
+            # not something modelctl manages.
+            "from_preset": m.get("source") == "preset",
+        })
+    return rows
+
+
+def _router_models_action(action: str, name: str, timeout: int = 120):
+    """POST to the router's /models/load or /models/unload, per
+    tools/server/README.md's router-mode API. Returns (ok, message) instead
+    of raising, so cmd_router_load/unload can print and set an exit code
+    without a try/except of their own -- same pattern as preflight()."""
+    url = router_root_url().rstrip("/") + f"/models/{action}"
+    body = json.dumps({"model": name}).encode()
+    req = urllib.request.Request(
+        url, data=body, headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            resp = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")
+        return False, f"router returned HTTP {e.code} for {action} '{name}': {detail}"
+    except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+        return False, f"couldn't reach router at {url}: {e}"
+    if resp.get("success"):
+        return True, f"{action} requested for '{name}'."
+    return False, f"router responded without success for {action} '{name}': {resp}"
+
+
+def router_load(name: str, timeout: int = 300):
+    """Load a model now instead of waiting for the first request to trigger
+    it. Loading a large model can take a while, hence the generous default
+    timeout (vs. unload's, which should be near-instant)."""
+    return _router_models_action("load", name, timeout=timeout)
+
+
+def router_unload(name: str, timeout: int = 30):
+    """Unload a model to free its GPU memory immediately, rather than
+    waiting for --models-max's LRU eviction to decide for you."""
+    return _router_models_action("unload", name, timeout=timeout)
+
+
 def sync_hermes_custom_providers(dry_run: bool = False):
     """Rebuild Hermes' provider entries from all saved modelctl profiles, for
     BOTH the llama-swap and router-mode endpoints.
@@ -1526,6 +1618,41 @@ def cmd_test(args):
             proc.kill()
 
 
+def cmd_router_status(args):
+    try:
+        rows = router_status()
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    if not rows:
+        print("No models registered with the router.")
+        return
+
+    print(f"{'MODEL':<32} {'STATUS':<10} {'GPU':<22} NOTES")
+    for r in rows:
+        notes = ""
+        if r["failed"]:
+            notes = f"FAILED (exit {r['exit_code']})"
+        elif not r["from_preset"]:
+            notes = "(not a modelctl profile)"
+        print(f"{r['name']:<32} {r['status']:<10} {r['gpu']:<22} {notes}")
+
+
+def cmd_router_load(args):
+    ok, msg = router_load(args.name)
+    print(msg)
+    if not ok:
+        sys.exit(1)
+
+
+def cmd_router_unload(args):
+    ok, msg = router_unload(args.name)
+    print(msg)
+    if not ok:
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="modelctl")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1586,6 +1713,20 @@ def main():
     p_test.add_argument("name")
     p_test.add_argument("--timeout", type=int, default=300, help="seconds to wait for health (default 300)")
     p_test.set_defaults(func=cmd_test)
+
+    p_router = sub.add_parser("router", help="manage the router-mode llama-server (status, load/unload)")
+    router_sub = p_router.add_subparsers(dest="router_command", required=True)
+
+    p_router_status = router_sub.add_parser("status", help="show loaded/unloaded models and GPU placement")
+    p_router_status.set_defaults(func=cmd_router_status)
+
+    p_router_load = router_sub.add_parser("load", help="load a model now instead of waiting for a request")
+    p_router_load.add_argument("name")
+    p_router_load.set_defaults(func=cmd_router_load)
+
+    p_router_unload = router_sub.add_parser("unload", help="unload a model now to free its GPU memory")
+    p_router_unload.add_argument("name")
+    p_router_unload.set_defaults(func=cmd_router_unload)
 
     args = parser.parse_args()
     try:

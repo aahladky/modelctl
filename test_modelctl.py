@@ -1,3 +1,4 @@
+import io
 import json
 import unittest
 from pathlib import Path
@@ -21,6 +22,118 @@ class TestGetRouterBaseUrl(unittest.TestCase):
                 modelctl.get_router_base_url("http://192.168.0.184:7070/v1/"),
                 "http://elsewhere:9000/v1/",
             )
+
+
+class TestRouterRootUrl(unittest.TestCase):
+    def test_strips_v1_suffix_with_trailing_slash(self):
+        with mock.patch.object(modelctl, "get_router_base_url", return_value="http://host:7071/v1/"):
+            self.assertEqual(modelctl.router_root_url(), "http://host:7071/")
+
+    def test_strips_v1_suffix_without_trailing_slash(self):
+        with mock.patch.object(modelctl, "get_router_base_url", return_value="http://host:7071/v1"):
+            self.assertEqual(modelctl.router_root_url(), "http://host:7071/")
+
+    def test_leaves_non_v1_base_url_alone(self):
+        # A custom MODELCTL_ROUTER_BASE_URL override might not use /v1 at all.
+        with mock.patch.object(modelctl, "get_router_base_url", return_value="http://host:9000/"):
+            self.assertEqual(modelctl.router_root_url(), "http://host:9000/")
+
+
+class TestRouterStatus(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.profiles_dir = Path(self.tmp.name) / "profiles"
+        self.profiles_dir.mkdir()
+        (self.profiles_dir / "qwen.json").write_text(json.dumps({
+            "name": "qwen",
+            "config": {"split_mode": "layer", "tensor_split": "3.5,1"},
+        }))
+        (self.profiles_dir / "gemma.json").write_text(json.dumps({
+            "name": "gemma",
+            "config": {"device": "SYCL0"},
+        }))
+
+    @staticmethod
+    def _fake_response(payload):
+        cm = mock.MagicMock()
+        cm.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+        return cm
+
+    def test_merges_live_status_with_profile_gpu_placement(self):
+        payload = {"data": [
+            {"id": "qwen", "status": {"value": "loaded"}, "source": "preset"},
+            {"id": "gemma", "status": {"value": "unloaded"}, "source": "preset"},
+            {"id": "unsloth/bge-small-en-v1.5-GGUF:F16", "status": {"value": "unloaded"}, "source": "cache"},
+        ]}
+        with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
+             mock.patch.object(modelctl, "router_root_url", return_value="http://host:7071/"), \
+             mock.patch("modelctl.urllib.request.urlopen", return_value=self._fake_response(payload)):
+            rows = modelctl.router_status()
+        by_name = {r["name"]: r for r in rows}
+        self.assertEqual(by_name["qwen"]["status"], "loaded")
+        self.assertEqual(by_name["qwen"]["gpu"], "split 3.5,1 (layer)")
+        self.assertEqual(by_name["gemma"]["gpu"], "SYCL0")
+        self.assertFalse(by_name["unsloth/bge-small-en-v1.5-GGUF:F16"]["from_preset"])
+
+    def test_flags_failed_models(self):
+        payload = {"data": [
+            {"id": "gemma", "status": {"value": "unloaded", "failed": True, "exit_code": 1}, "source": "preset"},
+        ]}
+        with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
+             mock.patch.object(modelctl, "router_root_url", return_value="http://host:7071/"), \
+             mock.patch("modelctl.urllib.request.urlopen", return_value=self._fake_response(payload)):
+            rows = modelctl.router_status()
+        self.assertTrue(rows[0]["failed"])
+        self.assertEqual(rows[0]["exit_code"], 1)
+
+    def test_raises_runtimeerror_when_router_unreachable(self):
+        with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
+             mock.patch.object(modelctl, "router_root_url", return_value="http://host:7071/"), \
+             mock.patch("modelctl.urllib.request.urlopen", side_effect=OSError("refused")):
+            with self.assertRaises(RuntimeError):
+                modelctl.router_status()
+
+
+class TestRouterLoadUnload(unittest.TestCase):
+    @staticmethod
+    def _success_response():
+        cm = mock.MagicMock()
+        cm.__enter__.return_value.read.return_value = json.dumps({"success": True}).encode()
+        return cm
+
+    def test_load_success(self):
+        with mock.patch.object(modelctl, "router_root_url", return_value="http://host:7071/"), \
+             mock.patch("modelctl.urllib.request.urlopen", return_value=self._success_response()) as mock_open:
+            ok, msg = modelctl.router_load("qwen")
+        self.assertTrue(ok)
+        req = mock_open.call_args[0][0]
+        self.assertEqual(req.full_url, "http://host:7071/models/load")
+
+    def test_unload_success(self):
+        with mock.patch.object(modelctl, "router_root_url", return_value="http://host:7071/"), \
+             mock.patch("modelctl.urllib.request.urlopen", return_value=self._success_response()) as mock_open:
+            ok, msg = modelctl.router_unload("qwen")
+        self.assertTrue(ok)
+        req = mock_open.call_args[0][0]
+        self.assertEqual(req.full_url, "http://host:7071/models/unload")
+
+    def test_load_failure_http_error(self):
+        err = modelctl.urllib.error.HTTPError(
+            url="http://host:7071/models/load", code=400, msg="bad request", hdrs=None,
+            fp=io.BytesIO(b'{"error":"model not found"}'),
+        )
+        with mock.patch.object(modelctl, "router_root_url", return_value="http://host:7071/"), \
+             mock.patch("modelctl.urllib.request.urlopen", side_effect=err):
+            ok, msg = modelctl.router_load("nope")
+        self.assertFalse(ok)
+        self.assertIn("model not found", msg)
+
+    def test_unload_failure_connection_error(self):
+        with mock.patch.object(modelctl, "router_root_url", return_value="http://host:7071/"), \
+             mock.patch("modelctl.urllib.request.urlopen", side_effect=OSError("refused")):
+            ok, msg = modelctl.router_unload("qwen")
+        self.assertFalse(ok)
 
 
 class TestSyncHermesCustomProviders(unittest.TestCase):
