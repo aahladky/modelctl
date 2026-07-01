@@ -382,7 +382,7 @@ class TestPullWizardAppBoots(unittest.IsolatedAsyncioTestCase):
     async def test_app_starts_on_search_screen(self):
         app = PullWizardApp()
         async with app.run_test() as pilot:
-            self.assertEqual(app.screen.name, "search")
+            self.assertEqual(app.screen.STEP, "search")
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -417,7 +417,7 @@ class StepIndicator(Static):
 
 class SearchScreen(Screen):
     """Placeholder for Task 4."""
-    name = "search"
+    STEP = "search"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="search")
@@ -433,7 +433,7 @@ class PullWizardApp(App):
         self.push_screen(SearchScreen())
 ```
 
-Note: `app.screen.name` in the test reads the `Screen.name` class attribute set on `SearchScreen` — Textual screens support a `name` for exactly this kind of lookup/testing.
+Note: this originally used a `name = "search"` class attribute and `app.screen.STEP` for lookup, but Task 3's code review caught that this shadows Textual's built-in read-only `DOMNode.name` property (backed by `self._name`) rather than setting it properly — harmless until something touches `.name` expecting the real property, but a footgun about to be copied into 6 more screens. Fixed to use a distinct `STEP` class attribute instead (see Task 3's actual commit `b4b3a7f`, "Fix name-property shadowing and weak StepIndicator test"). Every `name = "<step>"` / `app.screen.STEP` reference in the remaining tasks below should read `STEP = "<step>"` / `app.screen.STEP` instead — the plan text wasn't fully swept for this after the fix landed, so treat `STEP` as the correct attribute throughout, not `name`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -500,7 +500,7 @@ class TestSearchScreen(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertEqual(app.state.repo_id, "unsloth/Qwen3.5-35B-A3B-GGUF")
                 self.assertEqual(app.state.repo_contents, fake_results[0]["contents"])
-                self.assertEqual(app.screen.name, "quant")
+                self.assertEqual(app.screen.STEP, "quant")
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -520,7 +520,7 @@ import modelctl
 
 
 class SearchScreen(Screen):
-    name = "search"
+    STEP = "search"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="search")
@@ -553,7 +553,7 @@ Add a registry mapping step names to screen classes near the bottom of the scree
 ```python
 class QuantPickScreen(Screen):
     """Placeholder for Task 5."""
-    name = "quant"
+    STEP = "quant"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="quant")
@@ -629,7 +629,7 @@ class TestQuantPickScreen(unittest.IsolatedAsyncioTestCase):
             await pilot.click("ListItem")
             await pilot.pause()
             self.assertEqual(app.state.quant_group["label"], "Q4_K_M")
-            self.assertEqual(app.screen.name, "configure")
+            self.assertEqual(app.screen.STEP, "configure")
 
     async def test_picking_quant_with_mmproj_goes_to_vision_mtp(self):
         app = PullWizardApp()
@@ -639,7 +639,7 @@ class TestQuantPickScreen(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             await pilot.click("ListItem")
             await pilot.pause()
-            self.assertEqual(app.screen.name, "vision_mtp")
+            self.assertEqual(app.screen.STEP, "vision_mtp")
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -653,7 +653,7 @@ Replace the placeholder `QuantPickScreen` in `modelctl_tui.py`:
 
 ```python
 class QuantPickScreen(Screen):
-    name = "quant"
+    STEP = "quant"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="quant")
@@ -676,7 +676,7 @@ class QuantPickScreen(Screen):
 
 class VisionMtpScreen(Screen):
     """Placeholder for Task 6."""
-    name = "vision_mtp"
+    STEP = "vision_mtp"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="vision_mtp")
@@ -684,7 +684,7 @@ class VisionMtpScreen(Screen):
 
 class ConfigureScreen(Screen):
     """Placeholder for Task 7."""
-    name = "configure"
+    STEP = "configure"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="configure")
@@ -760,7 +760,7 @@ class TestVisionMtpScreen(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(app.state.mmproj_choice["name"], "mmproj-F16.gguf")
             self.assertIsNone(app.state.mtp_choice)
-            self.assertEqual(app.screen.name, "configure")
+            self.assertEqual(app.screen.STEP, "configure")
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -779,7 +779,7 @@ SKIP_LABEL = "(skip)"
 
 
 class VisionMtpScreen(Screen):
-    name = "vision_mtp"
+    STEP = "vision_mtp"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="vision_mtp")
@@ -883,7 +883,7 @@ class TestConfigureScreen(unittest.IsolatedAsyncioTestCase):
                 await pilot.click("#submit-config")
                 await pilot.pause()
                 self.assertEqual(app.state.config["ctx"], "32768")
-                self.assertEqual(app.screen.name, "name")
+                self.assertEqual(app.screen.STEP, "name")
 
     async def test_preflight_warning_does_not_block_submit(self):
         fake_defaults = {
@@ -904,7 +904,7 @@ class TestConfigureScreen(unittest.IsolatedAsyncioTestCase):
                 await pilot.click("#submit-config")
                 await pilot.pause()
                 self.assertIn("ERROR: llama-server not found", app.state.warnings)
-                self.assertEqual(app.screen.name, "name")
+                self.assertEqual(app.screen.STEP, "name")
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -918,7 +918,7 @@ Replace the placeholder `ConfigureScreen` in `modelctl_tui.py`:
 
 ```python
 class ConfigureScreen(Screen):
-    name = "configure"
+    STEP = "configure"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="configure")
@@ -980,7 +980,7 @@ class ConfigureScreen(Screen):
 
 class NameScreen(Screen):
     """Placeholder for Task 8."""
-    name = "name"
+    STEP = "name"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="name")
@@ -1057,7 +1057,7 @@ class TestNameScreen(unittest.IsolatedAsyncioTestCase):
                 await pilot.click("#submit-name")
                 await pilot.pause()
                 self.assertEqual(app.state.profile_name, "model")
-                self.assertEqual(app.screen.name, "download")
+                self.assertEqual(app.screen.STEP, "download")
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1071,7 +1071,7 @@ Replace the placeholder `NameScreen` in `modelctl_tui.py`:
 
 ```python
 class NameScreen(Screen):
-    name = "name"
+    STEP = "name"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="name")
@@ -1095,7 +1095,7 @@ class NameScreen(Screen):
 
 class DownloadScreen(Screen):
     """Placeholder for Task 9."""
-    name = "download"
+    STEP = "download"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="download")
@@ -1161,7 +1161,7 @@ class TestDownloadScreen(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()  # let the worker complete
                 mock_dl.assert_called_once_with("repo/x", "model-Q4_K_M.gguf", modelctl.Path("/models"))
                 self.assertEqual(app.state.__dict__.get("model_path"), "/models/model-Q4_K_M.gguf")
-                self.assertEqual(app.screen.name, "summary")
+                self.assertEqual(app.screen.STEP, "summary")
 
     async def test_download_failure_shows_retry_and_does_not_advance(self):
         app = PullWizardApp()
@@ -1175,7 +1175,7 @@ class TestDownloadScreen(unittest.IsolatedAsyncioTestCase):
                 await app.push_screen(DownloadScreen())
                 await pilot.pause()
                 await pilot.pause()
-                self.assertEqual(app.screen.name, "download")
+                self.assertEqual(app.screen.STEP, "download")
                 retry_button = app.screen.query_one("#retry-download", Button)
                 self.assertFalse(retry_button.disabled)
 ```
@@ -1196,7 +1196,7 @@ from textual import work
 
 
 class DownloadScreen(Screen):
-    name = "download"
+    STEP = "download"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="download")
@@ -1247,7 +1247,7 @@ class DownloadScreen(Screen):
 
 class SummaryScreen(Screen):
     """Placeholder for Task 10."""
-    name = "summary"
+    STEP = "summary"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="summary")
@@ -1372,7 +1372,7 @@ Replace the placeholder `SummaryScreen` in `modelctl_tui.py`:
 
 ```python
 class SummaryScreen(Screen):
-    name = "summary"
+    STEP = "summary"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="summary")
@@ -1471,17 +1471,17 @@ class TestFullWizardFlow(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 await pilot.click("ListItem")
                 await pilot.pause()
-                self.assertEqual(app.screen.name, "quant")
+                self.assertEqual(app.screen.STEP, "quant")
 
                 # quant -> configure (skips vision_mtp)
                 await pilot.click("ListItem")
                 await pilot.pause()
-                self.assertEqual(app.screen.name, "configure")
+                self.assertEqual(app.screen.STEP, "configure")
 
                 # configure -> name
                 await pilot.click("#submit-config")
                 await pilot.pause()
-                self.assertEqual(app.screen.name, "name")
+                self.assertEqual(app.screen.STEP, "name")
 
                 # name -> download
                 await pilot.click("#submit-name")
@@ -1490,7 +1490,7 @@ class TestFullWizardFlow(unittest.IsolatedAsyncioTestCase):
                 # download -> summary (worker runs in background)
                 await pilot.pause()
                 await pilot.pause()
-                self.assertEqual(app.screen.name, "summary")
+                self.assertEqual(app.screen.STEP, "summary")
 
                 mock_save.assert_called_once()
                 saved_profile = mock_save.call_args[0][0]
