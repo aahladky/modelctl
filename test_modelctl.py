@@ -439,7 +439,8 @@ class TestSyncRouterPreset(unittest.TestCase):
     def test_writes_all_profile_sections(self):
         with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
              mock.patch.object(modelctl, "ROUTER_PRESET_PATH", self.router_path), \
-             mock.patch.object(modelctl, "preflight", return_value=(True, "llama-server", {}, [])):
+             mock.patch.object(modelctl, "preflight", return_value=(True, "llama-server", {}, [])), \
+             mock.patch.object(modelctl, "restart_router_service"):
             modelctl.sync_router_preset()
 
         content = self.router_path.read_text()
@@ -450,13 +451,68 @@ class TestSyncRouterPreset(unittest.TestCase):
 
         with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
              mock.patch.object(modelctl, "ROUTER_PRESET_PATH", self.router_path), \
-             mock.patch.object(modelctl, "preflight", return_value=(True, "llama-server", {}, [])):
+             mock.patch.object(modelctl, "preflight", return_value=(True, "llama-server", {}, [])), \
+             mock.patch.object(modelctl, "restart_router_service"):
             modelctl.sync_router_preset()
 
         backup_path = self.router_path.with_suffix(self.router_path.suffix + ".bak")
         self.assertTrue(backup_path.exists())
         self.assertEqual(backup_path.read_text(), "[stale-old-content]\n")
         self.assertIn("[Qwythos-9B-Q4]", self.router_path.read_text())
+
+    def test_restarts_router_service_when_preset_changes(self):
+        """Router mode has no --watch-config hot-reload, so a preset rewrite
+        is a no-op until something restarts the process. That restart should
+        happen automatically -- the whole point is one less manual step."""
+        with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
+             mock.patch.object(modelctl, "ROUTER_PRESET_PATH", self.router_path), \
+             mock.patch.object(modelctl, "preflight", return_value=(True, "llama-server", {}, [])), \
+             mock.patch.object(modelctl, "restart_router_service") as mock_restart:
+            modelctl.sync_router_preset()
+        mock_restart.assert_called_once()
+
+    def test_does_not_restart_when_preset_unchanged(self):
+        with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
+             mock.patch.object(modelctl, "ROUTER_PRESET_PATH", self.router_path), \
+             mock.patch.object(modelctl, "preflight", return_value=(True, "llama-server", {}, [])), \
+             mock.patch.object(modelctl, "restart_router_service") as mock_restart:
+            modelctl.sync_router_preset()  # first call writes it
+            mock_restart.reset_mock()
+            modelctl.sync_router_preset()  # second call: no change, no restart
+        mock_restart.assert_not_called()
+
+    def test_restart_false_skips_restart_even_when_changed(self):
+        with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
+             mock.patch.object(modelctl, "ROUTER_PRESET_PATH", self.router_path), \
+             mock.patch.object(modelctl, "preflight", return_value=(True, "llama-server", {}, [])), \
+             mock.patch.object(modelctl, "restart_router_service") as mock_restart:
+            modelctl.sync_router_preset(restart=False)
+        mock_restart.assert_not_called()
+
+
+class TestRestartRouterService(unittest.TestCase):
+    def test_returns_true_on_successful_restart(self):
+        fake_result = mock.Mock(returncode=0, stderr="")
+        with mock.patch.object(modelctl.subprocess, "run", return_value=fake_result) as mock_run:
+            self.assertTrue(modelctl.restart_router_service())
+        mock_run.assert_called_once_with(
+            ["systemctl", "--user", "restart", modelctl.ROUTER_SERVICE_NAME],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    def test_returns_false_when_systemctl_exits_nonzero(self):
+        fake_result = mock.Mock(returncode=1, stderr="Unit llama-router.service not found.")
+        with mock.patch.object(modelctl.subprocess, "run", return_value=fake_result):
+            self.assertFalse(modelctl.restart_router_service())
+
+    def test_returns_false_when_systemctl_missing(self):
+        with mock.patch.object(modelctl.subprocess, "run", side_effect=FileNotFoundError()):
+            self.assertFalse(modelctl.restart_router_service())
+
+    def test_returns_false_on_timeout(self):
+        with mock.patch.object(modelctl.subprocess, "run",
+                                side_effect=modelctl.subprocess.TimeoutExpired(cmd="systemctl", timeout=30)):
+            self.assertFalse(modelctl.restart_router_service())
 
 
 class TestRepoFileSizes(unittest.TestCase):

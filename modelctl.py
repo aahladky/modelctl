@@ -41,6 +41,11 @@ ROUTER_PRESET_PATH = Path(os.environ.get("MODELCTL_ROUTER_PRESET", Path.home() /
 # Not consumed by modelctl itself -- read by the operator when launching the router
 # process by hand, e.g. `llama-server --port $MODELCTL_ROUTER_PORT --models-preset ...`.
 ROUTER_PORT = os.environ.get("MODELCTL_ROUTER_PORT", "7071")
+# The systemd --user unit running the router-mode llama-server. sync_router_preset()
+# restarts this after writing a changed preset, since router mode has no
+# --watch-config hot-reload -- without a restart, an updated preset just sits there
+# unused until someone notices and restarts the process by hand.
+ROUTER_SERVICE_NAME = os.environ.get("MODELCTL_ROUTER_SERVICE", "llama-router.service")
 
 # Hermes Agent integration: modelctl can keep Hermes' custom_providers list
 # in sync with saved profiles so pulled models show up in `hermes model`.
@@ -940,7 +945,7 @@ def cmd_pull(args):
         generate_artifacts(profile)
         print(f"-> saved profile '{name}'")
 
-    sync_all_backends()
+    sync_all_backends(restart_router=not args.no_router_restart)
     if not args.no_hermes:
         sync_hermes_custom_providers()
     print(f"\nDone. {len(chosen_groups)} profile(s) created and pushed to {LLAMA_SWAP_CONFIG}.")
@@ -1245,10 +1250,49 @@ def sync_llama_swap_config():
     _sync_hermes_context_cache(profiles)
 
 
-def sync_router_preset():
+def restart_router_service() -> bool:
+    """Restart the systemd --user unit running the router-mode llama-server
+    so a rewritten router.preset.ini actually takes effect. Router mode has
+    no --watch-config hot-reload (unlike llama-swap) -- the process only
+    reads the preset file at startup, so without this the preset silently
+    goes stale until someone notices and restarts it by hand (which is
+    exactly what happened here: qwen models sat in the preset for hours
+    while the router kept serving its startup-time list).
+
+    Best-effort: prints a warning and returns False rather than raising if
+    systemctl or the unit isn't available, so `sync` still succeeds for
+    anyone running the router some other way (or not running it locally
+    at all)."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "restart", ROUTER_SERVICE_NAME],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"WARNING: couldn't restart {ROUTER_SERVICE_NAME}: {e}. Router preset was "
+              f"updated but the running router process wasn't reloaded -- restart it "
+              f"yourself, e.g. `systemctl --user restart {ROUTER_SERVICE_NAME}`.", file=sys.stderr)
+        return False
+    if result.returncode != 0:
+        print(f"WARNING: `systemctl --user restart {ROUTER_SERVICE_NAME}` failed "
+              f"(exit {result.returncode}): {result.stderr.strip()}. Router preset was updated "
+              f"but the running router process wasn't reloaded.", file=sys.stderr)
+        return False
+    print(f"Restarted {ROUTER_SERVICE_NAME} to pick up the updated preset.")
+    return True
+
+
+def sync_router_preset(restart: bool = True):
     """Rebuild router.preset.ini from every saved profile. Mirrors
     sync_llama_swap_config's change-detection-before-write guard so it
-    doesn't force an unnecessary router reload."""
+    doesn't force an unnecessary router reload.
+
+    restart: when True (the default), automatically restart the router's
+    systemd --user unit after actually writing a changed preset, since
+    router mode requires a restart to pick one up. Pass restart=False if
+    you're not running the router as a systemd unit, or want to batch
+    multiple syncs before reloading once yourself.
+    """
     ROUTER_PRESET_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     profiles = sorted(PROFILES_DIR.glob("*.json"))
@@ -1282,12 +1326,15 @@ def sync_router_preset():
     if any_unresolved:
         print("\nNOTE: at least one profile above couldn't be fully resolved for router mode.")
 
+    if restart:
+        restart_router_service()
 
-def sync_all_backends():
+
+def sync_all_backends(restart_router: bool = True):
     """Regenerate every backend's config from the current profiles.
     Single place to extend if a third backend is ever added."""
     sync_llama_swap_config()
-    sync_router_preset()
+    sync_router_preset(restart=restart_router)
 
 
 def _sync_hermes_context_cache(profiles):
@@ -1328,7 +1375,7 @@ def cmd_defaults(args):
 
 
 def cmd_sync(args):
-    sync_all_backends()
+    sync_all_backends(restart_router=not args.no_router_restart)
     if not args.no_hermes:
         sync_hermes_custom_providers(dry_run=args.hermes_dry_run)
     n = len(list(PROFILES_DIR.glob("*.json")))
@@ -1358,7 +1405,7 @@ def cmd_edit(args):
     warn_if_env_empty(profile["env"])
     save_profile(profile)
     generate_artifacts(profile)
-    sync_all_backends()
+    sync_all_backends(restart_router=not args.no_router_restart)
     if not args.no_hermes:
         sync_hermes_custom_providers()
     print("Updated, regenerated artifacts, and pushed to llama-swap config.")
@@ -1367,7 +1414,7 @@ def cmd_edit(args):
 def cmd_regen(args):
     profile = load_profile(args.name)
     generate_artifacts(profile)
-    sync_all_backends()
+    sync_all_backends(restart_router=not args.no_router_restart)
     if not args.no_hermes:
         sync_hermes_custom_providers()
     print(f"Regenerated artifacts in {profile['artifacts_dir']} and pushed to llama-swap config.")
@@ -1499,6 +1546,8 @@ def main():
     p_pull = sub.add_parser("pull", help="pull a model from a HF repo and configure it")
     p_pull.add_argument("repo_id")
     p_pull.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
+    p_pull.add_argument("--no-router-restart", action="store_true",
+                         help="don't restart the router-mode systemd service after updating its preset")
     p_pull.set_defaults(func=cmd_pull)
 
     p_list = sub.add_parser("list", help="list saved profiles")
@@ -1511,16 +1560,22 @@ def main():
     p_edit = sub.add_parser("edit", help="re-prompt config for a saved profile")
     p_edit.add_argument("name")
     p_edit.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
+    p_edit.add_argument("--no-router-restart", action="store_true",
+                         help="don't restart the router-mode systemd service after updating its preset")
     p_edit.set_defaults(func=cmd_edit)
 
     p_regen = sub.add_parser("regen", help="regenerate artifacts from a saved profile")
     p_regen.add_argument("name")
     p_regen.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
+    p_regen.add_argument("--no-router-restart", action="store_true",
+                          help="don't restart the router-mode systemd service after updating its preset")
     p_regen.set_defaults(func=cmd_regen)
 
     p_sync = sub.add_parser("sync", help="push all profiles into the live llama-swap config.yaml")
     p_sync.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
     p_sync.add_argument("--hermes-dry-run", action="store_true", help="show what Hermes config would change")
+    p_sync.add_argument("--no-router-restart", action="store_true",
+                         help="don't restart the router-mode systemd service after updating its preset")
     p_sync.set_defaults(func=cmd_sync)
 
     p_defaults = sub.add_parser("defaults", help="configure default runtime settings for new profiles")
