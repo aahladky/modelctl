@@ -66,6 +66,43 @@ class TestBuildServerArgs(unittest.TestCase):
         self.assertIn("--parallel", args)
         self.assertEqual(args[args.index("--parallel") + 1], "1")
 
+    def test_mtp_on_adds_spec_type_draft_mtp(self):
+        profile = {
+            "model_path": "/home/aaron/models/test.gguf",
+            "mmproj_path": None,
+            "config": {
+                "flash_attn": "auto",
+                "ctx": "64000",
+                "split_mode": "layer",
+                "tensor_split": "4,1",
+                "kv_quant": "q8_0",
+                "ttl": "3600",
+                "extra": "",
+                "mtp": "on",
+            },
+        }
+        args = modelctl.build_server_args(profile)
+        self.assertIn("--spec-type", args)
+        self.assertEqual(args[args.index("--spec-type") + 1], "draft-mtp")
+
+    def test_mtp_off_by_default_omits_spec_type(self):
+        profile = {
+            "model_path": "/home/aaron/models/test.gguf",
+            "mmproj_path": None,
+            "config": {
+                "flash_attn": "auto",
+                "ctx": "64000",
+                "split_mode": "layer",
+                "tensor_split": "4,1",
+                "kv_quant": "q8_0",
+                "ttl": "3600",
+                "extra": "",
+                # no "mtp" key at all -- matches every profile saved before this feature existed
+            },
+        }
+        args = modelctl.build_server_args(profile)
+        self.assertNotIn("--spec-type", args)
+
 
 class TestRenderRouterPreset(unittest.TestCase):
     def test_emits_ini_section_with_device_and_ctx(self):
@@ -109,6 +146,43 @@ class TestRenderRouterPreset(unittest.TestCase):
         }
         text, ok, messages = modelctl.render_router_preset(profile)
         self.assertIn("extra-args = --some-flag value", text)
+
+    def test_mtp_on_emits_spec_type_line(self):
+        profile = {
+            "name": "llama3.2-3b",
+            "model_path": "/home/aaron/models/llama32-3b.gguf",
+            "mmproj_path": None,
+            "config": {
+                "flash_attn": "auto",
+                "ctx": "128000",
+                "split_mode": "layer",
+                "tensor_split": "3,1",
+                "kv_quant": "q8_0",
+                "ttl": "3600",
+                "extra": "",
+                "mtp": "on",
+            },
+        }
+        text, ok, messages = modelctl.render_router_preset(profile)
+        self.assertIn("spec-type = draft-mtp", text)
+
+    def test_mtp_off_by_default_omits_spec_type_line(self):
+        profile = {
+            "name": "llama3.2-3b",
+            "model_path": "/home/aaron/models/llama32-3b.gguf",
+            "mmproj_path": None,
+            "config": {
+                "flash_attn": "auto",
+                "ctx": "128000",
+                "split_mode": "layer",
+                "tensor_split": "3,1",
+                "kv_quant": "q8_0",
+                "ttl": "3600",
+                "extra": "",
+            },
+        }
+        text, ok, messages = modelctl.render_router_preset(profile)
+        self.assertNotIn("spec-type", text)
 
 
 class TestSyncRouterPreset(unittest.TestCase):

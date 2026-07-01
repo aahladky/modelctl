@@ -60,6 +60,12 @@ DEFAULT_TTL = int(os.environ.get("MODELCTL_DEFAULT_TTL", "3600"))
 # Default GPU split strategy: load across both GPUs instead of pinning to one.
 DEFAULT_SPLIT_MODE = os.environ.get("MODELCTL_DEFAULT_SPLIT_MODE", "layer")
 DEFAULT_TENSOR_SPLIT = os.environ.get("MODELCTL_DEFAULT_TENSOR_SPLIT", "3,1")
+# Multi-token prediction (self-speculative decoding via --spec-type draft-mtp).
+# Off by default: it only works if the checkpoint was trained with MTP draft
+# heads AND the specific GGUF conversion preserved them -- not universal, and
+# not something modelctl can detect from the profile alone. Opt in per model
+# once you've confirmed the GGUF actually has them.
+DEFAULT_MTP = os.environ.get("MODELCTL_DEFAULT_MTP", "off")
 
 # Persisted user defaults live next to profiles so they survive re-installs.
 DEFAULTS_PATH = STATE_DIR / "defaults.json"
@@ -98,6 +104,7 @@ def load_defaults() -> dict:
 
         "split_mode": pick("split_mode", DEFAULT_SPLIT_MODE),
         "tensor_split": pick("tensor_split", DEFAULT_TENSOR_SPLIT),
+        "mtp": pick("mtp", DEFAULT_MTP),
     }
 
 
@@ -124,6 +131,8 @@ def prompt_defaults():
     ttl_raw = input(f"llama-swap idle TTL in seconds [{current['ttl']}]: ").strip()
     ttl = int(ttl_raw) if ttl_raw.isdigit() else current["ttl"]
 
+    mtp = input(f"Multi-token prediction, on/off -- only if the GGUF has MTP heads [{current.get('mtp', DEFAULT_MTP)}]: ").strip() or current.get("mtp", DEFAULT_MTP)
+
     defaults = {
         "device": device,
         "split_mode": split_mode,
@@ -132,6 +141,7 @@ def prompt_defaults():
         "kv_quant": kv_quant,
         "flash_attn": flash_attn,
         "ttl": ttl,
+        "mtp": mtp,
     }
     save_defaults(defaults)
     print(f"\nDefaults saved to {DEFAULTS_PATH}")
@@ -714,6 +724,7 @@ def prompt_config(repo_id: str = "", label: str = ""):
 
 
     ttl = prompt_int("llama-swap idle TTL in seconds", d["ttl"])
+    mtp = input(f"Multi-token prediction, on/off -- only if this GGUF has MTP heads [{d.get('mtp', DEFAULT_MTP)}]: ").strip() or d.get("mtp", DEFAULT_MTP)
     extra = input("Any extra llama-server flags (raw string, optional): ").strip()
     return {
         "device": device,
@@ -723,6 +734,7 @@ def prompt_config(repo_id: str = "", label: str = ""):
         "kv_quant": kv_quant,
         "flash_attn": flash_attn,
         "ttl": ttl,
+        "mtp": mtp,
         "extra": extra,
     }
 
@@ -765,6 +777,13 @@ def build_server_args(profile):
         args.extend(["--mmproj", str(profile['mmproj_path'])])
     if cfg.get("kv_quant"):
         args.extend(["--cache-type-k", cfg['kv_quant'], "--cache-type-v", cfg['kv_quant']])
+    # Multi-token prediction: self-speculative decoding using the model's own
+    # MTP draft heads (no separate draft model needed). Only meaningful if the
+    # checkpoint was trained with MTP heads and the GGUF conversion kept them --
+    # opt-in per profile, see DEFAULT_MTP. --spec-draft-n-max etc. default to
+    # sane values (n-max=3); override via the "extra" field if you need to tune them.
+    if cfg.get("mtp", "off").strip().lower() == "on":
+        args.extend(["--spec-type", "draft-mtp"])
     if cfg.get("extra"):
         # Extra is a raw string the user typed; split it safely to preserve
         # quoted values with spaces, but only if they provided it.
@@ -833,6 +852,8 @@ def render_router_preset(profile):
     if cfg.get("kv_quant"):
         lines.append(f"cache-type-k = {cfg['kv_quant']}")
         lines.append(f"cache-type-v = {cfg['kv_quant']}")
+    if cfg.get("mtp", "off").strip().lower() == "on":
+        lines.append("spec-type = draft-mtp")
     if cfg.get("extra"):
         # build_server_args shlex.splits cfg["extra"] into discrete CLI
         # tokens; the INI format has no equivalent structured way to splice
