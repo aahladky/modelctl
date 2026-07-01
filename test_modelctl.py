@@ -7,7 +7,30 @@ from unittest import mock
 import modelctl
 
 
+class TestGetRouterBaseUrl(unittest.TestCase):
+    def test_swaps_port_only_by_default(self):
+        with mock.patch.object(modelctl, "ROUTER_PORT", "7071"):
+            self.assertEqual(
+                modelctl.get_router_base_url("http://192.168.0.184:7070/v1/"),
+                "http://192.168.0.184:7071/v1/",
+            )
+
+    def test_env_override_wins(self):
+        with mock.patch.dict("os.environ", {"MODELCTL_ROUTER_BASE_URL": "http://elsewhere:9000/v1"}):
+            self.assertEqual(
+                modelctl.get_router_base_url("http://192.168.0.184:7070/v1/"),
+                "http://elsewhere:9000/v1/",
+            )
+
+
 class TestSyncHermesCustomProviders(unittest.TestCase):
+    """Covers the current confirmed on-disk Hermes schema: a `providers:`
+    dict keyed by name, each with name/api/models -- not the older
+    `custom_providers:` list this function originally targeted. Hermes has
+    changed this shape at least twice already; these tests read from the
+    live config's actual current structure, not the public docs, since
+    those have proven to lag behind what a running Hermes instance does."""
+
     def setUp(self):
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -21,29 +44,119 @@ class TestSyncHermesCustomProviders(unittest.TestCase):
                 "config": {"ctx": str(ctx)},
             }))
 
-    def test_writes_one_provider_entry_with_nested_models_map(self):
+    def _sync(self, initial_yaml, dry_run=False):
         with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
              mock.patch.object(modelctl, "HERMES_CONFIG", self.hermes_config), \
-             mock.patch.object(modelctl, "get_llama_swap_base_url", return_value="http://192.168.0.184:7070/v1/"):
-            self.hermes_config.write_text("model:\n  default: gemma4-26b\n")
-            modelctl.sync_hermes_custom_providers()
+             mock.patch.object(modelctl, "get_llama_swap_base_url", return_value="http://192.168.0.184:7070/v1/"), \
+             mock.patch.object(modelctl, "ROUTER_PORT", "7071"):
+            self.hermes_config.write_text(initial_yaml)
+            modelctl.sync_hermes_custom_providers(dry_run=dry_run)
+        return modelctl.yaml.safe_load(self.hermes_config.read_text())
 
-        cfg = modelctl.yaml.safe_load(self.hermes_config.read_text())
-        providers = cfg["custom_providers"]
+    def test_syncs_both_swap_and_router_providers(self):
+        cfg = self._sync("model:\n  default: gemma4-26b\n")
+        providers = cfg["providers"]
 
-        self.assertEqual(len(providers), 1)
-        provider = providers[0]
-        self.assertEqual(provider["base_url"], "http://192.168.0.184:7070/v1/")
-        self.assertNotIn("model", provider)
+        expected_models = {
+            "Qwythos-9B-Q4": {"context_length": 64000},
+            "Qwythos-9B-Q5": {"context_length": 64000},
+            "gemma4-26b": {"context_length": 64000},
+        }
+        self.assertIn("local-swap", providers)
+        self.assertIn("local-router", providers)
+        self.assertEqual(providers["local-swap"]["api"], "http://192.168.0.184:7070/v1/")
+        self.assertEqual(providers["local-router"]["api"], "http://192.168.0.184:7071/v1/")
+        self.assertEqual(providers["local-swap"]["models"], expected_models)
+        self.assertEqual(providers["local-router"]["models"], expected_models)
 
-        self.assertEqual(
-            provider["models"],
-            {
-                "Qwythos-9B-Q4": {"context_length": 64000},
-                "Qwythos-9B-Q5": {"context_length": 64000},
-                "gemma4-26b": {"context_length": 64000},
-            },
+    def test_preserves_unrelated_providers_like_compression_cuda(self):
+        initial = (
+            "providers:\n"
+            "  compression-cuda:\n"
+            "    name: compression-cuda\n"
+            "    api: http://192.168.0.157:8090/v1/\n"
+            "    models:\n"
+            "      llama3.2-3b-cuda:\n"
+            "        context_length: 65536\n"
         )
+        cfg = self._sync(initial)
+        self.assertIn("compression-cuda", cfg["providers"])
+        self.assertEqual(
+            cfg["providers"]["compression-cuda"]["models"],
+            {"llama3.2-3b-cuda": {"context_length": 65536}},
+        )
+
+    def test_preserves_extra_fields_on_existing_provider(self):
+        initial = (
+            "providers:\n"
+            "  local-swap:\n"
+            "    name: local-swap\n"
+            "    api: http://192.168.0.184:7070/v1/\n"
+            "    transport: chat_completions\n"
+            "    models: {}\n"
+        )
+        cfg = self._sync(initial)
+        self.assertEqual(cfg["providers"]["local-swap"]["transport"], "chat_completions")
+
+    def test_preserves_extra_per_model_fields(self):
+        initial = (
+            "providers:\n"
+            "  local-swap:\n"
+            "    name: local-swap\n"
+            "    api: http://192.168.0.184:7070/v1/\n"
+            "    models:\n"
+            "      gemma4-26b:\n"
+            "        context_length: 32000\n"
+            "        reasoning_effort: medium\n"
+        )
+        cfg = self._sync(initial)
+        gemma_entry = cfg["providers"]["local-swap"]["models"]["gemma4-26b"]
+        self.assertEqual(gemma_entry["reasoning_effort"], "medium")
+        self.assertEqual(gemma_entry["context_length"], 64000)  # updated from the profile
+
+    def test_removed_profile_drops_out_of_both_providers(self):
+        initial = (
+            "providers:\n"
+            "  local-swap:\n"
+            "    name: local-swap\n"
+            "    api: http://192.168.0.184:7070/v1/\n"
+            "    models:\n"
+            "      some-deleted-model:\n"
+            "        context_length: 8192\n"
+            "  local-router:\n"
+            "    name: local-router\n"
+            "    api: http://192.168.0.184:7071/v1/\n"
+            "    models:\n"
+            "      some-deleted-model:\n"
+            "        context_length: 8192\n"
+        )
+        cfg = self._sync(initial)
+        self.assertNotIn("some-deleted-model", cfg["providers"]["local-swap"]["models"])
+        self.assertNotIn("some-deleted-model", cfg["providers"]["local-router"]["models"])
+
+    def test_migrates_legacy_custom_providers_list_format(self):
+        initial = (
+            "custom_providers:\n"
+            "  - name: LocalLlama\n"
+            "    base_url: http://192.168.0.184:7070/v1/\n"
+            "    models:\n"
+            "      gemma4-26b:\n"
+            "        context_length: 32000\n"
+        )
+        cfg = self._sync(initial)
+        self.assertNotIn("custom_providers", cfg)
+        self.assertIn("LocalLlama", cfg["providers"])
+        self.assertEqual(cfg["providers"]["LocalLlama"]["api"], "http://192.168.0.184:7070/v1/")
+
+    def test_dry_run_does_not_write(self):
+        original = "model:\n  default: gemma4-26b\n"
+        self.hermes_config.write_text(original)
+        with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
+             mock.patch.object(modelctl, "HERMES_CONFIG", self.hermes_config), \
+             mock.patch.object(modelctl, "get_llama_swap_base_url", return_value="http://192.168.0.184:7070/v1/"), \
+             mock.patch.object(modelctl, "ROUTER_PORT", "7071"):
+            modelctl.sync_hermes_custom_providers(dry_run=True)
+        self.assertEqual(self.hermes_config.read_text(), original)
 
 
 class TestBuildServerArgs(unittest.TestCase):
@@ -344,6 +457,64 @@ class TestSyncRouterPreset(unittest.TestCase):
         self.assertTrue(backup_path.exists())
         self.assertEqual(backup_path.read_text(), "[stale-old-content]\n")
         self.assertIn("[Qwythos-9B-Q4]", self.router_path.read_text())
+
+
+class TestDownloadIfNeeded(unittest.TestCase):
+    """Regression coverage for the cross-repo filename collision: two
+    different HF repos can both ship a file named e.g. 'mmproj-F16.gguf'.
+    The old version only checked local filename + nonzero size before
+    skipping the download, so a file left behind by one repo's pull would
+    get silently reused for a completely different repo's model."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dest_dir = Path(self.tmp.name)
+
+    def test_skips_when_local_size_matches_remote(self):
+        target = self.dest_dir / "mmproj-F16.gguf"
+        target.write_bytes(b"x" * 100)
+
+        with mock.patch.object(modelctl, "_remote_file_size", return_value=100), \
+             mock.patch.object(modelctl, "hf_hub_download") as mock_dl:
+            result = modelctl.download_if_needed("repo/a", "mmproj-F16.gguf", self.dest_dir)
+
+        mock_dl.assert_not_called()
+        self.assertEqual(result, str(target))
+
+    def test_redownloads_when_local_size_mismatches_remote(self):
+        """The actual bug this fixes: repo/a's file is sitting there, but
+        repo/b (a different repo, same filename) is what's being pulled --
+        sizes differ, so it must NOT be silently reused."""
+        target = self.dest_dir / "mmproj-F16.gguf"
+        target.write_bytes(b"x" * 100)
+
+        with mock.patch.object(modelctl, "_remote_file_size", return_value=899283648), \
+             mock.patch.object(modelctl, "hf_hub_download", return_value=str(target)) as mock_dl:
+            modelctl.download_if_needed("repo/b", "mmproj-F16.gguf", self.dest_dir)
+
+        mock_dl.assert_called_once_with(repo_id="repo/b", filename="mmproj-F16.gguf", local_dir=str(self.dest_dir))
+
+    def test_falls_back_to_trusting_local_file_when_remote_size_unknown(self):
+        """If the HF API call fails (offline, rate-limited, etc.) this
+        should degrade to the old behavior rather than force a redundant
+        multi-GB re-download every time the network hiccups."""
+        target = self.dest_dir / "mmproj-F16.gguf"
+        target.write_bytes(b"x" * 100)
+
+        with mock.patch.object(modelctl, "_remote_file_size", return_value=None), \
+             mock.patch.object(modelctl, "hf_hub_download") as mock_dl:
+            result = modelctl.download_if_needed("repo/a", "mmproj-F16.gguf", self.dest_dir)
+
+        mock_dl.assert_not_called()
+        self.assertEqual(result, str(target))
+
+    def test_downloads_when_file_not_present_at_all(self):
+        with mock.patch.object(modelctl, "hf_hub_download", return_value="/downloaded/path") as mock_dl:
+            result = modelctl.download_if_needed("repo/a", "model.gguf", self.dest_dir)
+
+        mock_dl.assert_called_once()
+        self.assertEqual(result, "/downloaded/path")
 
 
 if __name__ == "__main__":

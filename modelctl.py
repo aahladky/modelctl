@@ -198,15 +198,40 @@ def get_llama_swap_base_url(cfg: dict = None) -> str:
     return "http://127.0.0.1:7070/v1"
 
 
-def sync_hermes_custom_providers(dry_run: bool = False):
-    """Rebuild Hermes' custom_providers list from all saved modelctl profiles.
+def get_router_base_url(swap_base_url: str = None) -> str:
+    """Figure out the router-mode OpenAI-compatible base URL for Hermes.
 
-    Each profile becomes a selectable model in `hermes model`. The provider
-    name is reused if Hermes already has a custom provider pointing at the
-    same llama-swap base URL; otherwise a sensible default is created.
+    Defaults to the same host as the llama-swap base URL with ROUTER_PORT
+    substituted for whatever port llama-swap uses -- override with
+    MODELCTL_ROUTER_BASE_URL if router mode lives somewhere else entirely.
+    """
+    override = os.environ.get("MODELCTL_ROUTER_BASE_URL")
+    if override:
+        return override.rstrip("/") + "/"
+    swap_base_url = swap_base_url or get_llama_swap_base_url()
+    m = re.match(r"^(https?://[^:/]+):(\d+)(/.*)?$", swap_base_url.rstrip("/"))
+    if m:
+        path = m.group(3) or "/v1"
+        return f"{m.group(1)}:{ROUTER_PORT}{path}/"
+    return swap_base_url  # fallback: couldn't parse, reuse the same URL
+
+
+def sync_hermes_custom_providers(dry_run: bool = False):
+    """Rebuild Hermes' provider entries from all saved modelctl profiles, for
+    BOTH the llama-swap and router-mode endpoints.
+
+    Hermes's own config format for this has moved at least twice already: a
+    `custom_providers:` list initially, now a `providers:` dict keyed by name
+    with name/api/models fields. Hermes appears to normalize whatever you
+    feed it and rewrite the file in its current shape. This function reads
+    whichever shape is on disk (migrating the legacy list into the dict) and
+    always WRITES the current `providers:` dict shape, since that's what's
+    been directly confirmed against a live Hermes instance. If Hermes
+    changes shape again, check ~/.hermes/config.yaml directly rather than
+    trust this docstring, and update accordingly.
     """
     if yaml is None:
-        print("WARNING: pyyaml not installed -- cannot sync Hermes custom_providers. "
+        print("WARNING: pyyaml not installed -- cannot sync Hermes providers. "
               "Install it with `pip install pyyaml` and re-run `modelctl sync`.", file=sys.stderr)
         return False
 
@@ -215,18 +240,8 @@ def sync_hermes_custom_providers(dry_run: bool = False):
         return False
 
     cfg = read_hermes_config()
-    base_url = get_llama_swap_base_url(cfg)
-
-    # Decide the provider name. Prefer an existing custom provider that already
-    # uses this base URL, otherwise default to something descriptive.
-    existing = cfg.get("custom_providers") or []
-    provider_name = None
-    for cp in existing:
-        if cp.get("base_url", "").rstrip("/") + "/" == base_url:
-            provider_name = cp.get("name")
-            break
-    if not provider_name:
-        provider_name = "LocalLlama"
+    swap_url = get_llama_swap_base_url(cfg)
+    router_url = get_router_base_url(swap_url)
 
     profiles = sorted(PROFILES_DIR.glob("*.json"))
     models_map = {}
@@ -235,41 +250,79 @@ def sync_hermes_custom_providers(dry_run: bool = False):
         name = profile.get("name")
         if not name:
             continue
-        # llama-swap exposes models by profile name at /v1/models.
+        # Both backends expose models by profile name at /v1/models.
         ctx = profile.get("config", {}).get("ctx")
         models_map[name] = {"context_length": int(ctx)} if ctx else {}
 
     if not models_map:
-        print("No saved profiles -- leaving Hermes custom_providers unchanged.")
+        print("No saved profiles -- leaving Hermes providers unchanged.")
         return False
 
-    new_provider = {"name": provider_name, "base_url": base_url, "models": models_map}
+    # Normalize whatever's currently on disk into one dict keyed by provider
+    # name, so unrelated providers (compression-cuda, an Ollama entry, etc.)
+    # and any legacy list-format entries all survive the round-trip.
+    providers = dict(cfg.get("providers") or {})
+    for cp in (cfg.get("custom_providers") or []):
+        pname = cp.get("name")
+        if pname and pname not in providers:
+            entry = dict(cp)
+            if "base_url" in entry and "api" not in entry:
+                entry["api"] = entry.pop("base_url")
+            providers[pname] = entry
+    had_legacy_key = "custom_providers" in cfg
+    cfg.pop("custom_providers", None)
 
-    # Replace just the entry/entries for this base URL, but preserve any
-    # non-llama-swap custom providers that point at a different base URL
-    # (e.g. Ollama on another port).
-    kept = [cp for cp in existing if cp.get("base_url", "").rstrip("/") + "/" != base_url]
-    final = kept + [new_provider]
+    before = dict(providers)
 
-    if final == existing:
-        print("Hermes custom_providers already up to date.")
+    def upsert(url, label):
+        # Reuse an existing entry's name if one already targets this exact
+        # base URL (so a manually-renamed provider keeps its name).
+        target_name = None
+        for pname, pdata in providers.items():
+            existing_url = pdata.get("api") or pdata.get("base_url") or ""
+            if existing_url.rstrip("/") + "/" == url:
+                target_name = pname
+                break
+        if not target_name:
+            target_name = label
+
+        existing_entry = providers.get(target_name, {})
+        existing_models = existing_entry.get("models") or {}
+        # Merge per-model so extras Hermes itself adds (e.g. reasoning_effort)
+        # survive, while context_length always reflects the current profile.
+        # Models no longer in models_map (deleted profiles) are dropped.
+        merged_models = {
+            mname: {**existing_models.get(mname, {}), **mctx}
+            for mname, mctx in models_map.items()
+        }
+
+        providers[target_name] = {
+            **existing_entry,
+            "name": target_name,
+            "api": url,
+            "models": merged_models,
+        }
+        return target_name
+
+    swap_name = upsert(swap_url, "local-swap")
+    router_name = upsert(router_url, "local-router")
+
+    if providers == before and not had_legacy_key:
+        print("Hermes providers already up to date.")
         return True
 
-    cfg["custom_providers"] = final
+    cfg["providers"] = providers
 
     if dry_run:
-        print("Would write the following custom_providers to Hermes config:")
-        for cp in final:
-            if "models" in cp:
-                model_list = ", ".join(cp["models"].keys())
-                print(f"  - {cp['name']} @ {cp['base_url']}: models = [{model_list}]")
-            else:
-                print(f"  - {cp.get('name')} @ {cp.get('base_url')}")
+        print("Would write the following providers to Hermes config:")
+        print(f"  - {swap_name} @ {swap_url}: models = [{', '.join(models_map.keys())}]")
+        print(f"  - {router_name} @ {router_url}: models = [{', '.join(models_map.keys())}]")
         return True
 
     write_hermes_config(cfg)
-    print(f"Synced {len(models_map)} model(s) to Hermes custom_providers @ {HERMES_CONFIG}")
-    print(f"  provider: {provider_name}, base_url: {base_url}")
+    print(f"Synced {len(models_map)} model(s) to Hermes providers @ {HERMES_CONFIG}")
+    print(f"  {swap_name} -> {swap_url}")
+    print(f"  {router_name} -> {router_url}")
     return True
 
 
@@ -579,14 +632,37 @@ def parse_selection(s: str, max_index: int):
     return out
 
 
+def _remote_file_size(repo_id: str, filename: str):
+    """Best-effort lookup of a repo file's size via the HF API, used to
+    verify a local file actually belongs to this repo before reusing it.
+    Returns None (not False) on any failure so callers fall back to the old
+    trust-it behavior rather than force a redundant download when offline."""
+    try:
+        info = api.model_info(repo_id, files_metadata=True)
+        for sib in info.siblings:
+            if sib.rfilename == filename:
+                return sib.size
+    except Exception:
+        pass
+    return None
+
+
 def download_if_needed(repo_id: str, filename: str, dest_dir: Path) -> str:
-    """Skip the download entirely if the file's already sitting in dest_dir --
-    avoids re-pulling a multi-GB mmproj/model file if it's already present
-    from an earlier run or another profile that shares it."""
+    """Skip the download only if a file already sitting in dest_dir actually
+    matches THIS repo's copy (verified by size) -- avoids re-pulling a
+    multi-GB mmproj/model file if it's already present from an earlier run
+    or a profile that shares it, but also avoids silently serving the WRONG
+    file when two different repos happen to use the same filename (many
+    repos ship a generically-named 'mmproj-F16.gguf', for instance)."""
     target = dest_dir / Path(filename).name
     if target.exists() and target.stat().st_size > 0:
-        print(f"  already present, skipping download: {target.name}")
-        return str(target)
+        expected_size = _remote_file_size(repo_id, filename)
+        if expected_size is None or target.stat().st_size == expected_size:
+            print(f"  already present, skipping download: {target.name}")
+            return str(target)
+        print(f"  {target.name} exists but its size ({target.stat().st_size} bytes) doesn't "
+              f"match {repo_id}'s copy ({expected_size} bytes) -- different repo's file with "
+              f"the same name, re-downloading.")
     print(f"  downloading {filename} -> {dest_dir} ...")
     return hf_hub_download(repo_id=repo_id, filename=filename, local_dir=str(dest_dir))
 
