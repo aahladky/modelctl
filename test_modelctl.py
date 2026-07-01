@@ -1,3 +1,4 @@
+import argparse
 import io
 import json
 import unittest
@@ -838,6 +839,25 @@ class TestDownloadIfNeeded(unittest.TestCase):
 
         mock_dl.assert_called_once()
         self.assertEqual(result, "/downloaded/path")
+
+
+class TestPullTuiFlag(unittest.TestCase):
+    def test_tui_flag_makes_repo_id_optional(self):
+        parser = modelctl.build_arg_parser()
+        args = parser.parse_args(["pull", "--tui"])
+        self.assertTrue(args.tui)
+        self.assertIsNone(args.repo_id)
+
+    def test_repo_id_still_required_without_tui(self):
+        parser = modelctl.build_arg_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["pull"])
+
+    def test_cmd_pull_dispatches_to_tui_when_flag_set(self):
+        args = argparse.Namespace(tui=True, repo_id=None, no_hermes=False)
+        with mock.patch.object(modelctl, "run_pull_wizard") as mock_wizard:
+            modelctl.cmd_pull(args)
+        mock_wizard.assert_called_once()
 
 
 if __name__ == "__main__":

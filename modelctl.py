@@ -923,6 +923,10 @@ def prompt_pick(label: str, prompt: str) -> int:
 
 
 def cmd_pull(args):
+    if getattr(args, "tui", False):
+        run_pull_wizard()
+        return
+
     repo_id = args.repo_id
     print(f"Fetching file list for {repo_id} ...")
     try:
@@ -1653,8 +1657,22 @@ def cmd_router_unload(args):
         sys.exit(1)
 
 
-def main():
-    parser = argparse.ArgumentParser(prog="modelctl")
+class _ModelctlArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser subclass that enforces the one cross-argument rule
+    argparse can't express declaratively: 'pull' needs repo_id unless
+    --tui is passed. Overriding parse_args() (rather than checking in
+    main()) means this fires for any caller of parse_args(), including
+    tests that never go through main()."""
+
+    def parse_args(self, args=None, namespace=None):
+        ns = super().parse_args(args, namespace)
+        if getattr(ns, "command", None) == "pull" and not ns.tui and ns.repo_id is None:
+            self.error("repo_id is required unless --tui is passed")
+        return ns
+
+
+def build_arg_parser():
+    parser = _ModelctlArgumentParser(prog="modelctl")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_search = sub.add_parser("search", help="search Hugging Face for models")
@@ -1671,7 +1689,10 @@ def main():
     p_search.set_defaults(func=cmd_search)
 
     p_pull = sub.add_parser("pull", help="pull a model from a HF repo and configure it")
-    p_pull.add_argument("repo_id")
+    p_pull.add_argument("repo_id", nargs="?", default=None,
+                         help="required unless --tui is passed (the wizard starts at search)")
+    p_pull.add_argument("--tui", action="store_true",
+                         help="use the interactive Textual wizard instead of the input()-based prompts")
     p_pull.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
     p_pull.add_argument("--no-router-restart", action="store_true",
                          help="don't restart the router-mode systemd service after updating its preset")
@@ -1728,6 +1749,27 @@ def main():
     p_router_unload.add_argument("name")
     p_router_unload.set_defaults(func=cmd_router_unload)
 
+    return parser
+
+
+def run_pull_wizard():
+    """Launch the Textual pull wizard (modelctl pull --tui). Imports
+    textual lazily so it never becomes a hard dependency for the rest of
+    modelctl -- only --tui users need it installed."""
+    try:
+        from modelctl_tui import PullWizardApp
+    except ImportError:
+        print(
+            "The --tui wizard requires the 'textual' package, which isn't installed.\n"
+            "Install it with: pip install textual",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    PullWizardApp().run()
+
+
+def main():
+    parser = build_arg_parser()
     args = parser.parse_args()
     try:
         args.func(args)
