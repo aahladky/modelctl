@@ -865,7 +865,12 @@ class TestPullTuiFlag(unittest.TestCase):
 
         def fake_import(name, *args, **kwargs):
             if name == "modelctl_tui":
-                raise ImportError("No module named 'textual'", name="textual")
+                # Python's real import machinery raises ModuleNotFoundError
+                # (a subclass of ImportError) when a module genuinely can't
+                # be found, as opposed to a plain ImportError for other
+                # reasons (e.g. a name that doesn't exist inside an
+                # otherwise-importable module).
+                raise ModuleNotFoundError("No module named 'textual'", name="textual")
             return real_import(name, *args, **kwargs)
 
         with mock.patch("builtins.__import__", side_effect=fake_import):
@@ -892,6 +897,31 @@ class TestPullTuiFlag(unittest.TestCase):
             with self.assertRaises(ImportError) as ctx:
                 modelctl.run_pull_wizard()
         self.assertEqual(ctx.exception.name, "modelctl_tui")
+
+    def test_run_pull_wizard_reraises_plain_importerror_named_like_textual(self):
+        # Regression test: a plain ImportError (NOT ModuleNotFoundError) can
+        # also have e.name == "textual.widgets" -- e.g. `from textual.widgets
+        # import NonExistentWidgetTypo` (a typo, or an API renamed between
+        # textual versions) raises ImportError with e.name == "textual.widgets"
+        # even though textual itself IS installed. Checking e.name alone
+        # would wrongly match this and misreport it as "textual isn't
+        # installed" instead of surfacing the real error. Only a genuine
+        # ModuleNotFoundError for textual should get the friendly message.
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "modelctl_tui":
+                raise ImportError(
+                    "cannot import name 'NonExistentWidgetTypo' from 'textual.widgets'",
+                    name="textual.widgets",
+                )
+            return real_import(name, *args, **kwargs)
+
+        with mock.patch("builtins.__import__", side_effect=fake_import):
+            with self.assertRaises(ImportError) as ctx:
+                modelctl.run_pull_wizard()
+        self.assertNotIsInstance(ctx.exception, ModuleNotFoundError)
+        self.assertEqual(ctx.exception.name, "textual.widgets")
 
 
 if __name__ == "__main__":

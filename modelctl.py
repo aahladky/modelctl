@@ -1759,7 +1759,8 @@ def run_pull_wizard():
     try:
         from modelctl_tui import PullWizardApp
     except ImportError as e:
-        if e.name != "textual" and not (e.name or "").startswith("textual."):
+        name_matches = e.name == "textual" or (e.name or "").startswith("textual.")
+        if not isinstance(e, ModuleNotFoundError) or not name_matches:
             raise
         print(
             "The --tui wizard requires the 'textual' package, which isn't installed.\n"
