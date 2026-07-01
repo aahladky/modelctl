@@ -1758,7 +1758,9 @@ def run_pull_wizard():
     modelctl -- only --tui users need it installed."""
     try:
         from modelctl_tui import PullWizardApp
-    except ImportError:
+    except ImportError as e:
+        if e.name != "textual" and not (e.name or "").startswith("textual."):
+            raise
         print(
             "The --tui wizard requires the 'textual' package, which isn't installed.\n"
             "Install it with: pip install textual",

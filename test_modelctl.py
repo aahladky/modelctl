@@ -1,4 +1,5 @@
 import argparse
+import builtins
 import io
 import json
 import unittest
@@ -858,6 +859,39 @@ class TestPullTuiFlag(unittest.TestCase):
         with mock.patch.object(modelctl, "run_pull_wizard") as mock_wizard:
             modelctl.cmd_pull(args)
         mock_wizard.assert_called_once()
+
+    def test_run_pull_wizard_shows_friendly_message_when_textual_missing(self):
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "modelctl_tui":
+                raise ImportError("No module named 'textual'", name="textual")
+            return real_import(name, *args, **kwargs)
+
+        with mock.patch("builtins.__import__", side_effect=fake_import):
+            with mock.patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+                with self.assertRaises(SystemExit):
+                    modelctl.run_pull_wizard()
+        self.assertIn("requires the 'textual' package", mock_stderr.getvalue())
+
+    def test_run_pull_wizard_reraises_unrelated_import_errors(self):
+        # Regression test: an ImportError raised *inside* modelctl_tui.py for
+        # a reason unrelated to textual being missing (e.g. a bug in that
+        # module) must not be swallowed and misreported as "install textual".
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "modelctl_tui":
+                raise ImportError(
+                    "cannot import name 'PullWizardApp' from 'modelctl_tui'",
+                    name="modelctl_tui",
+                )
+            return real_import(name, *args, **kwargs)
+
+        with mock.patch("builtins.__import__", side_effect=fake_import):
+            with self.assertRaises(ImportError) as ctx:
+                modelctl.run_pull_wizard()
+        self.assertEqual(ctx.exception.name, "modelctl_tui")
 
 
 if __name__ == "__main__":
