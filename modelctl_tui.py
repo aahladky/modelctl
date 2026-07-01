@@ -64,7 +64,7 @@ class StepIndicator(Static):
 
 class SearchScreen(Screen):
     """Placeholder for Task 4."""
-    name = "search"
+    STEP = "search"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="search")

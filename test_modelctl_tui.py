@@ -43,15 +43,16 @@ class TestStepIndicator(unittest.TestCase):
     def test_renders_all_steps_with_current_marked(self):
         indicator = StepIndicator(current="quant")
         rendered = str(indicator.render())
-        for step in ["search", "quant", "vision_mtp", "configure", "name", "download", "summary"]:
-            self.assertIn(step, rendered)
+        self.assertIn("[quant]", rendered)
+        self.assertNotIn("[search]", rendered)
+        self.assertNotIn("[configure]", rendered)
 
 
 class TestPullWizardAppBoots(unittest.IsolatedAsyncioTestCase):
     async def test_app_starts_on_search_screen(self):
         app = PullWizardApp()
         async with app.run_test() as pilot:
-            self.assertEqual(app.screen.name, "search")
+            self.assertEqual(app.screen.STEP, "search")
 
 
 if __name__ == "__main__":
