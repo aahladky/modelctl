@@ -103,6 +103,60 @@ class TestBuildServerArgs(unittest.TestCase):
         args = modelctl.build_server_args(profile)
         self.assertNotIn("--spec-type", args)
 
+    def test_mtp_on_bundled_omits_spec_draft_model(self):
+        """Most current MTP GGUFs (Qwen3.5/3.6) bundle the draft heads in the
+        same file as the main model -- no companion file, so no mtp_path."""
+        profile = {
+            "model_path": "/home/aaron/models/test.gguf",
+            "mmproj_path": None,
+            "mtp_path": None,
+            "config": {
+                "flash_attn": "auto", "ctx": "64000", "split_mode": "layer",
+                "tensor_split": "4,1", "kv_quant": "q8_0", "ttl": "3600",
+                "extra": "", "mtp": "on",
+            },
+        }
+        args = modelctl.build_server_args(profile)
+        self.assertIn("--spec-type", args)
+        self.assertNotIn("--spec-draft-model", args)
+
+    def test_mtp_on_with_companion_file_adds_spec_draft_model(self):
+        """Gemma-style MTP ships the draft heads as a separate companion
+        GGUF -- llama-server needs --spec-draft-model pointed at it, in
+        addition to --spec-type draft-mtp."""
+        profile = {
+            "model_path": "/home/aaron/models/gemma4-26b.gguf",
+            "mmproj_path": None,
+            "mtp_path": "/home/aaron/models/gemma4-26b-mtp.gguf",
+            "config": {
+                "flash_attn": "auto", "ctx": "64000", "split_mode": "layer",
+                "tensor_split": "4,1", "kv_quant": "q8_0", "ttl": "3600",
+                "extra": "", "mtp": "on",
+            },
+        }
+        args = modelctl.build_server_args(profile)
+        self.assertIn("--spec-type", args)
+        self.assertEqual(args[args.index("--spec-type") + 1], "draft-mtp")
+        self.assertIn("--spec-draft-model", args)
+        self.assertEqual(args[args.index("--spec-draft-model") + 1], "/home/aaron/models/gemma4-26b-mtp.gguf")
+
+    def test_mtp_off_with_companion_file_present_still_omits_both_flags(self):
+        """Having mtp_path saved on the profile doesn't mean it's active --
+        the mtp on/off toggle is still the deciding switch."""
+        profile = {
+            "model_path": "/home/aaron/models/gemma4-26b.gguf",
+            "mmproj_path": None,
+            "mtp_path": "/home/aaron/models/gemma4-26b-mtp.gguf",
+            "config": {
+                "flash_attn": "auto", "ctx": "64000", "split_mode": "layer",
+                "tensor_split": "4,1", "kv_quant": "q8_0", "ttl": "3600",
+                "extra": "", "mtp": "off",
+            },
+        }
+        args = modelctl.build_server_args(profile)
+        self.assertNotIn("--spec-type", args)
+        self.assertNotIn("--spec-draft-model", args)
+
 
 class TestRenderRouterPreset(unittest.TestCase):
     def test_emits_ini_section_with_device_and_ctx(self):
@@ -183,6 +237,38 @@ class TestRenderRouterPreset(unittest.TestCase):
         }
         text, ok, messages = modelctl.render_router_preset(profile)
         self.assertNotIn("spec-type", text)
+
+    def test_mtp_on_with_companion_file_emits_spec_draft_model_line(self):
+        profile = {
+            "name": "gemma4-26b",
+            "model_path": "/home/aaron/models/gemma4-26b.gguf",
+            "mmproj_path": None,
+            "mtp_path": "/home/aaron/models/gemma4-26b-mtp.gguf",
+            "config": {
+                "flash_attn": "auto", "ctx": "64000", "split_mode": "layer",
+                "tensor_split": "4,1", "kv_quant": "q8_0", "ttl": "3600",
+                "extra": "", "mtp": "on",
+            },
+        }
+        text, ok, messages = modelctl.render_router_preset(profile)
+        self.assertIn("spec-type = draft-mtp", text)
+        self.assertIn("spec-draft-model = /home/aaron/models/gemma4-26b-mtp.gguf", text)
+
+    def test_mtp_on_bundled_omits_spec_draft_model_line(self):
+        profile = {
+            "name": "qwen36-35b",
+            "model_path": "/home/aaron/models/qwen36-35b.gguf",
+            "mmproj_path": None,
+            "mtp_path": None,
+            "config": {
+                "flash_attn": "auto", "ctx": "64000", "split_mode": "layer",
+                "tensor_split": "4,1", "kv_quant": "q8_0", "ttl": "3600",
+                "extra": "", "mtp": "on",
+            },
+        }
+        text, ok, messages = modelctl.render_router_preset(profile)
+        self.assertIn("spec-type = draft-mtp", text)
+        self.assertNotIn("spec-draft-model", text)
 
 
 class TestSyncRouterPreset(unittest.TestCase):

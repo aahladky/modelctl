@@ -615,10 +615,13 @@ def cmd_pull(args):
         print("No .gguf files found in this repo.")
         sys.exit(1)
 
-    # Two strictly separate lists -- a file can only ever appear in one of
-    # these, so there's no way to pick the same mmproj file from both menus.
+    # Three strictly separate lists -- a file can only ever appear in one of
+    # these, so there's no way to pick the same mmproj/MTP file from two menus.
+    # MTP checked first since "mtp" and "mmproj" filenames don't overlap in
+    # practice, but excluding whichever runs first from the other keeps it that way.
     mmproj_files = [f for f in gguf_files if "mmproj" in f.lower()]
-    quant_files = [f for f in gguf_files if f not in mmproj_files]
+    mtp_files = [f for f in gguf_files if "mtp" in f.lower() and f not in mmproj_files]
+    quant_files = [f for f in gguf_files if f not in mmproj_files and f not in mtp_files]
     groups = group_files(quant_files)
 
     print(f"\n=== Model files ({len(groups)}) ===")
@@ -649,6 +652,20 @@ def cmd_pull(args):
             else:
                 print(f"  index {mi} isn't in the mmproj list, skipping mmproj.")
 
+    mtp_chosen = None
+    if mtp_files:
+        print(f"\n=== MTP draft-head files ({len(mtp_files)}) -- separate list, pick at most one, optional ===")
+        print("  (most MTP-capable models bundle these in the main file -- this list is for")
+        print("   repos that ship a separate companion file, e.g. Gemma 4's '-mtp.gguf' pairing)")
+        for i, f in enumerate(mtp_files):
+            print(f"  [{i}] {f}")
+        ti = prompt_pick("MTP", "Pick MTP file number, or blank to skip: ")
+        if ti != -1:
+            if 0 <= ti < len(mtp_files):
+                mtp_chosen = mtp_files[ti]
+            else:
+                print(f"  index {ti} isn't in the MTP list, skipping MTP.")
+
     dest_dir = Path(input(f"Download directory [{DEFAULT_MODELS_DIR}]: ").strip() or DEFAULT_MODELS_DIR)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -657,9 +674,15 @@ def cmd_pull(args):
         print("Fetching mmproj (shared across all selected profiles):")
         local_mmproj_path = download_if_needed(repo_id, mmproj_chosen, dest_dir)
 
+    local_mtp_path = None
+    if mtp_chosen:
+        print("Fetching MTP draft-head file (shared across all selected profiles):")
+        local_mtp_path = download_if_needed(repo_id, mtp_chosen, dest_dir)
+
     if len(chosen_groups) > 1:
         print(f"\n{len(chosen_groups)} files selected -- config below is shared across all of them.")
-    shared_config = prompt_config(repo_id, chosen_groups[0]["label"] if chosen_groups else "")
+    shared_config = prompt_config(repo_id, chosen_groups[0]["label"] if chosen_groups else "",
+                                   mtp_file_chosen=bool(local_mtp_path))
     env = capture_env_passthrough()
     warn_if_env_empty(env)
 
@@ -685,6 +708,7 @@ def cmd_pull(args):
             "file": g["label"],
             "model_path": primary_path,
             "mmproj_path": local_mmproj_path,
+            "mtp_path": local_mtp_path,
             "config": config,
             "env": env,
         }
@@ -712,7 +736,7 @@ def prompt_int(prompt: str, default: int) -> str:
         print(f"  '{raw}' isn't a number -- try again, or press Enter for the default ({default}).")
 
 
-def prompt_config(repo_id: str = "", label: str = ""):
+def prompt_config(repo_id: str = "", label: str = "", mtp_file_chosen: bool = False):
     print("\n--- runtime config (blank = sensible default) ---")
     d = load_defaults()
     device = input(f"GPU device [{d.get('device') or 'blank = use split strategy'}]: ").strip() or d.get("device", "")
@@ -724,7 +748,9 @@ def prompt_config(repo_id: str = "", label: str = ""):
 
 
     ttl = prompt_int("llama-swap idle TTL in seconds", d["ttl"])
-    mtp = input(f"Multi-token prediction, on/off -- only if this GGUF has MTP heads [{d.get('mtp', DEFAULT_MTP)}]: ").strip() or d.get("mtp", DEFAULT_MTP)
+    mtp_default = "on" if mtp_file_chosen else d.get("mtp", DEFAULT_MTP)
+    mtp_hint = " (MTP file was just downloaded for this pull)" if mtp_file_chosen else ""
+    mtp = input(f"Multi-token prediction, on/off -- only if this GGUF has MTP heads [{mtp_default}]{mtp_hint}: ").strip() or mtp_default
     extra = input("Any extra llama-server flags (raw string, optional): ").strip()
     return {
         "device": device,
@@ -784,6 +810,12 @@ def build_server_args(profile):
     # sane values (n-max=3); override via the "extra" field if you need to tune them.
     if cfg.get("mtp", "off").strip().lower() == "on":
         args.extend(["--spec-type", "draft-mtp"])
+        # Most current MTP GGUFs (e.g. Qwen3.5/3.6) bundle the draft heads in
+        # the same file as the main model, so there's nothing else to point
+        # at. Some (Gemma 4) ship them as a separate companion GGUF instead --
+        # if cmd_pull captured one, tell llama-server to load it as the draft.
+        if profile.get("mtp_path"):
+            args.extend(["--spec-draft-model", str(profile["mtp_path"])])
     if cfg.get("extra"):
         # Extra is a raw string the user typed; split it safely to preserve
         # quoted values with spaces, but only if they provided it.
@@ -854,6 +886,8 @@ def render_router_preset(profile):
         lines.append(f"cache-type-v = {cfg['kv_quant']}")
     if cfg.get("mtp", "off").strip().lower() == "on":
         lines.append("spec-type = draft-mtp")
+        if profile.get("mtp_path"):
+            lines.append(f"spec-draft-model = {profile['mtp_path']}")
     if cfg.get("extra"):
         # build_server_args shlex.splits cfg["extra"] into discrete CLI
         # tokens; the INI format has no equivalent structured way to splice
