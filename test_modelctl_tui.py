@@ -1,6 +1,7 @@
 import unittest
+from unittest import mock
 
-from textual.widgets import Static
+from textual.widgets import Input, ListView, Static
 
 from modelctl_tui import PullWizardApp, StepIndicator, WizardState, next_screen_after
 
@@ -53,6 +54,40 @@ class TestPullWizardAppBoots(unittest.IsolatedAsyncioTestCase):
         app = PullWizardApp()
         async with app.run_test() as pilot:
             self.assertEqual(app.screen.STEP, "search")
+
+
+class TestSearchScreen(unittest.IsolatedAsyncioTestCase):
+    async def test_typing_query_and_pressing_enter_shows_results(self):
+        fake_results = [
+            {"repo_id": "unsloth/Qwen3.5-35B-A3B-GGUF", "downloads": 138881, "likes": 854,
+             "is_gguf": True, "has_mtp": False, "contents": {"quant_groups": [], "mmproj_files": [], "mtp_files": []}},
+        ]
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.search_models", return_value=fake_results) as mock_search:
+            async with app.run_test() as pilot:
+                await pilot.click("#search-input")
+                await pilot.press(*"qwen3.5", "enter")
+                await pilot.pause()
+                mock_search.assert_called_once()
+                results_view = app.screen.query_one("#search-results", ListView)
+                self.assertEqual(len(results_view.children), 1)
+
+    async def test_selecting_a_result_stores_repo_id_and_contents(self):
+        fake_results = [
+            {"repo_id": "unsloth/Qwen3.5-35B-A3B-GGUF", "downloads": 1, "likes": 1,
+             "is_gguf": True, "has_mtp": False, "contents": {"quant_groups": [{"label": "Q4_K_M", "files": ["a.gguf"], "sharded": False, "total_size": 100}], "mmproj_files": [], "mtp_files": []}},
+        ]
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.search_models", return_value=fake_results):
+            async with app.run_test() as pilot:
+                await pilot.click("#search-input")
+                await pilot.press(*"qwen3.5", "enter")
+                await pilot.pause()
+                await pilot.click("ListItem")
+                await pilot.pause()
+                self.assertEqual(app.state.repo_id, "unsloth/Qwen3.5-35B-A3B-GGUF")
+                self.assertEqual(app.state.repo_contents, fake_results[0]["contents"])
+                self.assertEqual(app.screen.STEP, "quant")
 
 
 if __name__ == "__main__":

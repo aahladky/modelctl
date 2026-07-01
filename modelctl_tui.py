@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from textual.app import App, ComposeResult
 from textual.screen import Screen
-from textual.widgets import Static
+from textual.widgets import Input, Label, ListItem, ListView, Static
 
 import modelctl
 
@@ -63,11 +63,47 @@ class StepIndicator(Static):
 
 
 class SearchScreen(Screen):
-    """Placeholder for Task 4."""
+    """First wizard screen: search Hugging Face and pick a repo."""
     STEP = "search"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="search")
+        yield Input(placeholder="Search Hugging Face...", id="search-input")
+        yield ListView(id="search-results")
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        query = event.value.strip()
+        if not query:
+            return
+        results = modelctl.search_models(query, limit=15, enrich=True)
+        self._results = results
+        results_view = self.query_one("#search-results", ListView)
+        results_view.clear()
+        for r in results:
+            label = f"{r['repo_id']} ({r['downloads']:,} downloads)"
+            results_view.append(ListItem(Label(label)))
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        index = self.query_one("#search-results", ListView).index
+        chosen = self._results[index]
+        self.app.state.repo_id = chosen["repo_id"]
+        self.app.state.repo_contents = chosen["contents"]
+        next_step = next_screen_after("search", self.app.state)
+        self.app.push_screen(SCREENS_BY_NAME[next_step]())
+
+
+class QuantPickScreen(Screen):
+    """Placeholder for Task 5."""
+    STEP = "quant"
+
+    def compose(self) -> ComposeResult:
+        yield StepIndicator(current="quant")
+
+
+SCREENS_BY_NAME = {
+    "search": SearchScreen,
+    "quant": QuantPickScreen,
+}
 
 
 class PullWizardApp(App):
