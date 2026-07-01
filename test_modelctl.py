@@ -271,6 +271,40 @@ class TestRenderRouterPreset(unittest.TestCase):
         self.assertNotIn("spec-draft-model", text)
 
 
+class TestGenerateArtifactsRunSh(unittest.TestCase):
+    """Regression test: args_to_shell_line() returns ONE joined string, but
+    generate_artifacts() was doing `" \\\n  ".join(args_to_shell_line(args))`
+    -- .join() on a string iterates its characters, so every argument was
+    getting split one character per line in the generated run.sh."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.profiles_dir = Path(self.tmp.name) / "profiles"
+        self.profiles_dir.mkdir()
+
+    def test_run_sh_keeps_multi_character_flags_intact(self):
+        profile = {
+            "name": "test-profile",
+            "model_path": "/home/aaron/models/test.gguf",
+            "mmproj_path": None,
+            "config": {
+                "flash_attn": "auto", "ctx": "64000", "split_mode": "layer",
+                "tensor_split": "4,1", "kv_quant": "q8_0", "ttl": "3600", "extra": "",
+            },
+        }
+        with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
+             mock.patch.object(modelctl, "preflight", return_value=(True, "llama-server", {}, [])):
+            modelctl.generate_artifacts(profile)
+
+        run_sh = (self.profiles_dir / "test-profile" / "run.sh").read_text()
+        # a correctly-joined script contains "--model" as one token; the bug
+        # produced "- \\\n  - \\\n  m \\\n  o \\\n  d ..." instead.
+        self.assertIn("--model", run_sh)
+        self.assertNotIn("- \\\n  - \\\n  m", run_sh)
+        self.assertIn("/home/aaron/models/test.gguf", run_sh)
+
+
 class TestSyncRouterPreset(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()

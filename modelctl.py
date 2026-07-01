@@ -897,11 +897,6 @@ def render_router_preset(profile):
     return "\n".join(lines) + "\n", ok, messages
 
 
-def args_to_shell_line(args) -> str:
-    """Render a flat argument list as a shell-safe command line."""
-    return " ".join(shlex.quote(str(a)) for a in args)
-
-
 def generate_artifacts(profile):
     name = profile["name"]
     out_dir = PROFILES_DIR / name
@@ -914,7 +909,13 @@ def generate_artifacts(profile):
             print(f"  {m}")
 
     args = build_server_args(profile)
-    args_str = " \\\n  ".join(args_to_shell_line(args))
+    # An earlier version of this line called a helper that already joined
+    # `args` into one string, then .join()-ed *that string* again here --
+    # str.join() on a string iterates its characters, so every argument got
+    # split one letter per line in the generated run.sh. Map shlex.quote over
+    # each token individually instead, same pattern render_llama_swap_entry
+    # uses with yaml_escape.
+    args_str = " \\\n  ".join(shlex.quote(str(a)) for a in args)
     env_exports = "\n".join(f'export {k}="{v}"' for k, v in effective_env.items())
 
     # 1. raw run.sh -- works regardless of backend, since everything
