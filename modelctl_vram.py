@@ -247,3 +247,32 @@ def match_devices(sycl_devices, xpu_device_list):
         mapping[s["device"]] = best["xpu_id"]
         remaining.remove(best)
     return mapping
+
+
+def tensor_split_ratio(total_bytes_list):
+    """Derive a llama-server --tensor-split ratio from card capacities,
+    e.g. 32GB+12GB -> '8,3'. GiB-rounded then GCD-reduced for readability."""
+    gib = [max(1, round(t / (1 << 30))) for t in total_bytes_list]
+    divisor = math.gcd(*gib)
+    return ",".join(str(g // divisor) for g in gib)
+
+
+def recommend_placement(estimate_total, inventory, limit_pct, primary_device):
+    """The static placement rule from the design spec:
+    fits within limit_pct of the primary card alone -> pin to it;
+    fits within limit_pct of all cards combined -> layer-split by capacity;
+    doesn't fit at all -> same split, fits=False (caller warns loudly).
+
+    Returns None if primary_device isn't in the inventory."""
+    primary = next((d for d in inventory if d["device"] == primary_device), None)
+    if primary is None:
+        return None
+    frac = limit_pct / 100.0
+    if estimate_total <= primary["total_bytes"] * frac:
+        return {"device": primary_device, "split_mode": "", "tensor_split": "",
+                "fits": True}
+    ordered = [primary] + [d for d in inventory if d is not primary]
+    combined_budget = sum(d["total_bytes"] for d in ordered) * frac
+    return {"device": "", "split_mode": "layer",
+            "tensor_split": tensor_split_ratio([d["total_bytes"] for d in ordered]),
+            "fits": estimate_total <= combined_budget}

@@ -263,5 +263,53 @@ class TestMatchDevices(unittest.TestCase):
         self.assertEqual(modelctl_vram.match_devices(sycl, self.XPU), {})
 
 
+class TestTensorSplitRatio(unittest.TestCase):
+    def test_32_12_reduces_to_8_3(self):
+        self.assertEqual(
+            modelctl_vram.tensor_split_ratio([34242297856, 12809404416]), "8,3")
+
+    def test_equal_cards(self):
+        self.assertEqual(modelctl_vram.tensor_split_ratio([16 << 30, 16 << 30]), "1,1")
+
+
+class TestRecommendPlacement(unittest.TestCase):
+    INVENTORY = [
+        {"device": "SYCL0", "name": "big", "total_bytes": 34242297856,
+         "free_bytes": 30 << 30},
+        {"device": "SYCL1", "name": "small", "total_bytes": 12809404416,
+         "free_bytes": 12 << 30},
+    ]
+
+    def test_fits_primary_pins_to_it(self):
+        rec = modelctl_vram.recommend_placement(20 << 30, self.INVENTORY, 90, "SYCL0")
+        self.assertEqual(rec, {"device": "SYCL0", "split_mode": "",
+                               "tensor_split": "", "fits": True})
+
+    def test_too_big_for_primary_splits(self):
+        rec = modelctl_vram.recommend_placement(35 << 30, self.INVENTORY, 90, "SYCL0")
+        self.assertEqual(rec["device"], "")
+        self.assertEqual(rec["split_mode"], "layer")
+        self.assertEqual(rec["tensor_split"], "8,3")
+        self.assertTrue(rec["fits"])
+
+    def test_too_big_for_everything_flagged(self):
+        rec = modelctl_vram.recommend_placement(60 << 30, self.INVENTORY, 90, "SYCL0")
+        self.assertEqual(rec["split_mode"], "layer")
+        self.assertFalse(rec["fits"])
+
+    def test_limit_pct_boundary(self):
+        total = self.INVENTORY[0]["total_bytes"]
+        just_under = int(total * 0.90) - 1
+        just_over = int(total * 0.90) + 1
+        self.assertEqual(modelctl_vram.recommend_placement(
+            just_under, self.INVENTORY, 90, "SYCL0")["device"], "SYCL0")
+        self.assertEqual(modelctl_vram.recommend_placement(
+            just_over, self.INVENTORY, 90, "SYCL0")["device"], "")
+
+    def test_unknown_primary_returns_none(self):
+        self.assertIsNone(modelctl_vram.recommend_placement(
+            1, self.INVENTORY, 90, "CUDA0"))
+
+
 if __name__ == "__main__":
     unittest.main()
