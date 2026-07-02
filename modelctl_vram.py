@@ -91,3 +91,80 @@ def read_gguf_kv_metadata(path):
             return meta
     except (OSError, struct.error, MemoryError, OverflowError):
         return {}
+
+
+# Bytes per cached element for llama.cpp cache types (block bytes / block
+# size). Unknown types fall back to f16 (conservative over-estimate).
+CACHE_TYPE_BYTES = {
+    "f32": 4.0, "f16": 2.0, "bf16": 2.0,
+    "q8_0": 34 / 32, "q5_1": 24 / 32, "q5_0": 22 / 32,
+    "q4_1": 20 / 32, "q4_0": 18 / 32, "iq4_nl": 18 / 32,
+}
+
+# Fallback KV bytes/token when the GGUF header can't be parsed -- sized on
+# ~30B dense models at f16 so the guess errs large for smaller models.
+HEURISTIC_KV_BYTES_PER_TOKEN = 96 * 1024
+
+
+def _mean(value):
+    if isinstance(value, list):
+        return sum(value) / len(value) if value else None
+    return value
+
+
+def gguf_kv_params(meta):
+    """Extract the fields KV-cache sizing needs from GGUF metadata.
+    Returns None when anything essential is missing, so callers fall back
+    to the heuristic instead of computing garbage."""
+    arch = meta.get("general.architecture")
+    if not arch:
+        return None
+
+    def g(suffix):
+        return meta.get(f"{arch}.{suffix}")
+
+    block_count = g("block_count")
+    n_kv_heads = _mean(g("attention.head_count_kv"))
+    if not block_count or not n_kv_heads:
+        return None
+
+    k_dim = g("attention.key_length")
+    v_dim = g("attention.value_length")
+    if k_dim is None or v_dim is None:
+        embed = g("embedding_length")
+        head_count = _mean(g("attention.head_count"))
+        if not embed or not head_count:
+            return None
+        head_dim = embed / head_count
+        k_dim = k_dim if k_dim is not None else head_dim
+        v_dim = v_dim if v_dim is not None else head_dim
+
+    return {"block_count": block_count, "n_kv_heads": n_kv_heads,
+            "k_dim": k_dim, "v_dim": v_dim}
+
+
+def kv_cache_bytes(params, ctx, kv_quant):
+    """KV cache size in bytes for a context of `ctx` tokens."""
+    bpe = CACHE_TYPE_BYTES.get((kv_quant or "f16").strip().lower(), 2.0)
+    return int(params["block_count"] * ctx * params["n_kv_heads"]
+               * (params["k_dim"] + params["v_dim"]) * bpe)
+
+
+def estimate_from_parts(weights_bytes, ctx, kv_quant, gguf_params=None,
+                        mmproj_bytes=0):
+    """VRAM footprint estimate: weights + KV cache + overhead.
+
+    overhead = max(1 GiB, 10% of weights) covers compute buffers and
+    allocator fragmentation -- deliberately rough; the placement rule's
+    vram_limit_pct margin absorbs the remaining error.
+    """
+    weights = int(weights_bytes) + int(mmproj_bytes)
+    if gguf_params:
+        kv = kv_cache_bytes(gguf_params, ctx, kv_quant)
+        quality = "exact"
+    else:
+        kv = int(ctx) * HEURISTIC_KV_BYTES_PER_TOKEN
+        quality = "heuristic"
+    overhead = max(1 << 30, int(weights * 0.10))
+    return {"weights": weights, "kv_bytes": kv, "overhead": overhead,
+            "total": weights + kv + overhead, "quality": quality}
