@@ -281,6 +281,9 @@ class TestConfigureScreen(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(app.screen.STEP, "name")
 
     async def test_preflight_warning_does_not_block_submit(self):
+        # Not a file-not-found message, so it must survive the filter and
+        # be stored/displayed -- proves the filter is selective, not a
+        # blanket "drop everything preflight says" hammer.
         fake_defaults = {
             "device": "", "split_mode": "layer", "tensor_split": "3,1",
             "ctx": 32768, "kv_quant": "q8_0", "flash_attn": "auto",
@@ -300,6 +303,82 @@ class TestConfigureScreen(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertIn("ERROR: llama-server not found", app.state.warnings)
                 self.assertEqual(app.screen.STEP, "name")
+
+    async def test_file_not_found_preflight_messages_are_filtered_out(self):
+        # probe_profile's model_path is a bare repo filename at this stage
+        # (download hasn't happened yet -- that's Task 9's DownloadScreen),
+        # so preflight()'s file-existence errors are guaranteed false
+        # positives here and must not reach state.warnings or the on-screen
+        # warning area at all.
+        fake_defaults = {
+            "device": "", "split_mode": "layer", "tensor_split": "3,1",
+            "ctx": 32768, "kv_quant": "q8_0", "flash_attn": "auto",
+            "ttl": 3600, "mtp": "off",
+        }
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.load_defaults", return_value=fake_defaults), \
+             mock.patch("modelctl_tui.modelctl.preflight",
+                         return_value=(False, None, {},
+                                       ["ERROR: model file not found on disk: some/path.gguf"])):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x", quant_group={"label": "Q4_K_M", "files": ["a.gguf"]},
+                )
+                configure_screen = ConfigureScreen()
+                await app.push_screen(configure_screen)
+                await pilot.pause()
+                await pilot.click("#submit-config")
+                await pilot.pause()
+                self.assertEqual(app.state.warnings, [])
+                self.assertEqual(
+                    configure_screen.query_one("#preflight-warning", Static).content, ""
+                )
+                self.assertEqual(app.screen.STEP, "name")
+
+    async def test_ctx_and_ttl_inputs_reject_non_numeric_characters(self):
+        # Regression guard for Issue 1: typo'd values like "32,768" must
+        # never be typeable into these fields, since they flow unmodified
+        # into build_server_args() at actual llama-server launch time.
+        fake_defaults = {
+            "device": "", "split_mode": "layer", "tensor_split": "3,1",
+            "ctx": 32768, "kv_quant": "q8_0", "flash_attn": "auto",
+            "ttl": 3600, "mtp": "off",
+        }
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.load_defaults", return_value=fake_defaults):
+            async with app.run_test() as pilot:
+                app.state = WizardState()
+                await app.push_screen(ConfigureScreen())
+                await pilot.pause()
+
+                ctx_input = app.screen.query_one("#config-ctx", Input)
+                self.assertEqual(ctx_input.type, "integer")
+                ctx_input.focus()
+                # select_on_focus selects the whole value asynchronously;
+                # give it a pause to land before overriding cursor position,
+                # otherwise the next keypress replaces the selected text
+                # instead of appending at the end.
+                await pilot.pause()
+                ctx_input.cursor_position = len(ctx_input.value)
+                await pilot.pause()
+                await pilot.press(",")
+                await pilot.press("x")
+                await pilot.pause()
+                self.assertEqual(ctx_input.value, "32768")
+                await pilot.press("5")
+                await pilot.pause()
+                self.assertEqual(ctx_input.value, "327685")
+
+                ttl_input = app.screen.query_one("#config-ttl", Input)
+                self.assertEqual(ttl_input.type, "integer")
+                ttl_input.focus()
+                await pilot.pause()
+                ttl_input.cursor_position = len(ttl_input.value)
+                await pilot.pause()
+                await pilot.press(".")
+                await pilot.press("a")
+                await pilot.pause()
+                self.assertEqual(ttl_input.value, "3600")
 
 
 if __name__ == "__main__":

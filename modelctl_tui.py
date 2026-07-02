@@ -206,6 +206,19 @@ class VisionMtpScreen(Screen):
         self.app.push_screen(SCREENS_BY_NAME[next_step]())
 
 
+# preflight() reports these two exact prefixes when a model/mmproj file
+# doesn't exist on disk yet. At the ConfigureScreen stage of the wizard,
+# probe_profile's paths are bare repo filenames (download happens later, in
+# Task 9's DownloadScreen), so these are guaranteed false positives here --
+# filtered out at the ConfigureScreen call site only, not inside preflight()
+# itself, since preflight() is also used post-download where these checks
+# are meaningful.
+FILE_NOT_FOUND_PREFIXES = (
+    "ERROR: model file not found on disk:",
+    "ERROR: mmproj file not found on disk:",
+)
+
+
 class ConfigureScreen(Screen):
     """Fourth wizard screen: runtime config for the profile, mirroring
     prompt_config()'s field set exactly, pre-filled from load_defaults().
@@ -249,13 +262,13 @@ class ConfigureScreen(Screen):
         yield Label("Tensor split:")
         yield Input(value=d["tensor_split"], id="config-tensor-split")
         yield Label("Context length:")
-        yield Input(value=str(d["ctx"]), id="config-ctx")
+        yield Input(value=str(d["ctx"]), id="config-ctx", type="integer")
         yield Label("KV cache quant:")
         yield Input(value=d["kv_quant"], id="config-kv-quant")
         yield Label("Flash attention:")
         yield Input(value=d["flash_attn"], id="config-flash-attn")
         yield Label("llama-swap idle TTL (seconds):")
-        yield Input(value=str(d["ttl"]), id="config-ttl")
+        yield Input(value=str(d["ttl"]), id="config-ttl", type="integer")
         yield Label("Multi-token prediction (on/off):")
         yield Input(value=d.get("mtp", modelctl.DEFAULT_MTP), id="config-mtp")
         yield Label("Extra llama-server flags (optional):")
@@ -288,7 +301,14 @@ class ConfigureScreen(Screen):
             "config": config,
         }
         ok, _, _, messages = modelctl.preflight(probe_profile, auto_fix=True)
-        if not ok or messages:
+        # Filter out file-existence errors -- probe_profile's model_path/mmproj_path
+        # are bare repo filenames at this point in the wizard (download hasn't
+        # happened yet, that's DownloadScreen's job in Task 9), so these two
+        # specific messages are guaranteed false positives here, not real signal.
+        # Everything else preflight() reports (binary resolution, SYCL env
+        # warnings) IS meaningful at this stage and should still surface.
+        messages = [m for m in messages if not m.startswith(FILE_NOT_FOUND_PREFIXES)]
+        if messages:
             self.app.state.warnings.extend(messages)
             self.query_one("#preflight-warning", Static).update("\n".join(messages))
 
