@@ -1203,17 +1203,23 @@ class TestPullPlacementHint(unittest.TestCase):
 
     def test_hint_computed_from_remote_size(self):
         with mock.patch.object(modelctl, "get_gpu_inventory",
-                               return_value=self.INVENTORY):
+                               return_value=self.INVENTORY), \
+             mock.patch.object(modelctl, "DEFAULTS_PATH",
+                               Path("/nonexistent/x.json")):
             hint = modelctl.compute_pull_placement_hint(18 << 30)
         self.assertEqual(hint["device"], "SYCL0")
 
     def test_no_inventory_returns_none(self):
-        with mock.patch.object(modelctl, "get_gpu_inventory", return_value=[]):
+        with mock.patch.object(modelctl, "get_gpu_inventory", return_value=[]), \
+             mock.patch.object(modelctl, "DEFAULTS_PATH",
+                               Path("/nonexistent/x.json")):
             self.assertIsNone(modelctl.compute_pull_placement_hint(18 << 30))
 
     def test_no_size_returns_none(self):
         with mock.patch.object(modelctl, "get_gpu_inventory",
-                               return_value=self.INVENTORY):
+                               return_value=self.INVENTORY), \
+             mock.patch.object(modelctl, "DEFAULTS_PATH",
+                               Path("/nonexistent/x.json")):
             self.assertIsNone(modelctl.compute_pull_placement_hint(None))
 
 

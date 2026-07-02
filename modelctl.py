@@ -1165,9 +1165,9 @@ def prompt_config(repo_id: str = "", label: str = "", mtp_file_chosen: bool = Fa
     if placement and not current:
         # Seed device/split defaults from the VRAM-fit recommendation for
         # new profiles; edits keep the profile's own values instead.
-        d = {**d, "device": placement.get("device", ""),
-             "split_mode": placement.get("split_mode", "") or d["split_mode"],
-             "tensor_split": placement.get("tensor_split", "") or d["tensor_split"]}
+        d = {**d, "device": placement["device"],
+             "split_mode": placement["split_mode"] or d["split_mode"],
+             "tensor_split": placement["tensor_split"] or d["tensor_split"]}
     device = input(f"GPU device, '-' to clear [{d.get('device') or 'blank = use split strategy'}]: ").strip() or d.get("device", "")
     if device == "-":
         device = ""
@@ -1849,16 +1849,13 @@ def compute_pull_placement_hint(weights_bytes):
     if not inventory:
         return None
     d = load_defaults()
-    # Use default ctx and kv_quant from defaults for heuristic estimate
-    default_ctx = d.get("ctx", DEFAULT_CTX)
-    default_kv_quant = d.get("kv_quant", "f16")
     est = modelctl_vram.estimate_from_parts(
-        weights_bytes, int(default_ctx), default_kv_quant)
-    primary = resolve_primary_gpu(inventory, d)
+        weights_bytes, int(d["ctx"]), d["kv_quant"])
     rec = modelctl_vram.recommend_placement(
-        est["total"], inventory, d["vram_limit_pct"], primary)
+        est["total"], inventory, d["vram_limit_pct"],
+        resolve_primary_gpu(inventory, d))
     if rec:
-        print(f"Estimated footprint at ctx={default_ctx}: "
+        print(f"Estimated footprint at ctx={d['ctx']}: "
               f"~{_format_size(est['total'])} (heuristic) "
               f"-> suggested placement: {_format_placement(rec)}")
         if not rec["fits"]:
