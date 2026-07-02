@@ -1541,5 +1541,16 @@ class TestCacheTypeDefaults(unittest.TestCase):
         self.assertEqual(d["cache_type_v"], "q5_0")
 
 
+class TestPromptConfigLegacyOverlay(unittest.TestCase):
+    def test_legacy_kv_quant_prefills_cache_type_k(self):
+        current = {"kv_quant": "q5_1"}
+        with mock.patch.object(modelctl, "DEFAULTS_PATH", Path("/nonexistent/x.json")), \
+             mock.patch.dict("os.environ", {"MODELCTL_DEFAULT_KV_QUANT": ""}), \
+             mock.patch("builtins.input", return_value=""):
+            profile = modelctl.prompt_config(current=current)
+        self.assertEqual(profile["cache_type_k"], "q5_1")
+        self.assertEqual(profile["cache_type_v"], "q5_1")
+
+
 if __name__ == "__main__":
     unittest.main()

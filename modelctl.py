@@ -1310,9 +1310,14 @@ def prompt_config(repo_id: str = "", label: str = "", mtp_file_chosen: bool = Fa
     instead of silently resetting it to the global defaults."""
     print("\n--- runtime config (blank = keep the value shown) ---")
     d = {**load_defaults(), "extra": "", **(current or {})}
-    if current and current.get("kv_quant") and not current.get("cache_type_k"):
-        d["cache_type_k"] = current["kv_quant"]
-        d["cache_type_v"] = current.get("cache_type_v") or current["kv_quant"]
+    # An old profile may have only 'kv_quant' set (no cache_type_k/v), so the
+    # spread above leaves d's cache_type_k/v as the *global* defaults instead
+    # of that profile's own legacy value. Re-resolve from `current` to fix that.
+    if current:
+        ctk, ctv = _resolve_cache_types(current)
+        if ctk:
+            d["cache_type_k"] = ctk
+            d["cache_type_v"] = ctv
     if placement and not current:
         # Seed device/split defaults from the VRAM-fit recommendation for
         # new profiles; edits keep the profile's own values instead.
