@@ -329,18 +329,27 @@ class NameScreen(Screen):
         yield StepIndicator(current="name")
         label = (self.app.state.quant_group or {}).get("label", "")
         clean = modelctl.strip_quant_from_label(label)
-        default_name = modelctl.next_unique_profile_name(modelctl.slugify(clean))
+        self._default_name = modelctl.next_unique_profile_name(modelctl.slugify(clean))
+        self._default_dest_dir = self.app.state.dest_dir
         yield Label("Profile name:")
-        yield Input(value=default_name, id="profile-name")
+        yield Input(value=self._default_name, id="profile-name")
         yield Label("Download directory:")
-        yield Input(value=self.app.state.dest_dir, id="dest-dir")
+        yield Input(value=self._default_dest_dir, id="dest-dir")
         yield Button("Continue", id="submit-name")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id != "submit-name":
             return
-        self.app.state.profile_name = self.query_one("#profile-name", Input).value.strip()
-        self.app.state.dest_dir = self.query_one("#dest-dir", Input).value.strip()
+        # Mirrors cmd_pull's `input(...).strip() or name_default` fallback:
+        # save_profile() does zero validation, so a blank name would write
+        # to PROFILES_DIR / ".json" and a blank dest_dir would silently
+        # resolve to the current working directory via Path("").
+        self.app.state.profile_name = (
+            self.query_one("#profile-name", Input).value.strip() or self._default_name
+        )
+        self.app.state.dest_dir = (
+            self.query_one("#dest-dir", Input).value.strip() or self._default_dest_dir
+        )
         next_step = next_screen_after("name", self.app.state)
         self.app.push_screen(SCREENS_BY_NAME[next_step]())
 

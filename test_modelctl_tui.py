@@ -412,7 +412,53 @@ class TestNameScreen(unittest.IsolatedAsyncioTestCase):
                 await pilot.click("#submit-name")
                 await pilot.pause()
                 self.assertEqual(app.state.profile_name, "model")
+                self.assertEqual(app.state.dest_dir, str(modelctl.DEFAULT_MODELS_DIR))
                 self.assertEqual(app.screen.STEP, "download")
+
+    async def test_submit_strips_leading_and_trailing_whitespace(self):
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.next_unique_profile_name", side_effect=lambda s: s):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"]},
+                )
+                await app.push_screen(NameScreen())
+                await pilot.pause()
+                name_input = app.screen.query_one("#profile-name", Input)
+                name_input.value = "  padded-name  "
+                dest_input = app.screen.query_one("#dest-dir", Input)
+                dest_input.value = "  /tmp/padded-dest  "
+                await pilot.click("#submit-name")
+                await pilot.pause()
+                self.assertEqual(app.state.profile_name, "padded-name")
+                self.assertEqual(app.state.dest_dir, "/tmp/padded-dest")
+
+    async def test_blank_name_and_dest_dir_fall_back_to_computed_defaults(self):
+        # Mirrors cmd_pull's `input(...).strip() or name_default` fallback:
+        # a user who clears the prefilled fields and clicks Continue must
+        # get the computed defaults back, not empty strings. An empty
+        # profile_name would make save_profile() write to
+        # PROFILES_DIR / ".json", and an empty dest_dir would silently
+        # resolve to the current working directory via Path("").
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.next_unique_profile_name", side_effect=lambda s: s):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"]},
+                    dest_dir="/some/dest",
+                )
+                await app.push_screen(NameScreen())
+                await pilot.pause()
+                name_input = app.screen.query_one("#profile-name", Input)
+                name_input.value = "   "
+                dest_input = app.screen.query_one("#dest-dir", Input)
+                dest_input.value = "   "
+                await pilot.click("#submit-name")
+                await pilot.pause()
+                self.assertEqual(app.state.profile_name, "model")
+                self.assertEqual(app.state.dest_dir, "/some/dest")
 
 
 if __name__ == "__main__":
