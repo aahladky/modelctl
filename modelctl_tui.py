@@ -292,8 +292,10 @@ class ConfigureScreen(Screen):
         yield Input(value=d["tensor_split"], id="config-tensor-split")
         yield Label("Context length:")
         yield Input(value=str(d["ctx"]), id="config-ctx", type="integer")
-        yield Label("KV cache quant:")
-        yield Input(value=d["kv_quant"], id="config-kv-quant")
+        yield Label("K cache quant:")
+        yield Input(value=d["cache_type_k"], id="config-cache-type-k")
+        yield Label("V cache quant:")
+        yield Input(value=d["cache_type_v"], id="config-cache-type-v")
         yield Label("Flash attention:")
         yield Input(value=d["flash_attn"], id="config-flash-attn")
         yield Label("llama-swap idle TTL (seconds):")
@@ -313,7 +315,8 @@ class ConfigureScreen(Screen):
             "split_mode": self.query_one("#config-split-mode", Input).value,
             "tensor_split": self.query_one("#config-tensor-split", Input).value,
             "ctx": self.query_one("#config-ctx", Input).value,
-            "kv_quant": self.query_one("#config-kv-quant", Input).value,
+            "cache_type_k": self.query_one("#config-cache-type-k", Input).value,
+            "cache_type_v": self.query_one("#config-cache-type-v", Input).value,
             "flash_attn": self.query_one("#config-flash-attn", Input).value,
             "ttl": self.query_one("#config-ttl", Input).value,
             "mtp": self.query_one("#config-mtp", Input).value,

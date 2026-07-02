@@ -349,7 +349,7 @@ class TestConfigureScreen(unittest.IsolatedAsyncioTestCase):
     async def test_prefills_from_defaults(self):
         fake_defaults = {
             "device": "", "split_mode": "layer", "tensor_split": "3,1",
-            "ctx": 32768, "kv_quant": "q8_0", "flash_attn": "auto",
+            "ctx": 32768, "cache_type_k": "q8_0", "cache_type_v": "q8_0", "flash_attn": "auto",
             "ttl": 3600, "mtp": "off",
         }
         app = PullWizardApp()
@@ -360,11 +360,15 @@ class TestConfigureScreen(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 ctx_input = app.screen.query_one("#config-ctx", Input)
                 self.assertEqual(ctx_input.value, "32768")
+                cache_k_input = app.screen.query_one("#config-cache-type-k", Input)
+                self.assertEqual(cache_k_input.value, "q8_0")
+                cache_v_input = app.screen.query_one("#config-cache-type-v", Input)
+                self.assertEqual(cache_v_input.value, "q8_0")
 
     async def test_submit_stores_config_and_advances(self):
         fake_defaults = {
             "device": "", "split_mode": "layer", "tensor_split": "3,1",
-            "ctx": 32768, "kv_quant": "q8_0", "flash_attn": "auto",
+            "ctx": 32768, "cache_type_k": "q8_0", "cache_type_v": "q8_0", "flash_attn": "auto",
             "ttl": 3600, "mtp": "off",
         }
         app = PullWizardApp()
@@ -379,6 +383,9 @@ class TestConfigureScreen(unittest.IsolatedAsyncioTestCase):
                 await pilot.click("#submit-config")
                 await pilot.pause()
                 self.assertEqual(app.state.config["ctx"], "32768")
+                self.assertEqual(app.state.config["cache_type_k"], "q8_0")
+                self.assertEqual(app.state.config["cache_type_v"], "q8_0")
+                self.assertNotIn("kv_quant", app.state.config)
                 self.assertEqual(app.screen.STEP, "name")
 
     async def test_preflight_warning_does_not_block_submit(self):
@@ -387,7 +394,7 @@ class TestConfigureScreen(unittest.IsolatedAsyncioTestCase):
         # blanket "drop everything preflight says" hammer.
         fake_defaults = {
             "device": "", "split_mode": "layer", "tensor_split": "3,1",
-            "ctx": 32768, "kv_quant": "q8_0", "flash_attn": "auto",
+            "ctx": 32768, "cache_type_k": "q8_0", "cache_type_v": "q8_0", "flash_attn": "auto",
             "ttl": 3600, "mtp": "off",
         }
         app = PullWizardApp()
@@ -413,7 +420,7 @@ class TestConfigureScreen(unittest.IsolatedAsyncioTestCase):
         # warning area at all.
         fake_defaults = {
             "device": "", "split_mode": "layer", "tensor_split": "3,1",
-            "ctx": 32768, "kv_quant": "q8_0", "flash_attn": "auto",
+            "ctx": 32768, "cache_type_k": "q8_0", "cache_type_v": "q8_0", "flash_attn": "auto",
             "ttl": 3600, "mtp": "off",
         }
         app = PullWizardApp()
@@ -442,7 +449,7 @@ class TestConfigureScreen(unittest.IsolatedAsyncioTestCase):
         # into build_server_args() at actual llama-server launch time.
         fake_defaults = {
             "device": "", "split_mode": "layer", "tensor_split": "3,1",
-            "ctx": 32768, "kv_quant": "q8_0", "flash_attn": "auto",
+            "ctx": 32768, "cache_type_k": "q8_0", "cache_type_v": "q8_0", "flash_attn": "auto",
             "ttl": 3600, "mtp": "off",
         }
         app = PullWizardApp()
@@ -1077,7 +1084,7 @@ class TestFullWizardFlow(unittest.IsolatedAsyncioTestCase):
         }]
         fake_defaults = {
             "device": "", "split_mode": "layer", "tensor_split": "3,1",
-            "ctx": 32768, "kv_quant": "q8_0", "flash_attn": "auto", "ttl": 3600, "mtp": "off",
+            "ctx": 32768, "cache_type_k": "q8_0", "cache_type_v": "q8_0", "flash_attn": "auto", "ttl": 3600, "mtp": "off",
         }
         app = PullWizardApp()
         with mock.patch("modelctl_tui.modelctl.search_models", return_value=fake_results), \
