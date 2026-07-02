@@ -271,6 +271,13 @@ class TestTensorSplitRatio(unittest.TestCase):
     def test_equal_cards(self):
         self.assertEqual(modelctl_vram.tensor_split_ratio([16 << 30, 16 << 30]), "1,1")
 
+    def test_single_card(self):
+        self.assertEqual(modelctl_vram.tensor_split_ratio([32 << 30]), "1")
+
+    def test_three_cards(self):
+        self.assertEqual(
+            modelctl_vram.tensor_split_ratio([32 << 30, 16 << 30, 8 << 30]), "4,2,1")
+
 
 class TestRecommendPlacement(unittest.TestCase):
     INVENTORY = [
@@ -309,6 +316,13 @@ class TestRecommendPlacement(unittest.TestCase):
     def test_unknown_primary_returns_none(self):
         self.assertIsNone(modelctl_vram.recommend_placement(
             1, self.INVENTORY, 90, "CUDA0"))
+
+    def test_single_gpu_over_budget_keeps_pin_not_split(self):
+        inventory = [{"device": "SYCL0", "name": "only", "total_bytes": 34242297856,
+                      "free_bytes": 30 << 30}]
+        rec = modelctl_vram.recommend_placement(60 << 30, inventory, 90, "SYCL0")
+        self.assertEqual(rec, {"device": "SYCL0", "split_mode": "",
+                               "tensor_split": "", "fits": False})
 
 
 if __name__ == "__main__":

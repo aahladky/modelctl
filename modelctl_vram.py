@@ -273,6 +273,11 @@ def recommend_placement(estimate_total, inventory, limit_pct, primary_device):
                 "fits": True}
     ordered = [primary] + [d for d in inventory if d is not primary]
     combined_budget = sum(d["total_bytes"] for d in ordered) * frac
+    if len(ordered) == 1:
+        # Single-GPU system: a one-way "split" is meaningless -- keep the
+        # pin and let fits=False carry the over-budget warning.
+        return {"device": primary_device, "split_mode": "", "tensor_split": "",
+                "fits": estimate_total <= combined_budget}
     return {"device": "", "split_mode": "layer",
             "tensor_split": tensor_split_ratio([d["total_bytes"] for d in ordered]),
             "fits": estimate_total <= combined_budget}
