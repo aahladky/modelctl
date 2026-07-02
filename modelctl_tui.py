@@ -317,11 +317,40 @@ class ConfigureScreen(Screen):
 
 
 class NameScreen(Screen):
-    """Placeholder for Task 8."""
+    """Fifth wizard screen: profile name and download directory. dest_dir
+    is folded into this screen rather than getting its own -- it's
+    pre-filled from DEFAULT_MODELS_DIR (via WizardState.dest_dir, set in
+    Task 1) and almost always accepted as-is, so it doesn't warrant a
+    dedicated step. No network/disk I/O here, just reads self.app.state
+    and generates a default string, so no background worker is needed."""
     STEP = "name"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="name")
+        label = (self.app.state.quant_group or {}).get("label", "")
+        clean = modelctl.strip_quant_from_label(label)
+        default_name = modelctl.next_unique_profile_name(modelctl.slugify(clean))
+        yield Label("Profile name:")
+        yield Input(value=default_name, id="profile-name")
+        yield Label("Download directory:")
+        yield Input(value=self.app.state.dest_dir, id="dest-dir")
+        yield Button("Continue", id="submit-name")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "submit-name":
+            return
+        self.app.state.profile_name = self.query_one("#profile-name", Input).value.strip()
+        self.app.state.dest_dir = self.query_one("#dest-dir", Input).value.strip()
+        next_step = next_screen_after("name", self.app.state)
+        self.app.push_screen(SCREENS_BY_NAME[next_step]())
+
+
+class DownloadScreen(Screen):
+    """Placeholder for Task 9."""
+    STEP = "download"
+
+    def compose(self) -> ComposeResult:
+        yield StepIndicator(current="download")
 
 
 SCREENS_BY_NAME = {
@@ -330,6 +359,7 @@ SCREENS_BY_NAME = {
     "vision_mtp": VisionMtpScreen,
     "configure": ConfigureScreen,
     "name": NameScreen,
+    "download": DownloadScreen,
 }
 
 

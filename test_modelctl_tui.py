@@ -3,8 +3,10 @@ from unittest import mock
 
 from textual.widgets import Input, ListView, Static
 
+import modelctl
 from modelctl_tui import (
     ConfigureScreen,
+    NameScreen,
     PullWizardApp,
     QuantPickScreen,
     StepIndicator,
@@ -379,6 +381,38 @@ class TestConfigureScreen(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("a")
                 await pilot.pause()
                 self.assertEqual(ttl_input.value, "3600")
+
+
+class TestNameScreen(unittest.IsolatedAsyncioTestCase):
+    async def test_prefills_name_from_quant_label_and_default_dest_dir(self):
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.next_unique_profile_name", side_effect=lambda s: s):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"]},
+                )
+                await app.push_screen(NameScreen())
+                await pilot.pause()
+                name_input = app.screen.query_one("#profile-name", Input)
+                self.assertEqual(name_input.value, "model")
+                dest_input = app.screen.query_one("#dest-dir", Input)
+                self.assertEqual(dest_input.value, str(modelctl.DEFAULT_MODELS_DIR))
+
+    async def test_submit_stores_name_and_dest_dir_and_advances(self):
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.next_unique_profile_name", side_effect=lambda s: s):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"]},
+                )
+                await app.push_screen(NameScreen())
+                await pilot.pause()
+                await pilot.click("#submit-name")
+                await pilot.pause()
+                self.assertEqual(app.state.profile_name, "model")
+                self.assertEqual(app.screen.STEP, "download")
 
 
 if __name__ == "__main__":
