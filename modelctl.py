@@ -60,7 +60,11 @@ ROUTER_BASE_URL = os.environ.get("MODELCTL_ROUTER_BASE_URL")
 # long contexts and benefits from KV cache quantization for memory headroom.
 DEFAULT_DEVICE = os.environ.get("MODELCTL_DEFAULT_DEVICE", "SYCL0")
 DEFAULT_CTX = int(os.environ.get("MODELCTL_DEFAULT_CTX", "32768"))
-DEFAULT_KV_QUANT = os.environ.get("MODELCTL_DEFAULT_KV_QUANT", "q8_0")
+# K and V caches can be quantized independently; both default to q8_0
+# (the old single MODELCTL_DEFAULT_KV_QUANT is still honored as the
+# fallback for whichever of the two isn't set explicitly).
+DEFAULT_CACHE_TYPE_K = os.environ.get("MODELCTL_DEFAULT_CACHE_TYPE_K", "q8_0")
+DEFAULT_CACHE_TYPE_V = os.environ.get("MODELCTL_DEFAULT_CACHE_TYPE_V", "q8_0")
 DEFAULT_FLASH_ATTN = os.environ.get("MODELCTL_DEFAULT_FLASH_ATTN", "auto")
 DEFAULT_TTL = int(os.environ.get("MODELCTL_DEFAULT_TTL", "3600"))
 # Default GPU split strategy: load across both GPUs instead of pinning to one.
@@ -118,10 +122,26 @@ def load_defaults() -> dict:
             return os.environ[env_key]
         return persisted.get(key, fallback)
 
+    # Legacy fallback: the old single MODELCTL_DEFAULT_KV_QUANT env var (or
+    # persisted "kv_quant" key) applies to both K and V when the new,
+    # independent settings aren't present. Empty-string env values are
+    # treated as unset so they fall through to the persisted/hardcoded
+    # defaults instead of winning as an empty override.
+    legacy_kv_quant = os.environ.get("MODELCTL_DEFAULT_KV_QUANT") or persisted.get("kv_quant")
+
     return {
         "device": pick("device", DEFAULT_DEVICE),
         "ctx": int(pick("ctx", DEFAULT_CTX)),
-        "kv_quant": pick("kv_quant", DEFAULT_KV_QUANT),
+        # cache_type_k/v resolution: new env var -> new persisted key ->
+        # legacy kv_quant (env or persisted) -> hardcoded q8_0.
+        "cache_type_k": (os.environ.get("MODELCTL_DEFAULT_CACHE_TYPE_K")
+                         or persisted.get("cache_type_k")
+                         or legacy_kv_quant
+                         or DEFAULT_CACHE_TYPE_K),
+        "cache_type_v": (os.environ.get("MODELCTL_DEFAULT_CACHE_TYPE_V")
+                         or persisted.get("cache_type_v")
+                         or legacy_kv_quant
+                         or DEFAULT_CACHE_TYPE_V),
         "flash_attn": pick("flash_attn", DEFAULT_FLASH_ATTN),
         "ttl": int(pick("ttl", DEFAULT_TTL)),
 
@@ -151,7 +171,8 @@ def prompt_defaults():
     split_mode = input(f"Split mode [{current['split_mode']}]: ").strip() or current["split_mode"]
     tensor_split = input(f"Tensor split weights [{current['tensor_split']}]: ").strip() or current["tensor_split"]
     ctx = prompt_int("Context length", current["ctx"])
-    kv_quant = input(f"KV cache quant [{current['kv_quant']}]: ").strip() or current["kv_quant"]
+    cache_type_k = input(f"K cache quant, e.g. q8_0 [{current['cache_type_k']}]: ").strip() or current["cache_type_k"]
+    cache_type_v = input(f"V cache quant, e.g. q4_0 [{current['cache_type_v']}]: ").strip() or current["cache_type_v"]
     flash_attn = input(f"Flash attention [{current['flash_attn']}]: ").strip() or current["flash_attn"]
 
     ttl = prompt_int("llama-swap idle TTL in seconds", current["ttl"])
@@ -163,7 +184,8 @@ def prompt_defaults():
         "split_mode": split_mode,
         "tensor_split": tensor_split,
         "ctx": ctx,
-        "kv_quant": kv_quant,
+        "cache_type_k": cache_type_k,
+        "cache_type_v": cache_type_v,
         "flash_attn": flash_attn,
         "ttl": ttl,
         "mtp": mtp,
@@ -1288,6 +1310,9 @@ def prompt_config(repo_id: str = "", label: str = "", mtp_file_chosen: bool = Fa
     instead of silently resetting it to the global defaults."""
     print("\n--- runtime config (blank = keep the value shown) ---")
     d = {**load_defaults(), "extra": "", **(current or {})}
+    if current and current.get("kv_quant") and not current.get("cache_type_k"):
+        d["cache_type_k"] = current["kv_quant"]
+        d["cache_type_v"] = current.get("cache_type_v") or current["kv_quant"]
     if placement and not current:
         # Seed device/split defaults from the VRAM-fit recommendation for
         # new profiles; edits keep the profile's own values instead.
@@ -1300,7 +1325,8 @@ def prompt_config(repo_id: str = "", label: str = "", mtp_file_chosen: bool = Fa
     split_mode = input(f"Split mode [{d['split_mode']}]: ").strip() or d["split_mode"]
     tensor_split = input(f"Tensor split weights [{d['tensor_split']}]: ").strip() or d["tensor_split"]
     ctx = prompt_int("Context length", d["ctx"])
-    kv_quant = input(f"KV cache quant, e.g. q8_0 [{d['kv_quant']}]: ").strip() or d["kv_quant"]
+    cache_type_k = input(f"K cache quant, e.g. q8_0 [{d['cache_type_k']}]: ").strip() or d["cache_type_k"]
+    cache_type_v = input(f"V cache quant, e.g. q4_0 [{d['cache_type_v']}]: ").strip() or d["cache_type_v"]
     flash_attn = input(f"Flash attention [{d['flash_attn']}]: ").strip() or d["flash_attn"]
 
     ttl = prompt_int("llama-swap idle TTL in seconds", d["ttl"])
@@ -1315,7 +1341,8 @@ def prompt_config(repo_id: str = "", label: str = "", mtp_file_chosen: bool = Fa
         "split_mode": split_mode,
         "tensor_split": tensor_split,
         "ctx": ctx,
-        "kv_quant": kv_quant,
+        "cache_type_k": cache_type_k,
+        "cache_type_v": cache_type_v,
         "flash_attn": flash_attn,
         "ttl": ttl,
         "mtp": mtp,
@@ -1994,7 +2021,8 @@ def compute_pull_placement_hint(weights_bytes):
         return None
     d = load_defaults()
     est = modelctl_vram.estimate_from_parts(
-        weights_bytes, int(d["ctx"]), d["kv_quant"])
+        weights_bytes, int(d["ctx"]), d["cache_type_k"],
+        cache_type_v=d["cache_type_v"])
     rec = modelctl_vram.recommend_placement(
         est["total"], inventory, d["vram_limit_pct"],
         resolve_primary_gpu(inventory, d))

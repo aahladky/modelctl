@@ -1507,5 +1507,39 @@ class TestSplitCacheTypeEmission(unittest.TestCase):
         self.assertNotIn("cache-type-v", text)
 
 
+class TestCacheTypeDefaults(unittest.TestCase):
+    def test_new_keys_default_q8_0(self):
+        with mock.patch.object(modelctl, "DEFAULTS_PATH", Path("/nonexistent/x.json")), \
+             mock.patch.dict("os.environ", {"MODELCTL_DEFAULT_KV_QUANT": ""}):
+            d = modelctl.load_defaults()
+        self.assertEqual(d["cache_type_k"], "q8_0")
+        self.assertEqual(d["cache_type_v"], "q8_0")
+
+    def test_legacy_env_var_applies_to_both(self):
+        with mock.patch.object(modelctl, "DEFAULTS_PATH", Path("/nonexistent/x.json")), \
+             mock.patch.dict("os.environ", {"MODELCTL_DEFAULT_KV_QUANT": "q5_1"}):
+            d = modelctl.load_defaults()
+        self.assertEqual(d["cache_type_k"], "q5_1")
+        self.assertEqual(d["cache_type_v"], "q5_1")
+
+    def test_new_env_vars_win_and_diverge(self):
+        with mock.patch.object(modelctl, "DEFAULTS_PATH", Path("/nonexistent/x.json")), \
+             mock.patch.dict("os.environ", {"MODELCTL_DEFAULT_KV_QUANT": "q5_1",
+                                            "MODELCTL_DEFAULT_CACHE_TYPE_V": "q4_0"}):
+            d = modelctl.load_defaults()
+        self.assertEqual(d["cache_type_k"], "q5_1")   # legacy still covers K
+        self.assertEqual(d["cache_type_v"], "q4_0")   # new var wins for V
+
+    def test_persisted_legacy_kv_quant_applies_to_both(self):
+        with TemporaryDirectory() as tmp:
+            p = Path(tmp) / "defaults.json"
+            p.write_text(json.dumps({"kv_quant": "q5_0"}))
+            with mock.patch.object(modelctl, "DEFAULTS_PATH", p), \
+                 mock.patch.dict("os.environ", {"MODELCTL_DEFAULT_KV_QUANT": ""}):
+                d = modelctl.load_defaults()
+        self.assertEqual(d["cache_type_k"], "q5_0")
+        self.assertEqual(d["cache_type_v"], "q5_0")
+
+
 if __name__ == "__main__":
     unittest.main()
