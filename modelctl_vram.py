@@ -101,9 +101,14 @@ CACHE_TYPE_BYTES = {
     "q4_1": 20 / 32, "q4_0": 18 / 32, "iq4_nl": 18 / 32,
 }
 
-# Fallback KV bytes/token when the GGUF header can't be parsed -- sized on
-# ~30B dense models at f16 so the guess errs large for smaller models.
-HEURISTIC_KV_BYTES_PER_TOKEN = 96 * 1024
+# Fallback KV bytes/token when the GGUF header can't be parsed. Sized on a
+# ~30B dense GQA model at f16 (64 layers * 8 KV heads * 256 dims * 2 bytes
+# = 256 KiB/token) so the guess errs LARGE for most models -- heuristic
+# estimates feed placement and guard decisions, and over-estimating only
+# costs a needless split/warning, while under-estimating risks an OOM'd
+# load. Old-style MHA models (no GQA) can still exceed this; those are
+# rare in current GGUF releases.
+HEURISTIC_KV_BYTES_PER_TOKEN = 256 * 1024
 
 
 def _mean(value):
