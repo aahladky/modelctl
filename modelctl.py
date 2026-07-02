@@ -241,10 +241,8 @@ def router_status() -> list:
     for p in sorted(PROFILES_DIR.glob("*.json")):
         profile = json.loads(p.read_text())
         cfg = profile.get("config", {})
-        if cfg.get("split_mode") and cfg.get("tensor_split"):
-            gpu_by_name[profile["name"]] = f"split {cfg['tensor_split']} ({cfg['split_mode']})"
-        elif cfg.get("device"):
-            gpu_by_name[profile["name"]] = cfg["device"]
+        if cfg.get("split_mode") and cfg.get("tensor_split") or cfg.get("device"):
+            gpu_by_name[profile["name"]] = _format_placement(cfg)
 
     rows = []
     for m in data.get("data", []):
@@ -2085,6 +2083,17 @@ def cmd_test(args):
             proc.kill()
 
 
+def vram_footer_lines(inventory) -> list:
+    """Human-readable per-GPU 'used/total' lines for status/stats output.
+    Empty list when the inventory is unavailable, so callers just skip it."""
+    lines = []
+    for d in inventory:
+        used = d["total_bytes"] - d["free_bytes"]
+        lines.append(f"{d['device']}: {_format_size(used)} / "
+                     f"{_format_size(d['total_bytes'])} VRAM used ({d['name']})")
+    return lines
+
+
 def cmd_router_status(args):
     try:
         rows = router_status()
@@ -2094,16 +2103,32 @@ def cmd_router_status(args):
 
     if not rows:
         print("No models registered with the router.")
-        return
+    else:
+        print(f"{'MODEL':<32} {'STATUS':<10} {'GPU':<22} {'EST':<10} NOTES")
+        any_failed = False
+        for r in rows:
+            est_col = "?"
+            profile_path = PROFILES_DIR / f"{r['name']}.json"
+            if profile_path.exists():
+                est = estimate_vram_footprint(json.loads(profile_path.read_text()))
+                if est:
+                    est_col = f"~{_format_size(est['total'])}"
+            notes = ""
+            if r["failed"]:
+                notes = f"FAILED (exit {r['exit_code']})"
+                any_failed = True
+            elif not r["from_preset"]:
+                notes = "(not a modelctl profile)"
+            print(f"{r['name']:<32} {r['status']:<10} {r['gpu']:<22} {est_col:<10} {notes}")
+        if any_failed:
+            print("\nFor failed models: journalctl --user -u "
+                  f"{ROUTER_SERVICE_NAME} -n 100")
 
-    print(f"{'MODEL':<32} {'STATUS':<10} {'GPU':<22} NOTES")
-    for r in rows:
-        notes = ""
-        if r["failed"]:
-            notes = f"FAILED (exit {r['exit_code']})"
-        elif not r["from_preset"]:
-            notes = "(not a modelctl profile)"
-        print(f"{r['name']:<32} {r['status']:<10} {r['gpu']:<22} {notes}")
+    footer = vram_footer_lines(get_gpu_inventory())
+    if footer:
+        print()
+        for line in footer:
+            print(line)
 
 
 def cmd_router_load(args):

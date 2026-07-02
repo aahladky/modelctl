@@ -1369,5 +1369,19 @@ class TestWaitForRouterModel(unittest.TestCase):
             self.assertIsNone(modelctl._wait_for_router_model("m", "loaded"))
 
 
+class TestVramFooter(unittest.TestCase):
+    def test_footer_lines(self):
+        inventory = [{"device": "SYCL0", "name": "big",
+                      "total_bytes": 32 << 30, "free_bytes": 10 << 30}]
+        lines = modelctl.vram_footer_lines(inventory)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("SYCL0", lines[0])
+        self.assertIn("22.0GB", lines[0])   # used = total - free
+        self.assertIn("32.0GB", lines[0])
+
+    def test_empty_inventory_no_lines(self):
+        self.assertEqual(modelctl.vram_footer_lines([]), [])
+
+
 if __name__ == "__main__":
     unittest.main()
