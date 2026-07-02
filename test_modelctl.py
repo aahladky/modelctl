@@ -1383,5 +1383,47 @@ class TestVramFooter(unittest.TestCase):
         self.assertEqual(modelctl.vram_footer_lines([]), [])
 
 
+PROM_SAMPLE = """\
+# HELP llamacpp:prompt_tokens_total Number of prompt tokens processed.
+# TYPE llamacpp:prompt_tokens_total counter
+llamacpp:prompt_tokens_total 12000
+llamacpp:prompt_seconds_total 10
+llamacpp:tokens_predicted_total 4500
+llamacpp:tokens_predicted_seconds_total 300
+llamacpp:n_decode_total 4600
+llamacpp:prompt_tokens_seconds 1180.5
+llamacpp:predicted_tokens_seconds 14.9
+llamacpp:requests_processing 1
+llamacpp:requests_deferred 0
+"""
+
+
+class TestParsePrometheus(unittest.TestCase):
+    def test_parses_values_skips_comments(self):
+        m = modelctl.parse_prometheus_text(PROM_SAMPLE)
+        self.assertEqual(m["llamacpp:prompt_tokens_total"], 12000.0)
+        self.assertEqual(m["llamacpp:predicted_tokens_seconds"], 14.9)
+        self.assertNotIn("# HELP llamacpp:prompt_tokens_total", m)
+
+    def test_garbage_lines_ignored(self):
+        m = modelctl.parse_prometheus_text("weird\nllamacpp:x notanumber\n")
+        self.assertEqual(m, {})
+
+
+class TestStatsRow(unittest.TestCase):
+    def test_computed_columns(self):
+        metrics = modelctl.parse_prometheus_text(PROM_SAMPLE)
+        row = modelctl.stats_row_from_metrics(metrics)
+        self.assertEqual(row["gen_tps"], "15.0")       # 4500/300
+        self.assertEqual(row["prompt_tps"], "1200.0")  # 12000/10
+        self.assertEqual(row["last_gen_tps"], "14.9")  # gauge
+        self.assertEqual(row["requests"], "1/0")       # processing/deferred
+
+    def test_missing_metrics_render_question_marks(self):
+        row = modelctl.stats_row_from_metrics({})
+        self.assertEqual(row["gen_tps"], "?")
+        self.assertEqual(row["requests"], "?")
+
+
 if __name__ == "__main__":
     unittest.main()

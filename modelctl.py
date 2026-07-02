@@ -20,6 +20,7 @@ import sys
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 import argparse
 from pathlib import Path
 
@@ -2131,6 +2132,96 @@ def cmd_router_status(args):
             print(line)
 
 
+def parse_prometheus_text(text: str) -> dict:
+    """Prometheus exposition text -> {metric_name: float}. Labels are not
+    used by llama-server's exporter, so plain name-value parsing is enough."""
+    out = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        name = parts[0].split("{", 1)[0]
+        try:
+            out[name] = float(parts[-1])
+        except ValueError:
+            continue
+    return out
+
+
+def fetch_model_metrics(name: str, timeout: int = 10):
+    """GET the router's forwarded per-instance /metrics for one loaded
+    model. Returns a metrics dict, or None on any failure (the row renders
+    as '?' -- one broken instance shouldn't kill the whole table)."""
+    url = (router_root_url().rstrip("/") + "/metrics?model="
+           + urllib.parse.quote(name, safe=""))
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return parse_prometheus_text(r.read().decode(errors="replace"))
+    except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
+        return None
+
+
+def stats_row_from_metrics(metrics: dict) -> dict:
+    """Compute the stats table columns; '?' for anything missing.
+    Metric names match this llama.cpp build's exporter
+    (tools/server/server-context.cpp)."""
+    m = metrics or {}
+
+    def ratio(num_key, den_key):
+        num, den = m.get(num_key), m.get(den_key)
+        if num is None or not den:
+            return "?"
+        return f"{num / den:.1f}"
+
+    def gauge(key):
+        v = m.get(key)
+        return f"{v:.1f}" if v is not None else "?"
+
+    processing, deferred = m.get("llamacpp:requests_processing"), \
+        m.get("llamacpp:requests_deferred")
+    requests = (f"{processing:.0f}/{deferred:.0f}"
+                if processing is not None and deferred is not None else "?")
+    return {
+        "gen_tps": ratio("llamacpp:tokens_predicted_total",
+                         "llamacpp:tokens_predicted_seconds_total"),
+        "prompt_tps": ratio("llamacpp:prompt_tokens_total",
+                            "llamacpp:prompt_seconds_total"),
+        "last_gen_tps": gauge("llamacpp:predicted_tokens_seconds"),
+        "requests": requests,
+    }
+
+
+def cmd_router_stats(args):
+    try:
+        rows = router_status()
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    loaded = [r for r in rows if r["status"] == "loaded"]
+    if not loaded:
+        print("No models currently loaded.")
+    else:
+        print(f"{'MODEL':<32} {'GEN T/S':>8} {'PROMPT T/S':>11} "
+              f"{'LAST GEN':>9} {'REQ P/D':>8}")
+        for r in loaded:
+            stats = stats_row_from_metrics(fetch_model_metrics(r["name"]))
+            print(f"{r['name']:<32} {stats['gen_tps']:>8} "
+                  f"{stats['prompt_tps']:>11} {stats['last_gen_tps']:>9} "
+                  f"{stats['requests']:>8}")
+        print("\n(GEN/PROMPT T/S are lifetime averages; LAST GEN is the most "
+              "recent request's throughput.)")
+
+    footer = vram_footer_lines(get_gpu_inventory())
+    if footer:
+        print()
+        for line in footer:
+            print(line)
+
+
 def cmd_router_load(args):
     profile_path = PROFILES_DIR / f"{args.name}.json"
     if getattr(args, "force", False):
@@ -2296,6 +2387,9 @@ def build_arg_parser():
 
     p_router_status = router_sub.add_parser("status", help="show loaded/unloaded models and GPU placement")
     p_router_status.set_defaults(func=cmd_router_status)
+
+    p_router_stats = router_sub.add_parser("stats", help="per-model throughput and VRAM stats")
+    p_router_stats.set_defaults(func=cmd_router_stats)
 
     p_router_load = router_sub.add_parser("load", help="load a model now instead of waiting for a request")
     p_router_load.add_argument("name")
