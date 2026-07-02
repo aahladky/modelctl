@@ -993,5 +993,110 @@ class TestPullTuiFlag(unittest.TestCase):
         self.assertEqual(ctx.exception.name, "textual.widgets")
 
 
+class TestVramDefaults(unittest.TestCase):
+    def test_vram_keys_present_with_defaults(self):
+        with mock.patch.object(modelctl, "DEFAULTS_PATH", Path("/nonexistent/x.json")):
+            d = modelctl.load_defaults()
+        self.assertEqual(d["vram_limit_pct"], 90)
+        self.assertEqual(d["primary_gpu"], "")
+
+    def test_env_override(self):
+        with mock.patch.object(modelctl, "DEFAULTS_PATH", Path("/nonexistent/x.json")), \
+             mock.patch.dict("os.environ", {"MODELCTL_DEFAULT_VRAM_LIMIT_PCT": "80",
+                                            "MODELCTL_DEFAULT_PRIMARY_GPU": "SYCL1"}):
+            d = modelctl.load_defaults()
+        self.assertEqual(d["vram_limit_pct"], 80)
+        self.assertEqual(d["primary_gpu"], "SYCL1")
+
+
+class TestLocalWeightsBytes(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def test_single_file(self):
+        p = self.dir / "model.gguf"
+        p.write_bytes(b"x" * 100)
+        self.assertEqual(modelctl._local_weights_bytes(p), 100)
+
+    def test_sharded_sums_all_parts(self):
+        for i in (1, 2, 3):
+            (self.dir / f"model-0000{i}-of-00003.gguf").write_bytes(b"x" * 10 * i)
+        first = self.dir / "model-00001-of-00003.gguf"
+        self.assertEqual(modelctl._local_weights_bytes(first), 60)
+
+
+class TestEstimateVramFootprint(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.model = Path(self.tmp.name) / "model.gguf"
+        self.model.write_bytes(b"x" * 1000)
+
+    def test_missing_model_returns_none(self):
+        profile = {"model_path": str(Path(self.tmp.name) / "gone.gguf"),
+                   "config": {"ctx": 4096, "kv_quant": "q8_0"}}
+        self.assertIsNone(modelctl.estimate_vram_footprint(profile))
+
+    def test_heuristic_when_header_unparseable(self):
+        profile = {"model_path": str(self.model),
+                   "config": {"ctx": 4096, "kv_quant": "q8_0"}}
+        est = modelctl.estimate_vram_footprint(profile)
+        self.assertEqual(est["quality"], "heuristic")
+        self.assertEqual(est["weights"], 1000)
+
+    def test_mmproj_counted(self):
+        mmproj = Path(self.tmp.name) / "mmproj.gguf"
+        mmproj.write_bytes(b"y" * 500)
+        profile = {"model_path": str(self.model), "mmproj_path": str(mmproj),
+                   "config": {"ctx": 4096, "kv_quant": "q8_0"}}
+        est = modelctl.estimate_vram_footprint(profile)
+        self.assertEqual(est["weights"], 1500)
+
+
+class TestGetGpuInventory(unittest.TestCase):
+    XPU = [
+        {"xpu_id": 0, "name": "big", "total_bytes": 34242297856,
+         "free_bytes": 30 << 30},
+        {"xpu_id": 1, "name": "small", "total_bytes": 12809404416,
+         "free_bytes": 12 << 30},
+    ]
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.map_path = Path(self.tmp.name) / "gpu_map.json"
+
+    def test_no_xpu_smi_returns_empty(self):
+        with mock.patch.object(modelctl.modelctl_vram, "xpu_devices", return_value=[]):
+            self.assertEqual(modelctl.get_gpu_inventory(), [])
+
+    def test_builds_and_caches_map(self):
+        sycl = [{"device": "SYCL0", "name": "big", "total_mib": 32657},
+                {"device": "SYCL1", "name": "small", "total_mib": 12215}]
+        with mock.patch.object(modelctl, "GPU_MAP_PATH", self.map_path), \
+             mock.patch.object(modelctl.modelctl_vram, "xpu_devices",
+                               return_value=self.XPU), \
+             mock.patch.object(modelctl.modelctl_vram, "llama_list_devices",
+                               return_value=sycl) as mock_list:
+            inv = modelctl.get_gpu_inventory()
+            inv2 = modelctl.get_gpu_inventory()  # second call: cached map
+        self.assertEqual(mock_list.call_count, 1)
+        self.assertEqual(inv[0]["device"], "SYCL0")  # sorted, biggest first
+        self.assertEqual(inv[0]["free_bytes"], 30 << 30)
+        self.assertEqual(inv, inv2)
+        self.assertTrue(self.map_path.exists())
+
+    def test_fallback_map_when_list_devices_fails(self):
+        with mock.patch.object(modelctl, "GPU_MAP_PATH", self.map_path), \
+             mock.patch.object(modelctl.modelctl_vram, "xpu_devices",
+                               return_value=self.XPU), \
+             mock.patch.object(modelctl.modelctl_vram, "llama_list_devices",
+                               return_value=[]):
+            inv = modelctl.get_gpu_inventory()
+        self.assertEqual([d["device"] for d in inv], ["SYCL0", "SYCL1"])
+
+
 if __name__ == "__main__":
     unittest.main()

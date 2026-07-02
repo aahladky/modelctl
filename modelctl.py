@@ -24,6 +24,7 @@ import argparse
 from pathlib import Path
 
 from huggingface_hub import HfApi, hf_hub_download
+import modelctl_vram
 
 try:
     import yaml
@@ -74,6 +75,13 @@ DEFAULT_MTP = os.environ.get("MODELCTL_DEFAULT_MTP", "off")
 # Persisted user defaults live next to profiles so they survive re-installs.
 DEFAULTS_PATH = STATE_DIR / "defaults.json"
 
+# Cached SYCL-name -> xpu-smi-id mapping, built by matching total VRAM
+# between `llama-server --list-devices` and `xpu-smi discovery`. Rebuild
+# with `modelctl place --remap` after hardware changes.
+GPU_MAP_PATH = STATE_DIR / "gpu_map.json"
+DEFAULT_VRAM_LIMIT_PCT = int(os.environ.get("MODELCTL_DEFAULT_VRAM_LIMIT_PCT", "90"))
+DEFAULT_PRIMARY_GPU = os.environ.get("MODELCTL_DEFAULT_PRIMARY_GPU", "")
+
 
 # Env vars worth carrying into generated configs if they're set in the
 # shell modelctl is run from (e.g. after sourcing llama-sycl-env.sh).
@@ -113,6 +121,8 @@ def load_defaults() -> dict:
         "split_mode": pick("split_mode", DEFAULT_SPLIT_MODE),
         "tensor_split": pick("tensor_split", DEFAULT_TENSOR_SPLIT),
         "mtp": pick("mtp", DEFAULT_MTP),
+        "vram_limit_pct": int(pick("vram_limit_pct", DEFAULT_VRAM_LIMIT_PCT)),
+        "primary_gpu": pick("primary_gpu", DEFAULT_PRIMARY_GPU),
     }
 
 
@@ -1649,6 +1659,84 @@ def find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def _local_weights_bytes(model_path: Path) -> int:
+    """Total on-disk size of a model: the file itself, or the sum of all
+    sibling shards when it's the first part of a -NNNNN-of-MMMMM split
+    (profiles only store the first shard's path)."""
+    m = SHARD_RE.match(model_path.name)
+    if not m:
+        return model_path.stat().st_size
+    prefix = m.group(1)
+    return sum(p.stat().st_size for p in model_path.parent.glob(f"{prefix}-*-of-*.gguf")
+               if SHARD_RE.match(p.name))
+
+
+def estimate_vram_footprint(profile):
+    """Estimate this profile's VRAM footprint at its configured ctx/kv_quant.
+    Returns the estimate dict from modelctl_vram.estimate_from_parts, or
+    None when the model file is missing. Computed on demand, never stored
+    -- files and ctx change, and recomputing is cheap."""
+    model_path = Path(profile["model_path"])
+    if not model_path.exists():
+        return None
+    weights = _local_weights_bytes(model_path)
+    mmproj = profile.get("mmproj_path")
+    mmproj_bytes = (Path(mmproj).stat().st_size
+                    if mmproj and Path(mmproj).exists() else 0)
+    cfg = profile.get("config", {})
+    ctx = int(cfg.get("ctx") or DEFAULT_CTX)
+    params = modelctl_vram.gguf_kv_params(
+        modelctl_vram.read_gguf_kv_metadata(str(model_path)))
+    return modelctl_vram.estimate_from_parts(
+        weights, ctx, cfg.get("kv_quant") or "f16",
+        gguf_params=params, mmproj_bytes=mmproj_bytes)
+
+
+def get_gpu_inventory(force_remap: bool = False) -> list:
+    """Live GPU inventory: [{device: 'SYCL0', name, total_bytes, free_bytes}],
+    sorted biggest-first. Free bytes are read fresh from xpu-smi on every
+    call; only the SYCL-name mapping is cached (GPU_MAP_PATH), since probing
+    it needs a slow llama-server --list-devices run. Returns [] when xpu-smi
+    is unavailable -- callers degrade to warnings, never errors."""
+    xpu = modelctl_vram.xpu_devices()
+    if not xpu:
+        return []
+
+    mapping = None
+    if not force_remap and GPU_MAP_PATH.exists():
+        try:
+            mapping = json.loads(GPU_MAP_PATH.read_text())
+        except json.JSONDecodeError:
+            mapping = None
+    if mapping is None:
+        sycl = modelctl_vram.llama_list_devices(LLAMA_SERVER_BIN)
+        mapping = modelctl_vram.match_devices(sycl, xpu)
+        if mapping:
+            GPU_MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
+            GPU_MAP_PATH.write_text(json.dumps(mapping, indent=2))
+    if not mapping:
+        # Last resort: assume enumeration orders agree (true on this box).
+        mapping = {f"SYCL{d['xpu_id']}": d["xpu_id"] for d in xpu}
+
+    by_id = {d["xpu_id"]: d for d in xpu}
+    inventory = []
+    for device, xid in mapping.items():
+        d = by_id.get(xid)
+        if d:
+            inventory.append({"device": device, "name": d["name"],
+                              "total_bytes": d["total_bytes"],
+                              "free_bytes": d["free_bytes"]})
+    return sorted(inventory, key=lambda d: -d["total_bytes"])
+
+
+def resolve_primary_gpu(inventory, defaults=None) -> str:
+    """The configured primary GPU, or the biggest card when unset."""
+    d = defaults if defaults is not None else load_defaults()
+    if d.get("primary_gpu"):
+        return d["primary_gpu"]
+    return inventory[0]["device"] if inventory else ""
 
 
 def print_log_tail(log_path, n=40):
