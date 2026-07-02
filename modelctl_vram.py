@@ -160,38 +160,44 @@ def gguf_kv_params(meta):
             "v_dim_swa": g("attention.value_length_swa")}
 
 
-def kv_cache_bytes(params, ctx, kv_quant):
+def kv_cache_bytes(params, ctx, cache_type_k, cache_type_v=None):
     """KV cache size in bytes for a context of `ctx` tokens.
+
+    K and V caches can be quantized independently (--cache-type-k /
+    --cache-type-v); cache_type_v=None means "same as K". Computed as two
+    separate sums since K and V may differ in both element type and, on
+    SWA models, per-layer head dim.
 
     Sliding-window-attention models (Gemma family) only cache
     `swa_window` tokens on their SWA layers -- llama.cpp allocates those
     layers at the window size, so charging full ctx per layer would
     over-count by an order of magnitude. When the GGUF provides a
-    sliding_window_pattern, compute per-layer; otherwise fall back to the
-    uniform full-ctx formula."""
-    bpe = CACHE_TYPE_BYTES.get((kv_quant or "f16").strip().lower(), 2.0)
+    sliding_window_pattern, compute per-layer; otherwise use the uniform
+    full-ctx formula."""
+    bpe_k = CACHE_TYPE_BYTES.get((cache_type_k or "f16").strip().lower(), 2.0)
+    bpe_v = CACHE_TYPE_BYTES.get(((cache_type_v or cache_type_k) or "f16").strip().lower(), 2.0)
     pattern = params.get("swa_pattern")
     window = params.get("swa_window")
+
     if not pattern or not window:
-        return int(params["block_count"] * ctx * params["n_kv_heads"]
-                   * (params["k_dim"] + params["v_dim"]) * bpe)
+        n = params["block_count"] * ctx * params["n_kv_heads"]
+        return int(n * params["k_dim"] * bpe_k) + int(n * params["v_dim"] * bpe_v)
 
     heads = params.get("kv_heads_per_layer")
     k_swa = params.get("k_dim_swa") or params["k_dim"]
     v_swa = params.get("v_dim_swa") or params["v_dim"]
-    total = 0.0
+    k_elems = 0.0
+    v_elems = 0.0
     for i, is_swa in enumerate(pattern):
         h = heads[i] if heads else params["n_kv_heads"]
-        if is_swa:
-            tokens, dims = min(ctx, window), k_swa + v_swa
-        else:
-            tokens, dims = ctx, params["k_dim"] + params["v_dim"]
-        total += tokens * h * dims * bpe
-    return int(total)
+        tokens = min(ctx, window) if is_swa else ctx
+        k_elems += tokens * h * (k_swa if is_swa else params["k_dim"])
+        v_elems += tokens * h * (v_swa if is_swa else params["v_dim"])
+    return int(k_elems * bpe_k) + int(v_elems * bpe_v)
 
 
 def estimate_from_parts(weights_bytes, ctx, kv_quant, gguf_params=None,
-                        mmproj_bytes=0):
+                        mmproj_bytes=0, cache_type_v=None):
     """VRAM footprint estimate: weights + KV cache + overhead.
 
     overhead = max(1 GiB, 10% of weights) covers compute buffers and
@@ -200,7 +206,7 @@ def estimate_from_parts(weights_bytes, ctx, kv_quant, gguf_params=None,
     """
     weights = int(weights_bytes) + int(mmproj_bytes)
     if gguf_params:
-        kv = kv_cache_bytes(gguf_params, ctx, kv_quant)
+        kv = kv_cache_bytes(gguf_params, ctx, kv_quant, cache_type_v)
         quality = "exact"
     else:
         kv = int(ctx) * HEURISTIC_KV_BYTES_PER_TOKEN

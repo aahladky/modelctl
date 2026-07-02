@@ -388,5 +388,42 @@ class TestSwaKvCacheBytes(unittest.TestCase):
         self.assertIsNone(p["swa_pattern"])
 
 
+class TestSplitCacheTypes(unittest.TestCase):
+    UNIFORM = {"block_count": 2, "n_kv_heads": 4, "k_dim": 128, "v_dim": 64}
+
+    def test_v_type_defaults_to_k_type(self):
+        both = modelctl_vram.kv_cache_bytes(self.UNIFORM, 100, "q8_0")
+        explicit = modelctl_vram.kv_cache_bytes(self.UNIFORM, 100, "q8_0", "q8_0")
+        self.assertEqual(both, explicit)
+
+    def test_split_types_uniform_path(self):
+        # K: 2*100*4*128 elems @ 1.0625 ; V: 2*100*4*64 elems @ 0.5625
+        expected = int(2 * 100 * 4 * 128 * (34 / 32)) + int(2 * 100 * 4 * 64 * (18 / 32))
+        self.assertEqual(
+            modelctl_vram.kv_cache_bytes(self.UNIFORM, 100, "q8_0", "q4_0"),
+            expected)
+
+    def test_split_types_swa_path(self):
+        params = {"block_count": 6, "n_kv_heads": 14.0, "k_dim": 512, "v_dim": 512,
+                  "kv_heads_per_layer": [16, 16, 16, 16, 16, 4],
+                  "swa_window": 1024,
+                  "swa_pattern": [True, True, True, True, True, False],
+                  "k_dim_swa": 256, "v_dim_swa": 256}
+        ctx = 64000
+        k_bytes = int((5 * 1024 * 16 * 256 + 1 * 64000 * 4 * 512) * (34 / 32))
+        v_bytes = int((5 * 1024 * 16 * 256 + 1 * 64000 * 4 * 512) * (18 / 32))
+        self.assertEqual(
+            modelctl_vram.kv_cache_bytes(params, ctx, "q8_0", "q4_0"),
+            k_bytes + v_bytes)
+
+    def test_estimate_from_parts_passes_v_type(self):
+        params = dict(self.UNIFORM)
+        est_split = modelctl_vram.estimate_from_parts(
+            1000, 100, "q8_0", gguf_params=params, cache_type_v="q4_0")
+        est_same = modelctl_vram.estimate_from_parts(
+            1000, 100, "q8_0", gguf_params=params)
+        self.assertLess(est_split["kv_bytes"], est_same["kv_bytes"])
+
+
 if __name__ == "__main__":
     unittest.main()
