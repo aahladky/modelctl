@@ -872,5 +872,88 @@ class TestSummaryScreen(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("couldn't restart llama-router", rendered)
 
 
+class TestFullWizardFlow(unittest.IsolatedAsyncioTestCase):
+    """End-to-end Pilot-driven test walking the complete wizard chain:
+    search -> quant -> configure (vision_mtp skipped, repo has neither
+    mmproj nor mtp files) -> name -> download -> summary. Every
+    modelctl.py function that would otherwise do real network/filesystem/
+    subprocess work is mocked; the test proves the seven screens actually
+    hand off WizardState to each other correctly, which the individual
+    per-screen tests elsewhere in this file can't catch on their own."""
+
+    async def test_search_to_summary_no_extras(self):
+        fake_results = [{
+            "repo_id": "repo/x", "downloads": 1, "likes": 1, "is_gguf": True, "has_mtp": False,
+            "contents": {
+                "quant_groups": [{"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"], "sharded": False, "total_size": 100}],
+                "mmproj_files": [], "mtp_files": [],
+            },
+        }]
+        fake_defaults = {
+            "device": "", "split_mode": "layer", "tensor_split": "3,1",
+            "ctx": 32768, "kv_quant": "q8_0", "flash_attn": "auto", "ttl": 3600, "mtp": "off",
+        }
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.search_models", return_value=fake_results), \
+             mock.patch("modelctl_tui.modelctl.load_defaults", return_value=fake_defaults), \
+             mock.patch("modelctl_tui.modelctl.preflight", return_value=(True, "llama-server", {}, [])), \
+             mock.patch("modelctl_tui.modelctl.next_unique_profile_name", side_effect=lambda s: s), \
+             mock.patch("modelctl_tui.modelctl.download_if_needed", return_value="/models/model-Q4_K_M.gguf"), \
+             mock.patch("modelctl_tui.modelctl.capture_env_passthrough", return_value=[]), \
+             mock.patch("modelctl_tui.modelctl.save_profile") as mock_save, \
+             mock.patch("modelctl_tui.modelctl.generate_artifacts", return_value=True), \
+             mock.patch("modelctl_tui.modelctl.sync_all_backends"), \
+             mock.patch("modelctl_tui.modelctl.sync_hermes_custom_providers"):
+            async with app.run_test() as pilot:
+                # search -> quant. SearchScreen runs search_models() in a
+                # background worker (Task 4), so wait_for_complete() is
+                # required after submitting the query -- pilot.pause() alone
+                # is not enough to let the worker thread finish and the
+                # call_from_thread callback populate #search-results.
+                await pilot.click("#search-input")
+                await pilot.press(*"x", "enter")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                await pilot.click("ListItem")
+                await pilot.pause()
+                self.assertEqual(app.screen.STEP, "quant")
+
+                # quant -> configure (skips vision_mtp: repo has neither
+                # mmproj nor mtp files). QuantPickScreen does no I/O, so a
+                # plain pilot.pause() is enough here.
+                await pilot.click("ListItem")
+                await pilot.pause()
+                self.assertEqual(app.screen.STEP, "configure")
+
+                # configure -> name. ConfigureScreen's preflight() call is
+                # synchronous (Task 7), so no worker wait is needed.
+                await pilot.click("#submit-config")
+                await pilot.pause()
+                self.assertEqual(app.screen.STEP, "name")
+
+                # name -> download -> summary. Clicking #submit-name pushes
+                # DownloadScreen, whose on_mount immediately fires a
+                # background run_download() worker (Task 9). Once that
+                # worker finishes, its success callback pushes SummaryScreen,
+                # whose own on_mount immediately fires a second background
+                # run_sync() worker (Task 10) that does the actual
+                # save_profile/generate_artifacts/sync_all_backends/
+                # sync_hermes_custom_providers sequence -- so two rounds of
+                # wait_for_complete()+pause() are needed, one per worker,
+                # before it's safe to assert against the mocked save_profile.
+                await pilot.click("#submit-name")
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                self.assertEqual(app.screen.STEP, "summary")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+
+                mock_save.assert_called_once()
+                saved_profile = mock_save.call_args[0][0]
+                self.assertEqual(saved_profile["repo_id"], "repo/x")
+                self.assertEqual(saved_profile["model_path"], "/models/model-Q4_K_M.gguf")
+
+
 if __name__ == "__main__":
     unittest.main()
