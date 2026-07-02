@@ -481,6 +481,12 @@ class TestCalculatorMain(unittest.TestCase):
         code, out = self._run([str(bad)])
         self.assertEqual(code, 1)
 
+    def test_missing_mmproj_exits_1_with_error(self):
+        missing = Path(self.tmp.name) / "nope.mmproj"
+        code, out = self._run([str(self.path), "--mmproj", str(missing)])
+        self.assertEqual(code, 1)
+        self.assertIn("error", out.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

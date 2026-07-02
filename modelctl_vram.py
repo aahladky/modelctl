@@ -1,9 +1,11 @@
 """VRAM-awareness helpers for modelctl: GGUF metadata, footprint estimation,
 GPU probing, and the placement rule.
 
-Pure module: no modelctl import, no printing, no state. Everything either
-returns data or a safe empty value ({} / [] / None) on failure, so callers
-degrade to warnings instead of crashing when files/tools are absent.
+Pure module: no modelctl import, no printing, no state in the estimator/probe
+functions -- everything either returns data or a safe empty value ({} / [] /
+None) on failure, so callers degrade to warnings instead of crashing when
+files/tools are absent. The exception is main(), the deliberate CLI entry
+point, which does print.
 """
 import json
 import math
@@ -373,11 +375,17 @@ def main(argv=None):
 
     from pathlib import Path
     weights = weights_bytes_on_disk(args.model)
-    mmproj_bytes = Path(args.mmproj).stat().st_size if args.mmproj else 0
+    if args.mmproj:
+        try:
+            mmproj_bytes = Path(args.mmproj).stat().st_size
+        except OSError as exc:
+            print(f"error: couldn't read mmproj file {args.mmproj} -- {exc}")
+            return 1
+    else:
+        mmproj_bytes = 0
     ctk = args.cache_type_k
     ctv = args.cache_type_v or ctk
     k_only = kv_cache_bytes(params, args.ctx, ctk, ctk)
-    kv = kv_cache_bytes(params, args.ctx, ctk, ctv)
     est = estimate_from_parts(weights, args.ctx, ctk, gguf_params=params,
                               mmproj_bytes=mmproj_bytes, cache_type_v=ctv)
 
@@ -391,7 +399,7 @@ def main(argv=None):
     print(f"ctx {args.ctx}, K {ctk}, V {ctv}")
     print()
     print(f"weights:  {_fmt_gib(est['weights'])}")
-    print(f"kv cache: {_fmt_gib(kv)}  (K {ctk} + V {ctv}; both-{ctk} would be {_fmt_gib(k_only)})")
+    print(f"kv cache: {_fmt_gib(est['kv_bytes'])}  (K {ctk} + V {ctv}; both-{ctk} would be {_fmt_gib(k_only)})")
     print(f"overhead: {_fmt_gib(est['overhead'])}")
     print(f"total:    {_fmt_gib(est['total'])}")
     return 0
