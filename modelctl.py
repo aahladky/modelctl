@@ -1609,6 +1609,78 @@ def cmd_verify(args):
         sys.exit(1)
 
 
+def _format_placement(cfg: dict) -> str:
+    if cfg.get("split_mode") and cfg.get("tensor_split"):
+        return f"split {cfg['tensor_split']} ({cfg['split_mode']})"
+    return cfg.get("device") or "(backend default)"
+
+
+def cmd_place(args):
+    """Report (and with --apply, rewrite) each profile's GPU placement from
+    its VRAM footprint estimate: fits the primary card -> pin to it; too
+    big -> capacity-ratio split; too big entirely -> loud warning."""
+    inventory = get_gpu_inventory(force_remap=args.remap)
+    if not inventory:
+        print("Error: couldn't read GPU inventory (is xpu-smi installed and working?).")
+        sys.exit(1)
+    d = load_defaults()
+    primary = resolve_primary_gpu(inventory, d)
+
+    print("GPUs: " + ", ".join(
+        f"{g['device']}={_format_size(g['total_bytes'])}" for g in inventory))
+    print(f"Placement budget: {d['vram_limit_pct']}% of card capacity; "
+          f"primary: {primary}\n")
+
+    if args.name:
+        names = [args.name]
+    else:
+        names = [p.stem for p in sorted(PROFILES_DIR.glob("*.json"))]
+        if not names:
+            print("No profiles saved yet.")
+            return
+
+    changed = False
+    print(f"{'NAME':<28} {'ESTIMATE':<18} {'CURRENT':<22} RECOMMENDED")
+    for name in names:
+        profile = load_profile(name)
+        cfg = profile.get("config", {})
+        est = estimate_vram_footprint(profile)
+        if est is None:
+            print(f"{name:<28} {'? (file missing)':<18} "
+                  f"{_format_placement(cfg):<22} -")
+            continue
+        rec = modelctl_vram.recommend_placement(
+            est["total"], inventory, d["vram_limit_pct"], primary)
+        est_col = f"~{_format_size(est['total'])} ({est['quality']})"
+        rec_col = _format_placement(rec) if rec else "?"
+        if rec and not rec["fits"]:
+            rec_col += "  WARNING: exceeds combined VRAM budget!"
+        print(f"{name:<28} {est_col:<18} {_format_placement(cfg):<22} {rec_col}")
+
+        if args.apply and rec:
+            same = (cfg.get("device", "") == rec["device"]
+                    and cfg.get("split_mode", "") == rec["split_mode"]
+                    and cfg.get("tensor_split", "") == rec["tensor_split"])
+            if not same:
+                cfg["device"] = rec["device"]
+                cfg["split_mode"] = rec["split_mode"]
+                cfg["tensor_split"] = rec["tensor_split"]
+                profile["config"] = cfg
+                save_profile(profile)
+                generate_artifacts(profile)
+                changed = True
+                print(f"  -> applied")
+
+    if changed:
+        sync_all_backends(restart_router=not args.no_router_restart)
+        if not args.no_hermes:
+            sync_hermes_custom_providers()
+    elif args.apply:
+        print("\nNothing to change -- all placements already match.")
+    else:
+        print("\nRe-run with --apply to rewrite placements to the recommendations.")
+
+
 def cmd_disable(args):
     profile = load_profile(args.name)
     if not profile.get("enabled", True):
@@ -1947,6 +2019,17 @@ def build_arg_parser():
     p_verify.add_argument("--no-router-restart", action="store_true",
                            help="don't restart the router-mode systemd service after updating its preset")
     p_verify.set_defaults(func=cmd_verify)
+
+    p_place = sub.add_parser("place", help="recommend (or apply) VRAM-fit GPU placement for profiles")
+    p_place.add_argument("name", nargs="?", default=None, help="only this profile (default: all)")
+    p_place.add_argument("--apply", action="store_true",
+                          help="rewrite profile placement to the recommendation and re-sync")
+    p_place.add_argument("--remap", action="store_true",
+                          help="rebuild the cached SYCL<->xpu-smi device mapping")
+    p_place.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
+    p_place.add_argument("--no-router-restart", action="store_true",
+                          help="don't restart the router-mode systemd service after updating its preset")
+    p_place.set_defaults(func=cmd_place)
 
     p_disable = sub.add_parser("disable", help="exclude a saved profile from router/Hermes sync without deleting it")
     p_disable.add_argument("name")

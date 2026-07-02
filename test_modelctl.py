@@ -1105,5 +1105,67 @@ class TestGetGpuInventory(unittest.TestCase):
         self.assertEqual([d["device"] for d in inv], ["SYCL0", "SYCL1"])
 
 
+class TestCmdPlace(unittest.TestCase):
+    INVENTORY = [
+        {"device": "SYCL0", "name": "big", "total_bytes": 34242297856,
+         "free_bytes": 30 << 30},
+        {"device": "SYCL1", "name": "small", "total_bytes": 12809404416,
+         "free_bytes": 12 << 30},
+    ]
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.profiles_dir = Path(self.tmp.name) / "profiles"
+        self.profiles_dir.mkdir()
+        model = Path(self.tmp.name) / "model.gguf"
+        model.write_bytes(b"x" * 1000)
+        (self.profiles_dir / "small-model.json").write_text(json.dumps({
+            "name": "small-model", "repo_id": "r/a", "file": "f",
+            "model_path": str(model),
+            "config": {"ctx": 4096, "kv_quant": "q8_0", "flash_attn": "auto",
+                       "split_mode": "layer", "tensor_split": "3,1",
+                       "ttl": 3600, "mtp": "off", "extra": ""},
+            "env": [], "enabled": True,
+        }))
+
+    def _args(self, **kw):
+        defaults = {"name": None, "apply": False, "remap": False,
+                    "no_hermes": True, "no_router_restart": True}
+        defaults.update(kw)
+        m = mock.Mock()
+        m.configure_mock(**defaults)
+        return m
+
+    def test_report_only_does_not_touch_profile(self):
+        before = (self.profiles_dir / "small-model.json").read_text()
+        with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
+             mock.patch.object(modelctl, "get_gpu_inventory",
+                               return_value=self.INVENTORY):
+            modelctl.cmd_place(self._args())
+        self.assertEqual((self.profiles_dir / "small-model.json").read_text(), before)
+
+    def test_apply_rewrites_placement_and_syncs(self):
+        with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
+             mock.patch.object(modelctl, "get_gpu_inventory",
+                               return_value=self.INVENTORY), \
+             mock.patch.object(modelctl, "generate_artifacts") as mock_gen, \
+             mock.patch.object(modelctl, "sync_all_backends") as mock_sync:
+            modelctl.cmd_place(self._args(apply=True))
+        saved = json.loads((self.profiles_dir / "small-model.json").read_text())
+        # tiny model fits the primary card alone -> pinned, split cleared
+        self.assertEqual(saved["config"]["device"], "SYCL0")
+        self.assertEqual(saved["config"]["split_mode"], "")
+        self.assertEqual(saved["config"]["tensor_split"], "")
+        mock_gen.assert_called_once()
+        mock_sync.assert_called_once()
+
+    def test_no_gpu_inventory_exits_nonzero(self):
+        with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
+             mock.patch.object(modelctl, "get_gpu_inventory", return_value=[]):
+            with self.assertRaises(SystemExit):
+                modelctl.cmd_place(self._args())
+
+
 if __name__ == "__main__":
     unittest.main()
