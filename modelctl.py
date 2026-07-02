@@ -3,10 +3,12 @@
 modelctl - search, pull, and configure local GGUF models from Hugging Face.
 
 Backend-agnostic: generates a run.sh (raw llama-server command), a
-llama-swap config snippet, and an Ollama-style Modelfile from one
+router preset.ini, and an Ollama-style Modelfile from one
 saved profile. Profiles are plain JSON so they're easy to inspect,
 edit by hand, or regenerate later.
 """
+import functools
+import hashlib
 import json
 import os
 import re
@@ -35,8 +37,6 @@ DEFAULT_MODELS_DIR = Path(os.environ.get("MODELCTL_MODELS_DIR", Path.home() / "m
 _resolved = os.environ.get("MODELCTL_LLAMA_SERVER") or shutil.which("llama-server")
 LLAMA_SERVER_BIN = _resolved or "llama-server"
 LLAMA_SERVER_RESOLVED = _resolved is not None
-LLAMA_SWAP_CONFIG = Path(os.environ.get("MODELCTL_LLAMA_SWAP_CONFIG", Path.home() / "llama-swap" / "config.yaml"))
-LLAMA_SWAP_HEADER = Path(os.environ.get("MODELCTL_LLAMA_SWAP_HEADER", Path.home() / "llama-swap" / "config.header.yaml"))
 ROUTER_PRESET_PATH = Path(os.environ.get("MODELCTL_ROUTER_PRESET", Path.home() / "llama-router" / "router.preset.ini"))
 # Not consumed by modelctl itself -- read by the operator when launching the router
 # process by hand, e.g. `llama-server --port $MODELCTL_ROUTER_PORT --models-preset ...`.
@@ -51,9 +51,8 @@ ROUTER_SERVICE_NAME = os.environ.get("MODELCTL_ROUTER_SERVICE", "llama-router.se
 # in sync with saved profiles so pulled models show up in `hermes model`.
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
 HERMES_CONFIG = Path(os.environ.get("MODELCTL_HERMES_CONFIG", HERMES_HOME / "config.yaml"))
-# Base URL of the llama-swap / OpenAI-compatible endpoint Hermes should talk to.
-# Defaults to the one already configured in Hermes, then to a local llama-swap.
-LLAMA_SWAP_BASE_URL = os.environ.get("MODELCTL_LLAMA_SWAP_BASE_URL")
+# Base URL of the router / OpenAI-compatible endpoint Hermes should talk to.
+ROUTER_BASE_URL = os.environ.get("MODELCTL_ROUTER_BASE_URL")
 
 # Defaults tuned for serving local GGUF models to Hermes Agent. Hermes sends
 # long contexts and benefits from KV cache quantization for memory headroom.
@@ -80,7 +79,11 @@ DEFAULTS_PATH = STATE_DIR / "defaults.json"
 # shell modelctl is run from (e.g. after sourcing llama-sycl-env.sh).
 # Override the list with MODELCTL_PASSTHROUGH_ENV="VAR1,VAR2,...".
 DEFAULT_PASSTHROUGH = ["LD_LIBRARY_PATH", "SYCL_CACHE_PERSISTENT", "ONEAPI_DEVICE_SELECTOR", "GGML_SYCL_DISABLE_OPT"]
-PASSTHROUGH_VARS = os.environ.get("MODELCTL_PASSTHROUGH_ENV", ",".join(DEFAULT_PASSTHROUGH)).split(",")
+PASSTHROUGH_VARS = [
+    v.strip()
+    for v in os.environ.get("MODELCTL_PASSTHROUGH_ENV", ",".join(DEFAULT_PASSTHROUGH)).split(",")
+    if v.strip()
+]
 
 api = HfApi()
 
@@ -125,16 +128,16 @@ def prompt_defaults():
     print("\n--- modelctl defaults (blank = leave unchanged) ---")
     print(f"Current defaults: {json.dumps(current, indent=2)}\n")
 
-    device = input(f"GPU device (blank = use split strategy) [{current.get('device', '') or '(none)'}]: ").strip() or current.get("device", "")
+    device = input(f"GPU device, '-' to clear [{current.get('device', '') or '(none)'}]: ").strip() or current.get("device", "")
+    if device == "-":
+        device = ""
     split_mode = input(f"Split mode [{current['split_mode']}]: ").strip() or current["split_mode"]
     tensor_split = input(f"Tensor split weights [{current['tensor_split']}]: ").strip() or current["tensor_split"]
-    ctx_raw = input(f"Context length [{current['ctx']}]: ").strip()
-    ctx = int(ctx_raw) if ctx_raw.isdigit() else current["ctx"]
+    ctx = prompt_int("Context length", current["ctx"])
     kv_quant = input(f"KV cache quant [{current['kv_quant']}]: ").strip() or current["kv_quant"]
     flash_attn = input(f"Flash attention [{current['flash_attn']}]: ").strip() or current["flash_attn"]
 
-    ttl_raw = input(f"llama-swap idle TTL in seconds [{current['ttl']}]: ").strip()
-    ttl = int(ttl_raw) if ttl_raw.isdigit() else current["ttl"]
+    ttl = prompt_int("llama-swap idle TTL in seconds", current["ttl"])
 
     mtp = input(f"Multi-token prediction, on/off -- only if the GGUF has MTP heads [{current.get('mtp', DEFAULT_MTP)}]: ").strip() or current.get("mtp", DEFAULT_MTP)
 
@@ -182,43 +185,16 @@ def write_hermes_config(cfg: dict):
     path.write_text(yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False, indent=2).rstrip() + "\n")
 
 
-def get_llama_swap_base_url(cfg: dict = None) -> str:
-    """Figure out the OpenAI-compatible base URL Hermes should use.
-
-    Resolution order:
-      1. MODELCTL_LLAMA_SWAP_BASE_URL env var
-      2. The base_url already configured in Hermes (model.base_url or any custom_provider)
-      3. http://127.0.0.1:7070/v1 (common llama-swap default)
-    """
-    if LLAMA_SWAP_BASE_URL:
-        return LLAMA_SWAP_BASE_URL.rstrip("/") + "/"
-    cfg = cfg if cfg is not None else read_hermes_config()
-    # Hermes' top-level model block may already point at the swap endpoint.
-    model_cfg = cfg.get("model") or {}
-    if model_cfg.get("base_url"):
-        return model_cfg["base_url"].rstrip("/") + "/"
-    for cp in cfg.get("custom_providers") or []:
-        if cp.get("base_url"):
-            return cp["base_url"].rstrip("/") + "/"
-    return "http://127.0.0.1:7070/v1"
-
-
-def get_router_base_url(swap_base_url: str = None) -> str:
+def get_router_base_url() -> str:
     """Figure out the router-mode OpenAI-compatible base URL for Hermes.
 
-    Defaults to the same host as the llama-swap base URL with ROUTER_PORT
-    substituted for whatever port llama-swap uses -- override with
+    Defaults to http://127.0.0.1:7071/v1 -- override with
     MODELCTL_ROUTER_BASE_URL if router mode lives somewhere else entirely.
     """
     override = os.environ.get("MODELCTL_ROUTER_BASE_URL")
     if override:
         return override.rstrip("/") + "/"
-    swap_base_url = swap_base_url or get_llama_swap_base_url()
-    m = re.match(r"^(https?://[^:/]+):(\d+)(/.*)?$", swap_base_url.rstrip("/"))
-    if m:
-        path = m.group(3) or "/v1"
-        return f"{m.group(1)}:{ROUTER_PORT}{path}/"
-    return swap_base_url  # fallback: couldn't parse, reuse the same URL
+    return "http://127.0.0.1:7071/v1"
 
 
 def router_root_url() -> str:
@@ -295,6 +271,8 @@ def _router_models_action(action: str, name: str, timeout: int = 120):
         return False, f"router returned HTTP {e.code} for {action} '{name}': {detail}"
     except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
         return False, f"couldn't reach router at {url}: {e}"
+    except json.JSONDecodeError as e:
+        return False, f"router returned a non-JSON response for {action} '{name}': {e}"
     if resp.get("success"):
         return True, f"{action} requested for '{name}'."
     return False, f"router responded without success for {action} '{name}': {resp}"
@@ -314,8 +292,8 @@ def router_unload(name: str, timeout: int = 30):
 
 
 def sync_hermes_custom_providers(dry_run: bool = False):
-    """Rebuild Hermes' provider entries from all saved modelctl profiles, for
-    BOTH the llama-swap and router-mode endpoints.
+    """Rebuild Hermes' provider entries from all saved modelctl profiles,
+    for the router-mode endpoint.
 
     Hermes's own config format for this has moved at least twice already: a
     `custom_providers:` list initially, now a `providers:` dict keyed by name
@@ -337,15 +315,14 @@ def sync_hermes_custom_providers(dry_run: bool = False):
         return False
 
     cfg = read_hermes_config()
-    swap_url = get_llama_swap_base_url(cfg)
-    router_url = get_router_base_url(swap_url)
+    router_url = get_router_base_url()
 
     profiles = sorted(PROFILES_DIR.glob("*.json"))
     models_map = {}
     for p in profiles:
         profile = json.loads(p.read_text())
         name = profile.get("name")
-        if not name:
+        if not name or not profile.get("enabled", True):
             continue
         # Both backends expose models by profile name at /v1/models.
         ctx = profile.get("config", {}).get("ctx")
@@ -387,7 +364,7 @@ def sync_hermes_custom_providers(dry_run: bool = False):
         existing_models = existing_entry.get("models") or {}
         # Merge per-model so extras Hermes itself adds (e.g. reasoning_effort)
         # survive, while context_length always reflects the current profile.
-        # Models no longer in models_map (deleted profiles) are dropped.
+        # Models no longer in models_map (deleted or disabled profiles) are dropped.
         merged_models = {
             mname: {**existing_models.get(mname, {}), **mctx}
             for mname, mctx in models_map.items()
@@ -401,7 +378,6 @@ def sync_hermes_custom_providers(dry_run: bool = False):
         }
         return target_name
 
-    swap_name = upsert(swap_url, "local-swap")
     router_name = upsert(router_url, "local-router")
 
     if providers == before and not had_legacy_key:
@@ -412,13 +388,11 @@ def sync_hermes_custom_providers(dry_run: bool = False):
 
     if dry_run:
         print("Would write the following providers to Hermes config:")
-        print(f"  - {swap_name} @ {swap_url}: models = [{', '.join(models_map.keys())}]")
         print(f"  - {router_name} @ {router_url}: models = [{', '.join(models_map.keys())}]")
         return True
 
     write_hermes_config(cfg)
     print(f"Synced {len(models_map)} model(s) to Hermes providers @ {HERMES_CONFIG}")
-    print(f"  {swap_name} -> {swap_url}")
     print(f"  {router_name} -> {router_url}")
     return True
 
@@ -436,7 +410,8 @@ def strip_quant_from_label(label: str) -> str:
     # Remove .gguf extension first.
     name = re.sub(r"\.gguf$", "", label, flags=re.IGNORECASE)
     # Strip well-known quant suffixes: -q4_k_m, -Q5_K_M, -f16, -bf16, -iq4_xs, etc.
-    name = re.sub(r"-[IQ]?[0-9]_[A-Za-z0-9_]+(?:-\d+)?$", "", name, flags=re.IGNORECASE)
+    # The leading I/Q is required so version-ish suffixes like '-3_1' survive.
+    name = re.sub(r"-I?Q[0-9]_[A-Za-z0-9_]+(?:-\d+)?$", "", name, flags=re.IGNORECASE)
     name = re.sub(r"-(?:f16|f32|bf16|q4_0|q4_k|q5_k|q6_k|q8_0|q8_k|q2_k|iq4_xs|iq4_nl|q4km|q5km|q6k|q8k)$", "", name, flags=re.IGNORECASE)
     # Remove common bracketed quant forms like [Q4_K_M].
     name = re.sub(r"\s*[\[(](?:Q|F|IQ|BF)[0-9][A-Za-z0-9_]*[\])]\s*$", "", name, flags=re.IGNORECASE)
@@ -595,7 +570,15 @@ def preflight(profile, auto_fix=True):
 
     # 3. env vars -- only actually required if this profile targets a SYCL
     #    device, since that's the case that's bitten us (libiomp5.so etc).
-    effective_env = {k: v for e in (profile.get("env") or []) for k, v in [e.split("=", 1)]}
+    # Profiles are documented as hand-editable -- tolerate a malformed env
+    # entry (no '=') with a warning instead of an opaque unpacking error.
+    effective_env = {}
+    for e in profile.get("env") or []:
+        if "=" in e:
+            k, _, v = e.partition("=")
+            effective_env[k] = v
+        else:
+            messages.append(f"WARNING: ignoring malformed env entry (no '='): {e!r}")
     needs_sycl_env = device.upper().startswith("SYCL")
     if needs_sycl_env and "LD_LIBRARY_PATH" not in effective_env:
         if auto_fix:
@@ -871,11 +854,17 @@ def parse_selection(s: str, max_index: int):
     return out
 
 
+@functools.lru_cache(maxsize=None)
 def _repo_file_sizes(repo_id: str) -> dict:
     """Best-effort map of {filename: size_bytes} for every file in a repo,
     fetched in a single HF API call. Returns {} on any failure so callers
     degrade gracefully (missing sizes, not a crash) rather than forcing a
-    hard dependency on API availability for basic search/browse to work."""
+    hard dependency on API availability for basic search/browse to work.
+
+    Cached per repo_id for the life of the process: pulling a sharded model
+    calls this once per shard, and `verify` once per file field, all for the
+    same repo -- one API hit covers them all. (Failures cache as {} too;
+    acceptable for a short-lived CLI.)"""
     try:
         info = api.model_info(repo_id, files_metadata=True)
         return {sib.rfilename: sib.size for sib in info.siblings if sib.size is not None}
@@ -892,23 +881,106 @@ def _remote_file_size(repo_id: str, filename: str):
 
 
 def download_if_needed(repo_id: str, filename: str, dest_dir: Path) -> str:
-    """Skip the download only if a file already sitting in dest_dir actually
+    """Skip the download only if a file already sitting on disk actually
     matches THIS repo's copy (verified by size) -- avoids re-pulling a
     multi-GB mmproj/model file if it's already present from an earlier run
-    or a profile that shares it, but also avoids silently serving the WRONG
-    file when two different repos happen to use the same filename (many
-    repos ship a generically-named 'mmproj-F16.gguf', for instance)."""
-    target = dest_dir / Path(filename).name
+    or a profile that shares it.
+
+    Downloads are namespaced under dest_dir/<repo_id>/ rather than landing
+    flat in dest_dir. Many repos ship generically-named files (e.g. a
+    'mmproj-F16.gguf' or 'model-mtp.gguf' with no repo-specific prefix), so
+    a flat directory meant a second repo using the same filename would
+    either get served the FIRST repo's file, or -- worse, if the size check
+    below caught the mismatch -- overwrite it on disk out from under any
+    earlier profile that still points at that path. Per-repo subdirectories
+    make that collision structurally impossible instead of merely detected."""
+    repo_dir = dest_dir / repo_id
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    # hf_hub_download(local_dir=...) preserves the repo-relative path, so a
+    # file in a subfolder (e.g. 'BF16/model.gguf') lands at
+    # repo_dir/BF16/model.gguf -- check that same path, not just the basename,
+    # or the "already present" fast path never matches subfolder files.
+    target = repo_dir / filename
     if target.exists() and target.stat().st_size > 0:
         expected_size = _remote_file_size(repo_id, filename)
         if expected_size is None or target.stat().st_size == expected_size:
             print(f"  already present, skipping download: {target.name}")
             return str(target)
         print(f"  {target.name} exists but its size ({target.stat().st_size} bytes) doesn't "
-              f"match {repo_id}'s copy ({expected_size} bytes) -- different repo's file with "
-              f"the same name, re-downloading.")
-    print(f"  downloading {filename} -> {dest_dir} ...")
-    return hf_hub_download(repo_id=repo_id, filename=filename, local_dir=str(dest_dir))
+              f"match {repo_id}'s current copy ({expected_size} bytes) -- stale or partial "
+              f"download, re-downloading.")
+    print(f"  downloading {filename} -> {repo_dir} ...")
+    return hf_hub_download(repo_id=repo_id, filename=filename, local_dir=str(repo_dir))
+
+
+def _find_repo_filename_by_basename(repo_id: str, basename: str):
+    """Recover the repo-relative filename for a locally-saved path.
+
+    Profiles only ever recorded the local basename (model_path etc. --
+    there's no separate 'repo filename' field), so verifying an existing
+    download against its repo means matching on basename. Returns
+    (rfilename, size), or (None, None) if the repo can't be reached, the
+    basename doesn't appear at all, or it appears more than once (e.g. the
+    same filename nested under two different subfolders) -- ambiguous cases
+    are left alone rather than guessed at.
+    """
+    sizes = _repo_file_sizes(repo_id)
+    matches = [(rfilename, size) for rfilename, size in sizes.items()
+               if Path(rfilename).name == basename]
+    if len(matches) == 1:
+        return matches[0]
+    return None, None
+
+
+PROFILE_FILE_FIELDS = ("model_path", "mmproj_path", "mtp_path")
+
+
+def verify_profile_files(profile: dict) -> list:
+    """Check model_path/mmproj_path/mtp_path against this profile's repo_id.
+
+    This is the repair path for the pre-fix collision bug: before per-repo
+    download directories, two repos sharing a generic filename (e.g. a
+    'mmproj-F16.gguf' with no repo-specific prefix) could end up pointing a
+    profile at a file that actually belongs to a *different* repo. Returns
+    a list of {field, path, status, repo_filename, expected_size,
+    local_size} dicts, one per non-empty field, with status one of "ok",
+    "mismatch", "missing", or "unknown" (repo unreachable, or basename
+    isn't uniquely identifiable in the repo -- e.g. this happens for the
+    non-primary parts of a sharded model, since only the first shard's path
+    is saved on the profile).
+    """
+    repo_id = profile.get("repo_id")
+    results = []
+    if not repo_id:
+        return results
+
+    for field in PROFILE_FILE_FIELDS:
+        raw_path = profile.get(field)
+        if not raw_path:
+            continue
+        local_path = Path(raw_path)
+        basename = local_path.name
+        repo_filename, expected_size = _find_repo_filename_by_basename(repo_id, basename)
+        local_size = local_path.stat().st_size if local_path.exists() else None
+
+        if repo_filename is None:
+            status = "unknown"
+        elif local_size is None:
+            status = "missing"
+        elif expected_size is not None and local_size != expected_size:
+            status = "mismatch"
+        else:
+            status = "ok"
+
+        results.append({
+            "field": field,
+            "path": str(local_path),
+            "status": status,
+            "repo_filename": repo_filename,
+            "expected_size": expected_size,
+            "local_size": local_size,
+        })
+    return results
 
 
 def prompt_pick(label: str, prompt: str) -> int:
@@ -994,7 +1066,8 @@ def cmd_pull(args):
             else:
                 print(f"  index {ti} isn't in the MTP list, skipping MTP.")
 
-    dest_dir = Path(input(f"Download directory [{DEFAULT_MODELS_DIR}]: ").strip() or DEFAULT_MODELS_DIR)
+    dest_dir = Path(input(f"Download directory, a per-repo subfolder will be created under it "
+                          f"[{DEFAULT_MODELS_DIR}]: ").strip() or DEFAULT_MODELS_DIR)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     local_mmproj_path = None
@@ -1039,6 +1112,7 @@ def cmd_pull(args):
             "mtp_path": local_mtp_path,
             "config": config,
             "env": env,
+            "enabled": True,
         }
         save_profile(profile)
         generate_artifacts(profile)
@@ -1047,39 +1121,51 @@ def cmd_pull(args):
     sync_all_backends(restart_router=not args.no_router_restart)
     if not args.no_hermes:
         sync_hermes_custom_providers()
-    print(f"\nDone. {len(chosen_groups)} profile(s) created and pushed to {LLAMA_SWAP_CONFIG}.")
-    print("llama-swap is watching that file (--watch-config) so it should pick this up live -- no restart needed.")
+    print(f"\nDone. {len(chosen_groups)} profile(s) created and pushed to {ROUTER_PRESET_PATH}.")
+    if args.no_router_restart:
+        print("Router NOT restarted (--no-router-restart) -- the running router won't see the "
+              f"new preset until you restart it, e.g. `systemctl --user restart {ROUTER_SERVICE_NAME}`.")
 
 
-def prompt_int(prompt: str, default: int) -> str:
+def prompt_int(prompt: str, default: int) -> int:
     """Prompt for an integer, re-asking on garbage input (e.g. a numpad
     sending escape codes instead of digits with NumLock off) instead of
-    silently accepting whatever the terminal sent."""
+    silently accepting whatever the terminal sent. Returns an int so
+    profiles store ctx/ttl consistently typed (build_server_args and the
+    renderers stringify at the point of use)."""
     while True:
         raw = input(f"{prompt} [{default}]: ").strip()
         if not raw:
-            return str(default)
+            return int(default)
         if raw.lstrip("-").isdigit():
-            return raw
+            return int(raw)
         print(f"  '{raw}' isn't a number -- try again, or press Enter for the default ({default}).")
 
 
-def prompt_config(repo_id: str = "", label: str = "", mtp_file_chosen: bool = False):
-    print("\n--- runtime config (blank = sensible default) ---")
-    d = load_defaults()
-    device = input(f"GPU device [{d.get('device') or 'blank = use split strategy'}]: ").strip() or d.get("device", "")
+def prompt_config(repo_id: str = "", label: str = "", mtp_file_chosen: bool = False,
+                  current: dict = None):
+    """Prompt for a profile's runtime config. Defaults come from the saved
+    user defaults, overlaid with `current` when editing an existing profile
+    -- so pressing Enter through the prompts keeps that profile's values
+    instead of silently resetting it to the global defaults."""
+    print("\n--- runtime config (blank = keep the value shown) ---")
+    d = {**load_defaults(), "extra": "", **(current or {})}
+    device = input(f"GPU device, '-' to clear [{d.get('device') or 'blank = use split strategy'}]: ").strip() or d.get("device", "")
+    if device == "-":
+        device = ""
     split_mode = input(f"Split mode [{d['split_mode']}]: ").strip() or d["split_mode"]
     tensor_split = input(f"Tensor split weights [{d['tensor_split']}]: ").strip() or d["tensor_split"]
     ctx = prompt_int("Context length", d["ctx"])
     kv_quant = input(f"KV cache quant, e.g. q8_0 [{d['kv_quant']}]: ").strip() or d["kv_quant"]
     flash_attn = input(f"Flash attention [{d['flash_attn']}]: ").strip() or d["flash_attn"]
 
-
     ttl = prompt_int("llama-swap idle TTL in seconds", d["ttl"])
     mtp_default = "on" if mtp_file_chosen else d.get("mtp", DEFAULT_MTP)
     mtp_hint = " (MTP file was just downloaded for this pull)" if mtp_file_chosen else ""
     mtp = input(f"Multi-token prediction, on/off -- only if this GGUF has MTP heads [{mtp_default}]{mtp_hint}: ").strip() or mtp_default
-    extra = input("Any extra llama-server flags (raw string, optional): ").strip()
+    extra = input(f"Any extra llama-server flags, '-' to clear [{d.get('extra') or 'none'}]: ").strip() or d.get("extra", "")
+    if extra == "-":
+        extra = ""
     return {
         "device": device,
         "split_mode": split_mode,
@@ -1115,7 +1201,9 @@ def build_server_args(profile):
         "--model", str(profile['model_path']),
         "-ngl", "999",
         "--flash-attn", cfg['flash_attn'],
-        "-c", cfg['ctx'],
+        # str() because ctx is an int in defaults/TUI-written profiles but a
+        # string in older prompt-written ones -- subprocess argv needs str.
+        "-c", str(cfg['ctx']),
         "--jinja",
         "--parallel", "1",
     ]
@@ -1154,13 +1242,10 @@ def build_server_args(profile):
 def render_llama_swap_entry(profile):
     ok, effective_bin, effective_env, messages = preflight(profile, auto_fix=True)
     args = build_server_args(profile)
-    # Escape values that would break YAML string syntax if used unquoted.
-    def yaml_escape(token):
-        token = str(token)
-        if token and not re.match(r"^[A-Za-z0-9._/+:@-]+$", token):
-            return json.dumps(token)
-        return token
-    args_str = " \\\n      ".join(yaml_escape(a) for a in args)
+    # The cmd: block scalar is a *shell* command line, so quote for the
+    # shell (shlex), not YAML -- json.dumps-style double quotes would leave
+    # `$` and backticks live inside the string.
+    args_str = " \\\n      ".join(shlex.quote(str(a)) for a in args)
     log_path = PROFILES_DIR / profile["name"] / "llama-swap.log"
     lines = [
         f"{profile['name']}:",
@@ -1241,10 +1326,9 @@ def generate_artifacts(profile):
     # `args` into one string, then .join()-ed *that string* again here --
     # str.join() on a string iterates its characters, so every argument got
     # split one letter per line in the generated run.sh. Map shlex.quote over
-    # each token individually instead, same pattern render_llama_swap_entry
-    # uses with yaml_escape.
+    # each token individually instead, same as render_llama_swap_entry.
     args_str = " \\\n  ".join(shlex.quote(str(a)) for a in args)
-    env_exports = "\n".join(f'export {k}="{v}"' for k, v in effective_env.items())
+    env_exports = "\n".join(f"export {k}={shlex.quote(v)}" for k, v in effective_env.items())
 
     # 1. raw run.sh -- works regardless of backend, since everything
     #    ultimately calls llama-server the same way
@@ -1282,71 +1366,57 @@ DEFAULT_HEADER = "healthCheckTimeout: 400\nglobalTTL: 0\n"
 
 def _file_hash(path: Path) -> str:
     """Fast content hash for dedup checks."""
-    import hashlib
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else ""
 
 
-def sync_llama_swap_config():
-    """Rebuild the live llama-swap config.yaml's `models:` section from
-    every saved profile. Static settings (healthCheckTimeout, groups, etc.)
-    live in a separate header file modelctl never touches.
+def sync_router_preset(restart: bool = True) -> int:
+    """Rebuild router.preset.ini from every saved profile. Detects
+    changes before writing so it doesn't force an unnecessary router
+    reload. Returns the number of enabled profiles synced.
 
-    Always backs up whatever was at LLAMA_SWAP_CONFIG before overwriting it --
-    sync is destructive by design, but you should never lose the old file
-    with no way to get it back.
+    restart: when True (the default), automatically restart the router's
+    systemd --user unit after actually writing a changed preset, since
+    router mode requires a restart to pick one up. Pass restart=False if
+    you're not running the router as a systemd unit, or want to batch
+    multiple syncs before reloading once yourself.
     """
-    first_transition = not LLAMA_SWAP_HEADER.exists()
-    if first_transition:
-        LLAMA_SWAP_HEADER.parent.mkdir(parents=True, exist_ok=True)
-        LLAMA_SWAP_HEADER.write_text(DEFAULT_HEADER)
+    ROUTER_PRESET_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    if LLAMA_SWAP_CONFIG.exists():
-        backup = LLAMA_SWAP_CONFIG.with_suffix(LLAMA_SWAP_CONFIG.suffix + ".bak")
-        shutil.copy2(LLAMA_SWAP_CONFIG, backup)
-        if first_transition:
-            print(f"NOTE: {LLAMA_SWAP_CONFIG} already existed and wasn't created by modelctl "
-                  f"(no header file yet). It's about to be fully replaced.")
-            print(f"Full copy of the previous file saved to: {backup}")
-            print(f"If it had custom macros/groups/apiKeys/etc, move them into "
-                  f"{LLAMA_SWAP_HEADER} now -- modelctl will never touch that file.")
-        else:
-            print(f"(previous config backed up to {backup})")
-
-    profiles = sorted(PROFILES_DIR.glob("*.json"))
-    header = LLAMA_SWAP_HEADER.read_text().rstrip() + "\n"
-    body = "models:\n" if profiles else "models: {}\n"
+    all_profiles = [json.loads(p.read_text()) for p in sorted(PROFILES_DIR.glob("*.json"))]
+    profiles = [p for p in all_profiles if p.get("enabled", True)]
+    n_disabled = len(all_profiles) - len(profiles)
+    body = ""
     any_unresolved = False
-    for p in profiles:
-        profile = json.loads(p.read_text())
-        entry, ok, messages = render_llama_swap_entry(profile)
+    for profile in profiles:
+        entry, ok, messages = render_router_preset(profile)
         if messages:
-            print(f"'{profile['name']}':")
+            print(f"'{profile['name']}' (router preset):")
             for m in messages:
                 print(f"  {m}")
         if not ok:
             any_unresolved = True
-        indented = "\n".join("  " + line if line else line for line in entry.splitlines())
-        body += indented + "\n"
+        body += entry + "\n"
 
-    LLAMA_SWAP_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    new_content = header + "\n" + body
-    # Only write if content actually changed — avoids triggering llama-swap's
-    # --watch-config reload (which kills in-flight model processes).
-    import hashlib
-    new_hash = hashlib.sha256(new_content.encode()).hexdigest()
-    old_hash = _file_hash(LLAMA_SWAP_CONFIG)
+    new_hash = hashlib.sha256(body.encode()).hexdigest()
+    old_hash = _file_hash(ROUTER_PRESET_PATH)
     if new_hash == old_hash:
-        print(f"Config unchanged — skipping write (no llama-swap reload triggered).")
-        return
-    LLAMA_SWAP_CONFIG.write_text(new_content)
+        print("Router preset unchanged -- skipping write.")
+        return len(profiles)
 
+    if ROUTER_PRESET_PATH.exists():
+        backup = ROUTER_PRESET_PATH.with_suffix(ROUTER_PRESET_PATH.suffix + ".bak")
+        shutil.copy2(ROUTER_PRESET_PATH, backup)
+        print(f"(previous router preset backed up to {backup})")
+
+    ROUTER_PRESET_PATH.write_text(body)
+    disabled_note = f" ({n_disabled} disabled, skipped)" if n_disabled else ""
+    print(f"Wrote router preset for {len(profiles)} profile(s){disabled_note} -> {ROUTER_PRESET_PATH}")
     if any_unresolved:
-        print("\nNOTE: at least one profile above couldn't be fully resolved -- its entry was "
-              "still written to config.yaml, but llama-swap will fail to start it until that's fixed.")
+        print("\nNOTE: at least one profile above couldn't be fully resolved for router mode.")
 
-    # Sync Hermes context_length_cache.yaml so Hermes knows each model's
-    # actual context window without hardcoding it in config.yaml.
-    _sync_hermes_context_cache(profiles)
+    if restart:
+        restart_router_service()
+    return len(profiles)
 
 
 def restart_router_service() -> bool:
@@ -1381,84 +1451,11 @@ def restart_router_service() -> bool:
     return True
 
 
-def sync_router_preset(restart: bool = True):
-    """Rebuild router.preset.ini from every saved profile. Mirrors
-    sync_llama_swap_config's change-detection-before-write guard so it
-    doesn't force an unnecessary router reload.
-
-    restart: when True (the default), automatically restart the router's
-    systemd --user unit after actually writing a changed preset, since
-    router mode requires a restart to pick one up. Pass restart=False if
-    you're not running the router as a systemd unit, or want to batch
-    multiple syncs before reloading once yourself.
-    """
-    ROUTER_PRESET_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    profiles = sorted(PROFILES_DIR.glob("*.json"))
-    body = ""
-    any_unresolved = False
-    for p in profiles:
-        profile = json.loads(p.read_text())
-        entry, ok, messages = render_router_preset(profile)
-        if messages:
-            print(f"'{profile['name']}' (router preset):")
-            for m in messages:
-                print(f"  {m}")
-        if not ok:
-            any_unresolved = True
-        body += entry + "\n"
-
-    import hashlib
-    new_hash = hashlib.sha256(body.encode()).hexdigest()
-    old_hash = _file_hash(ROUTER_PRESET_PATH)
-    if new_hash == old_hash:
-        print("Router preset unchanged -- skipping write.")
-        return
-
-    if ROUTER_PRESET_PATH.exists():
-        backup = ROUTER_PRESET_PATH.with_suffix(ROUTER_PRESET_PATH.suffix + ".bak")
-        shutil.copy2(ROUTER_PRESET_PATH, backup)
-        print(f"(previous router preset backed up to {backup})")
-
-    ROUTER_PRESET_PATH.write_text(body)
-    print(f"Wrote router preset for {len(profiles)} profile(s) -> {ROUTER_PRESET_PATH}")
-    if any_unresolved:
-        print("\nNOTE: at least one profile above couldn't be fully resolved for router mode.")
-
-    if restart:
-        restart_router_service()
-
-
-def sync_all_backends(restart_router: bool = True):
+def sync_all_backends(restart_router: bool = True) -> int:
     """Regenerate every backend's config from the current profiles.
-    Single place to extend if a third backend is ever added."""
-    sync_llama_swap_config()
-    sync_router_preset(restart=restart_router)
-
-
-def _sync_hermes_context_cache(profiles):
-    """Write per-model context lengths to Hermes' context_length_cache.yaml.
-
-    This lets Hermes resolve the correct context length for each model
-    automatically when the user switches models, instead of relying on a
-    single global model.context_length in config.yaml.
-    """
-    if yaml is None:
-        return
-    base_url = get_llama_swap_base_url()
-    cache = {}
-    for p in profiles:
-        profile = json.loads(p.read_text())
-        name = profile.get("name")
-        ctx = profile.get("config", {}).get("ctx")
-        if name and ctx:
-            cache[f"{name}@{base_url}"] = int(ctx)
-    if not cache:
-        return
-    cache_path = HERMES_HOME / "context_length_cache.yaml"
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(yaml.dump({"context_lengths": cache}, default_flow_style=False))
-    print(f"Synced {len(cache)} model context lengths to {cache_path}")
+    Single place to extend if a third backend is ever added.
+    Returns the number of enabled profiles synced."""
+    return sync_router_preset(restart=restart_router)
 
 
 def cmd_defaults(args):
@@ -1474,21 +1471,21 @@ def cmd_defaults(args):
 
 
 def cmd_sync(args):
-    sync_all_backends(restart_router=not args.no_router_restart)
+    n = sync_all_backends(restart_router=not args.no_router_restart)
     if not args.no_hermes:
         sync_hermes_custom_providers(dry_run=args.hermes_dry_run)
-    n = len(list(PROFILES_DIR.glob("*.json")))
-    print(f"Synced {n} profile(s) -> {LLAMA_SWAP_CONFIG}")
+    print(f"Synced {n} enabled profile(s) -> {ROUTER_PRESET_PATH}")
 
 
 def cmd_list(args):
     if not PROFILES_DIR.exists() or not any(PROFILES_DIR.glob("*.json")):
         print("No profiles saved yet. Run `modelctl pull <repo_id>` first.")
         return
-    print(f"{'NAME':<30} {'REPO':<45} FILE")
+    print(f"{'NAME':<30} {'STATUS':<9} {'REPO':<45} FILE")
     for p in sorted(PROFILES_DIR.glob("*.json")):
         d = json.loads(p.read_text())
-        print(f"{d['name']:<30} {d['repo_id']:<45} {d['file']}")
+        status = "enabled" if d.get("enabled", True) else "disabled"
+        print(f"{d['name']:<30} {status:<9} {d['repo_id']:<45} {d['file']}")
 
 
 def cmd_show(args):
@@ -1499,7 +1496,8 @@ def cmd_show(args):
 def cmd_edit(args):
     profile = load_profile(args.name)
     print(f"Editing '{args.name}' -- current config shown as default where applicable.\n")
-    profile["config"] = prompt_config(profile.get("repo_id", ""), profile.get("file", args.name))
+    profile["config"] = prompt_config(profile.get("repo_id", ""), profile.get("file", args.name),
+                                      current=profile.get("config"))
     profile["env"] = capture_env_passthrough()
     warn_if_env_empty(profile["env"])
     save_profile(profile)
@@ -1517,6 +1515,134 @@ def cmd_regen(args):
     if not args.no_hermes:
         sync_hermes_custom_providers()
     print(f"Regenerated artifacts in {profile['artifacts_dir']} and pushed to llama-swap config.")
+
+
+def cmd_verify(args):
+    """Check (and optionally repair) saved profiles' model/mmproj/mtp files
+    against their repo, catching the pre-fix flat-download-directory
+    collision where a second repo's same-named file could silently replace
+    or masquerade as an earlier profile's file.
+
+    Without --fix: report-only, exit code 1 if any profile has a mismatch
+    or missing file (0 if everything's ok or unknown/unresolvable).
+    With --fix: re-download the correct file (into the new per-repo
+    directory, alongside the old file rather than deleting it) for every
+    mismatched/missing field, repoint the profile at it, regenerate its
+    artifacts, and re-sync.
+    """
+    if getattr(args, "name", None):
+        names = [args.name]
+    else:
+        if not PROFILES_DIR.exists() or not any(PROFILES_DIR.glob("*.json")):
+            print("No profiles saved yet.")
+            return
+        names = [p.stem for p in sorted(PROFILES_DIR.glob("*.json"))]
+
+    any_bad = False
+    any_fixed = False
+    for name in names:
+        profile = load_profile(name)
+        checks = verify_profile_files(profile)
+        if not checks:
+            continue
+
+        changed = False
+        for c in checks:
+            if c["status"] == "ok":
+                continue
+            if c["status"] == "unknown":
+                print(f"{name}: {c['field']} ({c['path']}) -- couldn't verify against "
+                      f"{profile.get('repo_id')} (repo unreachable, or basename isn't unique "
+                      f"in the repo).")
+                continue
+
+            any_bad = True
+            if c["status"] == "mismatch":
+                print(f"{name}: {c['field']} MISMATCH -- {c['path']} is {c['local_size']} "
+                      f"bytes, but {profile['repo_id']}'s copy is {c['expected_size']} bytes. "
+                      f"This is the flat-directory collision bug: this file was probably "
+                      f"overwritten by a different repo's pull.")
+            else:
+                print(f"{name}: {c['field']} MISSING -- {c['path']} doesn't exist on disk.")
+
+            if not args.fix:
+                continue
+
+            base_dir = Path(c["path"]).parent
+            # If the file already lives under a per-repo directory (a
+            # previous --fix run, or a profile pulled after the collision
+            # fix), reuse the grandparent as the base so a second repair
+            # pass doesn't nest <repo_id>/<repo_id>/... underneath itself.
+            repo_suffix = Path(profile["repo_id"])
+            if base_dir.as_posix().endswith(repo_suffix.as_posix()):
+                for _ in repo_suffix.parts:
+                    base_dir = base_dir.parent
+            new_path = download_if_needed(profile["repo_id"], c["repo_filename"], base_dir)
+            profile[c["field"]] = new_path
+            changed = True
+            any_fixed = True
+            print(f"  -> fixed: {c['field']} now points at {new_path}")
+
+        if changed:
+            save_profile(profile)
+            generate_artifacts(profile)
+
+    if any_fixed:
+        sync_all_backends(restart_router=not args.no_router_restart)
+        if not args.no_hermes:
+            sync_hermes_custom_providers()
+
+    if not any_bad:
+        print("All checked profiles look OK.")
+    elif not args.fix:
+        print("\nRe-run with --fix to re-download and repoint the affected profile(s).")
+        sys.exit(1)
+
+
+def cmd_disable(args):
+    profile = load_profile(args.name)
+    if not profile.get("enabled", True):
+        print(f"'{args.name}' is already disabled.")
+        return
+    profile["enabled"] = False
+    save_profile(profile)
+    sync_all_backends(restart_router=not args.no_router_restart)
+    if not args.no_hermes:
+        sync_hermes_custom_providers()
+    print(f"Disabled '{args.name}'. The profile and its artifacts are kept on disk, but it's "
+          f"excluded from the router preset and Hermes providers until you run "
+          f"`modelctl enable {args.name}`.")
+
+
+def cmd_enable(args):
+    profile = load_profile(args.name)
+    if profile.get("enabled", True):
+        print(f"'{args.name}' is already enabled.")
+        return
+    profile["enabled"] = True
+    save_profile(profile)
+    sync_all_backends(restart_router=not args.no_router_restart)
+    if not args.no_hermes:
+        sync_hermes_custom_providers()
+    print(f"Enabled '{args.name}' and pushed it back into the router preset"
+          + ("." if args.no_hermes else " and Hermes providers."))
+
+
+def cmd_remove(args):
+    profile = load_profile(args.name)
+    profile_path = PROFILES_DIR / f"{args.name}.json"
+    artifacts_dir = PROFILES_DIR / args.name
+
+    if artifacts_dir.exists():
+        shutil.rmtree(artifacts_dir)
+    profile_path.unlink()
+    print(f"Removed profile '{args.name}'. Model file left on disk at "
+          f"{profile.get('model_path')} -- delete it yourself if you don't need it for "
+          f"another profile.")
+
+    sync_all_backends(restart_router=not args.no_router_restart)
+    if not args.no_hermes:
+        sync_hermes_custom_providers()
 
 
 def find_free_port():
@@ -1722,7 +1848,38 @@ def build_arg_parser():
                           help="don't restart the router-mode systemd service after updating its preset")
     p_regen.set_defaults(func=cmd_regen)
 
-    p_sync = sub.add_parser("sync", help="push all profiles into the live llama-swap config.yaml")
+    p_verify = sub.add_parser("verify", help="check saved profiles' model/mmproj/mtp files against "
+                                              "their repo, and optionally repair mismatches")
+    p_verify.add_argument("name", nargs="?", default=None, help="check only this profile (default: all)")
+    p_verify.add_argument("--fix", action="store_true",
+                           help="re-download and repoint any mismatched or missing file")
+    p_verify.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
+    p_verify.add_argument("--no-router-restart", action="store_true",
+                           help="don't restart the router-mode systemd service after updating its preset")
+    p_verify.set_defaults(func=cmd_verify)
+
+    p_disable = sub.add_parser("disable", help="exclude a saved profile from router/Hermes sync without deleting it")
+    p_disable.add_argument("name")
+    p_disable.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
+    p_disable.add_argument("--no-router-restart", action="store_true",
+                            help="don't restart the router-mode systemd service after updating its preset")
+    p_disable.set_defaults(func=cmd_disable)
+
+    p_enable = sub.add_parser("enable", help="re-include a previously disabled profile in router/Hermes sync")
+    p_enable.add_argument("name")
+    p_enable.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
+    p_enable.add_argument("--no-router-restart", action="store_true",
+                           help="don't restart the router-mode systemd service after updating its preset")
+    p_enable.set_defaults(func=cmd_enable)
+
+    p_remove = sub.add_parser("remove", aliases=["rm"], help="delete a saved profile and its generated artifacts")
+    p_remove.add_argument("name")
+    p_remove.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
+    p_remove.add_argument("--no-router-restart", action="store_true",
+                           help="don't restart the router-mode systemd service after updating its preset")
+    p_remove.set_defaults(func=cmd_remove)
+
+    p_sync = sub.add_parser("sync", help="push all profiles into the live router preset.ini")
     p_sync.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
     p_sync.add_argument("--hermes-dry-run", action="store_true", help="show what Hermes config would change")
     p_sync.add_argument("--no-router-restart", action="store_true",
