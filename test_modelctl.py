@@ -1026,6 +1026,13 @@ class TestLocalWeightsBytes(unittest.TestCase):
         first = self.dir / "model-00001-of-00003.gguf"
         self.assertEqual(modelctl._local_weights_bytes(first), 60)
 
+    def test_prefix_sibling_model_not_counted(self):
+        for i in (1, 2):
+            (self.dir / f"model-0000{i}-of-00002.gguf").write_bytes(b"x" * 10)
+            (self.dir / f"model-instruct-0000{i}-of-00002.gguf").write_bytes(b"y" * 100)
+        first = self.dir / "model-00001-of-00002.gguf"
+        self.assertEqual(modelctl._local_weights_bytes(first), 20)
+
 
 class TestEstimateVramFootprint(unittest.TestCase):
     def setUp(self):

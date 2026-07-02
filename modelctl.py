@@ -1669,8 +1669,10 @@ def _local_weights_bytes(model_path: Path) -> int:
     if not m:
         return model_path.stat().st_size
     prefix = m.group(1)
-    return sum(p.stat().st_size for p in model_path.parent.glob(f"{prefix}-*-of-*.gguf")
-               if SHARD_RE.match(p.name))
+    return sum(p.stat().st_size
+               for p in model_path.parent.glob(f"{prefix}-*-of-*.gguf")
+               for pm in [SHARD_RE.match(p.name)]
+               if pm and pm.group(1) == prefix)
 
 
 def estimate_vram_footprint(profile):
@@ -1708,7 +1710,7 @@ def get_gpu_inventory(force_remap: bool = False) -> list:
     if not force_remap and GPU_MAP_PATH.exists():
         try:
             mapping = json.loads(GPU_MAP_PATH.read_text())
-        except json.JSONDecodeError:
+        except (OSError, json.JSONDecodeError):
             mapping = None
     if mapping is None:
         sycl = modelctl_vram.llama_list_devices(LLAMA_SERVER_BIN)
