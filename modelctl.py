@@ -1884,17 +1884,10 @@ def find_free_port():
 
 
 def _local_weights_bytes(model_path: Path) -> int:
-    """Total on-disk size of a model: the file itself, or the sum of all
-    sibling shards when it's the first part of a -NNNNN-of-MMMMM split
-    (profiles only store the first shard's path)."""
-    m = SHARD_RE.match(model_path.name)
-    if not m:
-        return model_path.stat().st_size
-    prefix = m.group(1)
-    return sum(p.stat().st_size
-               for p in model_path.parent.glob(f"{prefix}-*-of-*.gguf")
-               for pm in [SHARD_RE.match(p.name)]
-               if pm and pm.group(1) == prefix)
+    """Total on-disk size of a model (first shard -> sum of all shards).
+    Thin alias for modelctl_vram.weights_bytes_on_disk, which owns the
+    logic so the detached calculator can use it too."""
+    return modelctl_vram.weights_bytes_on_disk(model_path)
 
 
 def estimate_vram_footprint(profile):

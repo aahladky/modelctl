@@ -322,3 +322,81 @@ def recommend_placement(estimate_total, inventory, limit_pct, primary_device):
     return {"device": "", "split_mode": "layer",
             "tensor_split": tensor_split_ratio([d["total_bytes"] for d in ordered]),
             "fits": estimate_total <= combined_budget}
+
+
+# Multi-part GGUF shard naming, e.g. model-00001-of-00003.gguf. Own copy
+# (not imported from modelctl) so this module stays self-contained and
+# usable as a detached calculator.
+SHARD_RE = re.compile(r"^(.*)-(\d{5})-of-(\d{5})\.gguf$", re.IGNORECASE)
+
+
+def weights_bytes_on_disk(model_path):
+    """Total on-disk size of a model: the file itself, or the sum of all
+    sibling shards sharing its exact -NNNNN-of-MMMMM prefix."""
+    from pathlib import Path
+    model_path = Path(model_path)
+    m = SHARD_RE.match(model_path.name)
+    if not m:
+        return model_path.stat().st_size
+    prefix = m.group(1)
+    return sum(p.stat().st_size
+               for p in model_path.parent.glob(f"{prefix}-*-of-*.gguf")
+               for pm in [SHARD_RE.match(p.name)]
+               if pm and pm.group(1) == prefix)
+
+
+def _fmt_gib(n):
+    return f"{n / (1 << 30):.2f}GiB"
+
+
+def main(argv=None):
+    """Detached VRAM calculator: exact footprint math for one GGUF,
+    no modelctl required. Returns an exit code (0 ok, 1 error)."""
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="modelctl_vram",
+        description="Estimate a GGUF model's VRAM footprint (weights + KV cache + overhead).")
+    parser.add_argument("model", help="path to the .gguf file (first shard if split)")
+    parser.add_argument("--ctx", type=int, default=32768, help="context length (default 32768)")
+    parser.add_argument("--cache-type-k", default="f16", help="K cache type (default f16)")
+    parser.add_argument("--cache-type-v", default=None,
+                        help="V cache type (default: same as K)")
+    parser.add_argument("--mmproj", default=None, help="optional mmproj file to include")
+    args = parser.parse_args(argv)
+
+    meta = read_gguf_kv_metadata(args.model)
+    params = gguf_kv_params(meta)
+    if not params:
+        print(f"error: couldn't read usable GGUF metadata from {args.model} -- "
+              f"not a GGUF v2+ file, or missing attention fields.")
+        return 1
+
+    from pathlib import Path
+    weights = weights_bytes_on_disk(args.model)
+    mmproj_bytes = Path(args.mmproj).stat().st_size if args.mmproj else 0
+    ctk = args.cache_type_k
+    ctv = args.cache_type_v or ctk
+    k_only = kv_cache_bytes(params, args.ctx, ctk, ctk)
+    kv = kv_cache_bytes(params, args.ctx, ctk, ctv)
+    est = estimate_from_parts(weights, args.ctx, ctk, gguf_params=params,
+                              mmproj_bytes=mmproj_bytes, cache_type_v=ctv)
+
+    arch = meta.get("general.architecture", "?")
+    swa = params.get("swa_pattern")
+    swa_note = (f", SWA {sum(1 for x in swa if x)}/{len(swa)} layers "
+                f"@ window {params.get('swa_window')}" if swa else "")
+    print(f"{arch}: {params['block_count']} layers, "
+          f"{params['n_kv_heads']:g} KV heads (mean), "
+          f"k/v dims {params['k_dim']:g}/{params['v_dim']:g}{swa_note}")
+    print(f"ctx {args.ctx}, K {ctk}, V {ctv}")
+    print()
+    print(f"weights:  {_fmt_gib(est['weights'])}")
+    print(f"kv cache: {_fmt_gib(kv)}  (K {ctk} + V {ctv}; both-{ctk} would be {_fmt_gib(k_only)})")
+    print(f"overhead: {_fmt_gib(est['overhead'])}")
+    print(f"total:    {_fmt_gib(est['total'])}")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    _sys.exit(main())

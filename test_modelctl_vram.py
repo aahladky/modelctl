@@ -425,5 +425,62 @@ class TestSplitCacheTypes(unittest.TestCase):
         self.assertLess(est_split["kv_bytes"], est_same["kv_bytes"])
 
 
+class TestWeightsBytesOnDisk(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def test_single_file(self):
+        p = self.dir / "model.gguf"
+        p.write_bytes(b"x" * 100)
+        self.assertEqual(modelctl_vram.weights_bytes_on_disk(p), 100)
+
+    def test_sharded_sums_exact_prefix_only(self):
+        for i in (1, 2):
+            (self.dir / f"model-0000{i}-of-00002.gguf").write_bytes(b"x" * 10)
+            (self.dir / f"model-instruct-0000{i}-of-00002.gguf").write_bytes(b"y" * 100)
+        first = self.dir / "model-00001-of-00002.gguf"
+        self.assertEqual(modelctl_vram.weights_bytes_on_disk(first), 20)
+
+
+class TestCalculatorMain(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "model.gguf"
+        self.path.write_bytes(gguf_bytes({
+            "general.architecture": (8, "qwen3"),
+            "qwen3.block_count": (4, 48),
+            "qwen3.embedding_length": (4, 5120),
+            "qwen3.attention.head_count": (4, 40),
+            "qwen3.attention.head_count_kv": (4, 8),
+        }))
+
+    def _run(self, argv):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = modelctl_vram.main(argv)
+        return code, buf.getvalue()
+
+    def test_breakdown_output(self):
+        code, out = self._run([str(self.path), "--ctx", "32768",
+                               "--cache-type-k", "q8_0", "--cache-type-v", "q4_0"])
+        self.assertEqual(code, 0)
+        self.assertIn("qwen3", out)
+        self.assertIn("weights", out.lower())
+        self.assertIn("total", out.lower())
+        self.assertIn("K q8_0", out)
+        self.assertIn("V q4_0", out)
+
+    def test_unparseable_gguf_exits_1(self):
+        bad = Path(self.tmp.name) / "bad.gguf"
+        bad.write_bytes(b"NOPE1234")
+        code, out = self._run([str(bad)])
+        self.assertEqual(code, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
