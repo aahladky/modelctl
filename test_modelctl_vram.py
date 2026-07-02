@@ -96,8 +96,10 @@ class TestGgufKvParams(unittest.TestCase):
             "qwen3.attention.head_count_kv": 8,
         }
         p = modelctl_vram.gguf_kv_params(meta)
-        self.assertEqual(p, {"block_count": 48, "n_kv_heads": 8,
-                             "k_dim": 128.0, "v_dim": 128.0})
+        self.assertEqual(p["block_count"], 48)
+        self.assertEqual(p["n_kv_heads"], 8)
+        self.assertEqual(p["k_dim"], 128.0)
+        self.assertEqual(p["v_dim"], 128.0)
 
     def test_explicit_key_value_length_wins(self):
         meta = {
@@ -323,6 +325,67 @@ class TestRecommendPlacement(unittest.TestCase):
         rec = modelctl_vram.recommend_placement(60 << 30, inventory, 90, "SYCL0")
         self.assertEqual(rec, {"device": "SYCL0", "split_mode": "",
                                "tensor_split": "", "fits": False})
+
+
+class TestSwaKvCacheBytes(unittest.TestCase):
+    def _gemma_params(self):
+        # 6-layer miniature of the gemma4 layout: 5 SWA : 1 global
+        return {"block_count": 6, "n_kv_heads": 14.0, "k_dim": 512, "v_dim": 512,
+                "kv_heads_per_layer": [16, 16, 16, 16, 16, 4],
+                "swa_window": 1024,
+                "swa_pattern": [True, True, True, True, True, False],
+                "k_dim_swa": 256, "v_dim_swa": 256}
+
+    def test_swa_layers_charged_at_window_size(self):
+        params = self._gemma_params()
+        ctx = 64000
+        expected = (5 * 1024 * 16 * 512 * 2      # SWA layers: window tokens, swa dims
+                    + 1 * 64000 * 4 * 1024 * 2)  # global layer: full ctx, full dims
+        self.assertEqual(modelctl_vram.kv_cache_bytes(params, ctx, "f16"), expected)
+
+    def test_ctx_smaller_than_window_not_inflated(self):
+        params = self._gemma_params()
+        est_small = modelctl_vram.kv_cache_bytes(params, 512, "f16")
+        expected = (5 * 512 * 16 * 512 * 2 + 1 * 512 * 4 * 1024 * 2)
+        self.assertEqual(est_small, expected)
+
+    def test_no_pattern_falls_back_to_uniform(self):
+        params = {"block_count": 2, "n_kv_heads": 4, "k_dim": 128, "v_dim": 128}
+        self.assertEqual(modelctl_vram.kv_cache_bytes(params, 100, "f16"),
+                         2 * 100 * 4 * 256 * 2)
+
+    def test_gguf_kv_params_extracts_swa_fields(self):
+        meta = {
+            "general.architecture": "gemma4",
+            "gemma4.block_count": 6,
+            "gemma4.attention.head_count": 32,
+            "gemma4.attention.head_count_kv": [16, 16, 16, 16, 16, 4],
+            "gemma4.embedding_length": 4096,
+            "gemma4.attention.key_length": 512,
+            "gemma4.attention.value_length": 512,
+            "gemma4.attention.key_length_swa": 256,
+            "gemma4.attention.value_length_swa": 256,
+            "gemma4.attention.sliding_window": 1024,
+            "gemma4.attention.sliding_window_pattern": [True, True, True, True, True, False],
+        }
+        p = modelctl_vram.gguf_kv_params(meta)
+        self.assertEqual(p["swa_window"], 1024)
+        self.assertEqual(p["swa_pattern"], [True, True, True, True, True, False])
+        self.assertEqual(p["kv_heads_per_layer"], [16, 16, 16, 16, 16, 4])
+        self.assertEqual(p["k_dim_swa"], 256)
+
+    def test_mismatched_pattern_length_ignored(self):
+        meta = {
+            "general.architecture": "x",
+            "x.block_count": 6,
+            "x.attention.head_count": 8,
+            "x.attention.head_count_kv": 4,
+            "x.embedding_length": 1024,
+            "x.attention.sliding_window": 1024,
+            "x.attention.sliding_window_pattern": [True, False],  # len 2 != 6
+        }
+        p = modelctl_vram.gguf_kv_params(meta)
+        self.assertIsNone(p["swa_pattern"])
 
 
 if __name__ == "__main__":

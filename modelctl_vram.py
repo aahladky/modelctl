@@ -129,7 +129,8 @@ def gguf_kv_params(meta):
         return meta.get(f"{arch}.{suffix}")
 
     block_count = g("block_count")
-    n_kv_heads = _mean(g("attention.head_count_kv"))
+    heads_raw = g("attention.head_count_kv")
+    n_kv_heads = _mean(heads_raw)
     if not block_count or not n_kv_heads:
         return None
 
@@ -144,15 +145,49 @@ def gguf_kv_params(meta):
         k_dim = k_dim if k_dim is not None else head_dim
         v_dim = v_dim if v_dim is not None else head_dim
 
+    swa_pattern_raw = g("attention.sliding_window_pattern")
+    if isinstance(swa_pattern_raw, list) and len(swa_pattern_raw) == block_count:
+        swa_pattern = swa_pattern_raw
+    else:
+        swa_pattern = None
+
     return {"block_count": block_count, "n_kv_heads": n_kv_heads,
-            "k_dim": k_dim, "v_dim": v_dim}
+            "k_dim": k_dim, "v_dim": v_dim,
+            "kv_heads_per_layer": heads_raw if isinstance(heads_raw, list) else None,
+            "swa_window": g("attention.sliding_window"),
+            "swa_pattern": swa_pattern,
+            "k_dim_swa": g("attention.key_length_swa"),
+            "v_dim_swa": g("attention.value_length_swa")}
 
 
 def kv_cache_bytes(params, ctx, kv_quant):
-    """KV cache size in bytes for a context of `ctx` tokens."""
+    """KV cache size in bytes for a context of `ctx` tokens.
+
+    Sliding-window-attention models (Gemma family) only cache
+    `swa_window` tokens on their SWA layers -- llama.cpp allocates those
+    layers at the window size, so charging full ctx per layer would
+    over-count by an order of magnitude. When the GGUF provides a
+    sliding_window_pattern, compute per-layer; otherwise fall back to the
+    uniform full-ctx formula."""
     bpe = CACHE_TYPE_BYTES.get((kv_quant or "f16").strip().lower(), 2.0)
-    return int(params["block_count"] * ctx * params["n_kv_heads"]
-               * (params["k_dim"] + params["v_dim"]) * bpe)
+    pattern = params.get("swa_pattern")
+    window = params.get("swa_window")
+    if not pattern or not window:
+        return int(params["block_count"] * ctx * params["n_kv_heads"]
+                   * (params["k_dim"] + params["v_dim"]) * bpe)
+
+    heads = params.get("kv_heads_per_layer")
+    k_swa = params.get("k_dim_swa") or params["k_dim"]
+    v_swa = params.get("v_dim_swa") or params["v_dim"]
+    total = 0.0
+    for i, is_swa in enumerate(pattern):
+        h = heads[i] if heads else params["n_kv_heads"]
+        if is_swa:
+            tokens, dims = min(ctx, window), k_swa + v_swa
+        else:
+            tokens, dims = ctx, params["k_dim"] + params["v_dim"]
+        total += tokens * h * dims * bpe
+    return int(total)
 
 
 def estimate_from_parts(weights_bytes, ctx, kv_quant, gguf_params=None,
