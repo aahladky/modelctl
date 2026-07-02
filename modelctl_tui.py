@@ -415,11 +415,74 @@ class DownloadScreen(Screen):
 
 
 class SummaryScreen(Screen):
-    """Placeholder for Task 10."""
+    """Seventh and final wizard screen: assembles the profile dict (same
+    shape cmd_pull builds today), then runs the exact save/generate/sync
+    sequence cmd_pull runs after a pull -- save_profile, generate_artifacts,
+    sync_all_backends, sync_hermes_custom_providers -- auto-applied with no
+    separate confirm gate, per the wizard spec.
+
+    Runs on a worker thread (SearchScreen/DownloadScreen's established
+    pattern), NOT synchronously in on_mount like ConfigureScreen's
+    preflight() call. The two look superficially similar (both call into
+    modelctl.py from a screen's on_mount/submit handler) but they differ in
+    a way that matters: preflight() (Task 7) only does local filesystem
+    existence checks and, at most, a fast `--list-devices` probe. This
+    screen's sync_all_backends() -> sync_router_preset() calls
+    restart_router_service() -- a real `subprocess.run(["systemctl",
+    "--user", "restart", ...], timeout=30)` -- whenever the router preset
+    content actually changed. Reaching this screen at all means a brand-new
+    profile was just saved, so the preset content changing (and the restart
+    firing) is the common case here, not a rare edge. systemd unit restarts
+    have no guaranteed-fast bound the way a llama-server --list-devices
+    probe does; the code itself budgets up to 30 seconds before giving up.
+    Running that synchronously on Textual's event-loop thread would freeze
+    the whole UI for however long systemctl takes, which is exactly the
+    class of latency that got SearchScreen's HTTP calls (Task 4) and
+    DownloadScreen's multi-GB transfers (Task 9) worker treatment. Using
+    exclusive=True from the start here (rather than adding it in a
+    follow-up review, as happened for DownloadScreen in Task 9) since
+    there's no legitimate reason for two sync sequences to ever race on
+    this screen."""
     STEP = "summary"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="summary")
+        yield Static("Saving...", id="summary-status")
+        yield Button("Done", id="done-button")
+
+    def on_mount(self) -> None:
+        self.run_sync()
+
+    @work(thread=True, exclusive=True)
+    def run_sync(self) -> None:
+        state = self.app.state
+        profile = {
+            "name": state.profile_name,
+            "repo_id": state.repo_id,
+            "file": state.quant_group["label"],
+            "model_path": state.model_path,
+            "mmproj_path": (state.mmproj_choice or {}).get("local_path"),
+            "mtp_path": (state.mtp_choice or {}).get("local_path"),
+            "config": state.config,
+            "env": modelctl.capture_env_passthrough(),
+        }
+        modelctl.save_profile(profile)
+        modelctl.generate_artifacts(profile)
+        modelctl.sync_all_backends()
+        modelctl.sync_hermes_custom_providers()
+
+        lines = [f"Saved profile '{state.profile_name}'."]
+        if state.warnings:
+            lines.append("Warnings:")
+            lines.extend(f"  {w}" for w in state.warnings)
+        self.app.call_from_thread(self._on_done, "\n".join(lines))
+
+    def _on_done(self, text: str) -> None:
+        self.query_one("#summary-status", Static).update(text)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "done-button":
+            self.app.exit()
 
 
 SCREENS_BY_NAME = {

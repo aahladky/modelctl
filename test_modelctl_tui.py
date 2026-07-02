@@ -11,6 +11,7 @@ from modelctl_tui import (
     PullWizardApp,
     QuantPickScreen,
     StepIndicator,
+    SummaryScreen,
     VisionMtpScreen,
     WizardState,
     next_screen_after,
@@ -482,8 +483,17 @@ class TestNameScreen(unittest.IsolatedAsyncioTestCase):
 
 class TestDownloadScreen(unittest.IsolatedAsyncioTestCase):
     async def test_downloads_model_file_and_advances_on_success(self):
+        # SummaryScreen.on_mount is stubbed out even though this test is
+        # about DownloadScreen, not SummaryScreen: succeeding advances INTO
+        # SummaryScreen, whose real on_mount (Task 10) immediately fires a
+        # background save/generate/sync worker against real modelctl.py
+        # functions. This test only cares that DownloadScreen pushed
+        # SummaryScreen, not what SummaryScreen does once mounted (that's
+        # TestSummaryScreen's job) -- mirrors how NameScreen's tests stub
+        # DownloadScreen.on_mount for the same reason.
         app = PullWizardApp()
-        with mock.patch("modelctl_tui.modelctl.download_if_needed", return_value="/models/model-Q4_K_M.gguf") as mock_dl:
+        with mock.patch("modelctl_tui.modelctl.download_if_needed", return_value="/models/model-Q4_K_M.gguf") as mock_dl, \
+             mock.patch("modelctl_tui.SummaryScreen.on_mount", lambda self: None):
             async with app.run_test() as pilot:
                 app.state = WizardState(
                     repo_id="repo/x",
@@ -516,13 +526,15 @@ class TestDownloadScreen(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(retry_button.disabled)
 
     async def test_sharded_quant_group_downloads_each_shard_in_order(self):
+        # SummaryScreen.on_mount stubbed out -- see comment on
+        # test_downloads_model_file_and_advances_on_success above.
         app = PullWizardApp()
         shard1 = "/models/model-Q4_K_M-00001-of-00002.gguf"
         shard2 = "/models/model-Q4_K_M-00002-of-00002.gguf"
         with mock.patch(
             "modelctl_tui.modelctl.download_if_needed",
             side_effect=[shard1, shard2],
-        ) as mock_dl:
+        ) as mock_dl, mock.patch("modelctl_tui.SummaryScreen.on_mount", lambda self: None):
             async with app.run_test() as pilot:
                 app.state = WizardState(
                     repo_id="repo/x",
@@ -552,6 +564,8 @@ class TestDownloadScreen(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(app.screen.STEP, "summary")
 
     async def test_mmproj_and_mtp_choices_get_local_path_set_on_success(self):
+        # SummaryScreen.on_mount stubbed out -- see comment on
+        # test_downloads_model_file_and_advances_on_success above.
         app = PullWizardApp()
         model_path = "/models/model-Q4_K_M.gguf"
         mmproj_path = "/models/mmproj-F16.gguf"
@@ -561,7 +575,7 @@ class TestDownloadScreen(unittest.IsolatedAsyncioTestCase):
         with mock.patch(
             "modelctl_tui.modelctl.download_if_needed",
             side_effect=[model_path, mmproj_path, mtp_path],
-        ) as mock_dl:
+        ) as mock_dl, mock.patch("modelctl_tui.SummaryScreen.on_mount", lambda self: None):
             async with app.run_test() as pilot:
                 app.state = WizardState(
                     repo_id="repo/x",
@@ -602,12 +616,15 @@ class TestDownloadScreen(unittest.IsolatedAsyncioTestCase):
         # able to stop the in-flight thread -- but that's not the race this
         # fix targets: this test asserts the specific "both clicks land
         # before the first thread body starts" case is safe.
+        # SummaryScreen.on_mount stubbed out too -- see comment on
+        # test_downloads_model_file_and_advances_on_success above.
         app = PullWizardApp()
         calls = []
         with mock.patch(
             "modelctl_tui.modelctl.download_if_needed",
             side_effect=lambda repo_id, name, dest: (calls.append(name), f"/models/{name}")[1],
-        ) as mock_dl, mock.patch("modelctl_tui.DownloadScreen.on_mount", lambda self: None):
+        ) as mock_dl, mock.patch("modelctl_tui.DownloadScreen.on_mount", lambda self: None), \
+             mock.patch("modelctl_tui.SummaryScreen.on_mount", lambda self: None):
             async with app.run_test() as pilot:
                 app.state = WizardState(
                     repo_id="repo/x",
@@ -627,6 +644,155 @@ class TestDownloadScreen(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(calls, ["model.gguf"])
                 summary_screens = [s for s in app.screen_stack if type(s).__name__ == "SummaryScreen"]
                 self.assertEqual(len(summary_screens), 1)
+
+
+class TestSummaryScreen(unittest.IsolatedAsyncioTestCase):
+    async def test_saves_generates_and_syncs_on_mount(self):
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.save_profile") as mock_save, \
+             mock.patch("modelctl_tui.modelctl.generate_artifacts", return_value=True) as mock_gen, \
+             mock.patch("modelctl_tui.modelctl.sync_all_backends") as mock_sync, \
+             mock.patch("modelctl_tui.modelctl.sync_hermes_custom_providers") as mock_hermes, \
+             mock.patch("modelctl_tui.modelctl.capture_env_passthrough", return_value=[]):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"]},
+                    profile_name="model",
+                    model_path="/models/model-Q4_K_M.gguf",
+                    config={"ctx": "32768"},
+                )
+                await app.push_screen(SummaryScreen())
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                mock_save.assert_called_once()
+                mock_gen.assert_called_once()
+                mock_sync.assert_called_once()
+                mock_hermes.assert_called_once()
+                status = app.screen.query_one("#summary-status", Static)
+                self.assertIn("model", str(status.render()))
+
+    async def test_shows_warnings_if_any_were_collected(self):
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.save_profile"), \
+             mock.patch("modelctl_tui.modelctl.generate_artifacts", return_value=True), \
+             mock.patch("modelctl_tui.modelctl.sync_all_backends"), \
+             mock.patch("modelctl_tui.modelctl.sync_hermes_custom_providers"), \
+             mock.patch("modelctl_tui.modelctl.capture_env_passthrough", return_value=[]):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"]},
+                    profile_name="model",
+                    model_path="/models/model-Q4_K_M.gguf",
+                    config={"ctx": "32768"},
+                    warnings=["ERROR: llama-server not found"],
+                )
+                await app.push_screen(SummaryScreen())
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                status = app.screen.query_one("#summary-status", Static)
+                self.assertIn("ERROR: llama-server not found", str(status.render()))
+
+    async def test_profile_dict_matches_cmd_pull_shape(self):
+        # Regression guard for the profile assembly itself: same field set
+        # cmd_pull builds (name, repo_id, file, model_path, mmproj_path,
+        # mtp_path, config, env), with mmproj/mtp local_path pulled from
+        # DownloadScreen's mmproj_choice/mtp_choice (Task 9), not the bare
+        # repo filename.
+        app = PullWizardApp()
+        captured = {}
+
+        def capture_save(profile):
+            captured.update(profile)
+
+        with mock.patch("modelctl_tui.modelctl.save_profile", side_effect=capture_save), \
+             mock.patch("modelctl_tui.modelctl.generate_artifacts", return_value=True), \
+             mock.patch("modelctl_tui.modelctl.sync_all_backends"), \
+             mock.patch("modelctl_tui.modelctl.sync_hermes_custom_providers"), \
+             mock.patch("modelctl_tui.modelctl.capture_env_passthrough", return_value=["FOO=bar"]):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"]},
+                    mmproj_choice={"name": "mmproj-F16.gguf", "local_path": "/models/mmproj-F16.gguf"},
+                    mtp_choice={"name": "model-mtp.gguf", "local_path": "/models/model-mtp.gguf"},
+                    profile_name="model",
+                    model_path="/models/model-Q4_K_M.gguf",
+                    config={"ctx": "32768"},
+                )
+                await app.push_screen(SummaryScreen())
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                self.assertEqual(
+                    captured,
+                    {
+                        "name": "model",
+                        "repo_id": "repo/x",
+                        "file": "model-Q4_K_M",
+                        "model_path": "/models/model-Q4_K_M.gguf",
+                        "mmproj_path": "/models/mmproj-F16.gguf",
+                        "mtp_path": "/models/model-mtp.gguf",
+                        "config": {"ctx": "32768"},
+                        "env": ["FOO=bar"],
+                    },
+                )
+
+    async def test_mmproj_and_mtp_paths_are_none_when_choices_skipped(self):
+        # mmproj_choice/mtp_choice default to None on WizardState when the
+        # user skipped VisionMtpScreen entirely -- (state.mmproj_choice or
+        # {}).get("local_path") must yield None, not raise, in that case.
+        app = PullWizardApp()
+        captured = {}
+
+        def capture_save(profile):
+            captured.update(profile)
+
+        with mock.patch("modelctl_tui.modelctl.save_profile", side_effect=capture_save), \
+             mock.patch("modelctl_tui.modelctl.generate_artifacts", return_value=True), \
+             mock.patch("modelctl_tui.modelctl.sync_all_backends"), \
+             mock.patch("modelctl_tui.modelctl.sync_hermes_custom_providers"), \
+             mock.patch("modelctl_tui.modelctl.capture_env_passthrough", return_value=[]):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"]},
+                    profile_name="model",
+                    model_path="/models/model-Q4_K_M.gguf",
+                    config={"ctx": "32768"},
+                )
+                await app.push_screen(SummaryScreen())
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                self.assertIsNone(captured["mmproj_path"])
+                self.assertIsNone(captured["mtp_path"])
+
+    async def test_done_button_exits_app(self):
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.save_profile"), \
+             mock.patch("modelctl_tui.modelctl.generate_artifacts", return_value=True), \
+             mock.patch("modelctl_tui.modelctl.sync_all_backends"), \
+             mock.patch("modelctl_tui.modelctl.sync_hermes_custom_providers"), \
+             mock.patch("modelctl_tui.modelctl.capture_env_passthrough", return_value=[]):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"]},
+                    profile_name="model",
+                    model_path="/models/model-Q4_K_M.gguf",
+                    config={"ctx": "32768"},
+                )
+                await app.push_screen(SummaryScreen())
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                await pilot.click("#done-button")
+                await pilot.pause()
+                self.assertFalse(app.is_running)
 
 
 if __name__ == "__main__":
