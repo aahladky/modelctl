@@ -304,21 +304,29 @@ def router_unload(name: str, timeout: int = 30):
 def _wait_for_router_model(name, want, timeout=300, poll=2):
     """Poll router_status() until model `name` reaches `want` ('loaded' or
     'unloaded'), returns 'failed' if it fails, or None on timeout/router
-    unreachable."""
+    unreachable.
+
+    The router keeps a model's failed flag from a PREVIOUS load attempt
+    until a new load overwrites it, so `failed` alone can't be trusted on
+    the first poll of a retry -- the desired-state checks run first, and
+    the failed check is skipped on the initial poll (stale state predates
+    the request we're waiting on)."""
     deadline = time.time() + timeout
+    first_poll = True
     while time.time() < deadline:
         try:
             rows = router_status()
         except RuntimeError:
             return None
         row = next((r for r in rows if r["name"] == name), None)
-        if row and row["failed"]:
-            return "failed"
         status = row["status"] if row else "unloaded"
         if want == "loaded" and status == "loaded":
             return "loaded"
         if want == "unloaded" and status in ("unloaded", "stopped"):
             return "unloaded"
+        if row and row["failed"] and status != "loading" and not first_poll:
+            return "failed"
+        first_poll = False
         time.sleep(poll)
     return None
 

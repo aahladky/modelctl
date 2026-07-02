@@ -1331,5 +1331,43 @@ class TestCheckVramForLoad(unittest.TestCase):
         mock_unload.assert_called_once_with("big-loaded")
 
 
+class TestWaitForRouterModel(unittest.TestCase):
+    def _row(self, status, failed=False):
+        return [{"name": "m", "status": status, "failed": failed,
+                 "exit_code": 1 if failed else None, "gpu": "?",
+                 "from_preset": True}]
+
+    def test_stale_failed_flag_ignored_on_first_poll(self):
+        # Previous attempt left failed=True; the new load succeeds.
+        states = [self._row("unloaded", failed=True),
+                  self._row("loading", failed=True),
+                  self._row("loaded")]
+        with mock.patch.object(modelctl, "router_status", side_effect=states), \
+             mock.patch.object(modelctl.time, "sleep"):
+            self.assertEqual(modelctl._wait_for_router_model("m", "loaded"),
+                             "loaded")
+
+    def test_genuine_failure_still_detected(self):
+        states = [self._row("loading"),
+                  self._row("unloaded", failed=True)]
+        with mock.patch.object(modelctl, "router_status", side_effect=states), \
+             mock.patch.object(modelctl.time, "sleep"):
+            self.assertEqual(modelctl._wait_for_router_model("m", "loaded"),
+                             "failed")
+
+    def test_unload_wait_satisfied_despite_stale_failed(self):
+        states = [self._row("unloaded", failed=True)]
+        with mock.patch.object(modelctl, "router_status", side_effect=states), \
+             mock.patch.object(modelctl.time, "sleep"):
+            self.assertEqual(modelctl._wait_for_router_model("m", "unloaded"),
+                             "unloaded")
+
+    def test_router_unreachable_returns_none(self):
+        with mock.patch.object(modelctl, "router_status",
+                               side_effect=RuntimeError("down")), \
+             mock.patch.object(modelctl.time, "sleep"):
+            self.assertIsNone(modelctl._wait_for_router_model("m", "loaded"))
+
+
 if __name__ == "__main__":
     unittest.main()
