@@ -3,7 +3,7 @@ from unittest import mock
 
 from textual.widgets import Input, ListView, Static
 
-from modelctl_tui import PullWizardApp, QuantPickScreen, StepIndicator, WizardState, next_screen_after
+from modelctl_tui import PullWizardApp, QuantPickScreen, StepIndicator, VisionMtpScreen, WizardState, next_screen_after
 
 
 class TestNextScreenAfter(unittest.TestCase):
@@ -165,6 +165,39 @@ class TestQuantPickScreen(unittest.IsolatedAsyncioTestCase):
             await pilot.click("ListItem")
             await pilot.pause()
             self.assertEqual(app.screen.STEP, "vision_mtp")
+
+
+class TestVisionMtpScreen(unittest.IsolatedAsyncioTestCase):
+    async def test_lists_mmproj_and_mtp_options_with_skip(self):
+        app = PullWizardApp()
+        async with app.run_test() as pilot:
+            app.state = WizardState(repo_contents={
+                "mmproj_files": [{"name": "mmproj-F16.gguf", "size": 500}],
+                "mtp_files": [{"name": "model-mtp.gguf", "size": 300}],
+            })
+            await app.push_screen(VisionMtpScreen())
+            await pilot.pause()
+            mmproj_options = app.screen.query_one("#mmproj-options", ListView)
+            mtp_options = app.screen.query_one("#mtp-options", ListView)
+            # +1 each for the "skip" entry
+            self.assertEqual(len(mmproj_options.children), 2)
+            self.assertEqual(len(mtp_options.children), 2)
+
+    async def test_picking_mmproj_and_skipping_mtp_advances_to_configure(self):
+        app = PullWizardApp()
+        async with app.run_test() as pilot:
+            app.state = WizardState(repo_contents={
+                "mmproj_files": [{"name": "mmproj-F16.gguf", "size": 500}],
+                "mtp_files": [],
+            })
+            await app.push_screen(VisionMtpScreen())
+            await pilot.pause()
+            await pilot.click("#mmproj-options ListItem")
+            await pilot.click("#continue-button")
+            await pilot.pause()
+            self.assertEqual(app.state.mmproj_choice["name"], "mmproj-F16.gguf")
+            self.assertIsNone(app.state.mtp_choice)
+            self.assertEqual(app.screen.STEP, "configure")
 
 
 if __name__ == "__main__":

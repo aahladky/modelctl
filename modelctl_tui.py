@@ -12,11 +12,13 @@ from dataclasses import dataclass, field
 from textual import work
 from textual.app import App, ComposeResult
 from textual.screen import Screen
-from textual.widgets import Input, Label, ListItem, ListView, Static
+from textual.widgets import Button, Input, Label, ListItem, ListView, Static
 
 import modelctl
 
 STEP_ORDER = ["search", "quant", "vision_mtp", "configure", "name", "download", "summary"]
+
+SKIP_LABEL = "(skip)"
 
 
 @dataclass
@@ -141,11 +143,60 @@ class QuantPickScreen(Screen):
 
 
 class VisionMtpScreen(Screen):
-    """Placeholder for Task 6."""
+    """Third wizard screen: optionally pick a vision projector (mmproj) file
+    and/or an MTP draft-head file from the repo contents already fetched by
+    SearchScreen. No network I/O here, so no background worker is needed.
+
+    Unlike QuantPickScreen, this screen has two independent optional choices
+    confirmed together by a single Continue button rather than one selection
+    advancing immediately -- selecting either list just highlights a row.
+    Both lists list the real files first followed by a trailing "(skip)"
+    entry; a selected index that falls within the real-files range is a
+    real choice, while the trailing "(skip)" row or no selection at all
+    (ListView.index is None until something is clicked) both mean "no
+    choice", matching cmd_pull's existing blank-input-to-skip behavior for
+    these optional prompts."""
     STEP = "vision_mtp"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="vision_mtp")
+        contents = self.app.state.repo_contents or {}
+        self._mmproj_files = contents.get("mmproj_files", [])
+        self._mtp_files = contents.get("mtp_files", [])
+        yield Label("Vision (mmproj):")
+        yield ListView(id="mmproj-options")
+        yield Label("MTP draft head:")
+        yield ListView(id="mtp-options")
+        yield Button("Continue", id="continue-button")
+
+    def on_mount(self) -> None:
+        mmproj_view = self.query_one("#mmproj-options", ListView)
+        for f in self._mmproj_files:
+            mmproj_view.append(ListItem(Label(f"{f['name']} ({modelctl._format_size(f.get('size'))})")))
+        mmproj_view.append(ListItem(Label(SKIP_LABEL)))
+
+        mtp_view = self.query_one("#mtp-options", ListView)
+        for f in self._mtp_files:
+            mtp_view.append(ListItem(Label(f"{f['name']} ({modelctl._format_size(f.get('size'))})")))
+        mtp_view.append(ListItem(Label(SKIP_LABEL)))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "continue-button":
+            return
+        # ListView.index is None until a row has been explicitly clicked
+        # (verified empirically against the installed Textual version,
+        # 8.2.8 -- it does NOT default to 0). The trailing "(skip)" row
+        # sits at index == len(files), one past the real choices, so any
+        # index within range(len(files)) is a real pick and everything
+        # else (None, or the skip row itself) means "no choice".
+        mmproj_index = self.query_one("#mmproj-options", ListView).index
+        if mmproj_index is not None and mmproj_index < len(self._mmproj_files):
+            self.app.state.mmproj_choice = self._mmproj_files[mmproj_index]
+        mtp_index = self.query_one("#mtp-options", ListView).index
+        if mtp_index is not None and mtp_index < len(self._mtp_files):
+            self.app.state.mtp_choice = self._mtp_files[mtp_index]
+        next_step = next_screen_after("vision_mtp", self.app.state)
+        self.app.push_screen(SCREENS_BY_NAME[next_step]())
 
 
 class ConfigureScreen(Screen):
