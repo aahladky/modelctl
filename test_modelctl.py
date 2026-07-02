@@ -1114,6 +1114,21 @@ class TestGetGpuInventory(unittest.TestCase):
             inv = modelctl.get_gpu_inventory()
         self.assertEqual([d["device"] for d in inv], ["SYCL0", "SYCL1"])
 
+    def test_integrated_gpu_excluded(self):
+        xpu = self.XPU + [{"xpu_id": 2, "name": "Intel(R) UHD Graphics 770",
+                           "total_bytes": 33369731072, "free_bytes": 1 << 30}]
+        sycl = [{"device": "SYCL0", "name": "big", "total_mib": 32657},
+                {"device": "SYCL1", "name": "small", "total_mib": 12215},
+                {"device": "SYCL2", "name": "Intel(R) UHD Graphics 770",
+                 "total_mib": 31824}]
+        with mock.patch.object(modelctl, "GPU_MAP_PATH", self.map_path), \
+             mock.patch.object(modelctl.modelctl_vram, "xpu_devices",
+                               return_value=xpu), \
+             mock.patch.object(modelctl.modelctl_vram, "llama_list_devices",
+                               return_value=sycl):
+            inv = modelctl.get_gpu_inventory()
+        self.assertEqual({d["device"] for d in inv}, {"SYCL0", "SYCL1"})
+
 
 class TestCmdPlace(unittest.TestCase):
     INVENTORY = [

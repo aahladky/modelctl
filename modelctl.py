@@ -83,6 +83,12 @@ GPU_MAP_PATH = STATE_DIR / "gpu_map.json"
 DEFAULT_VRAM_LIMIT_PCT = int(os.environ.get("MODELCTL_DEFAULT_VRAM_LIMIT_PCT", "90"))
 DEFAULT_PRIMARY_GPU = os.environ.get("MODELCTL_DEFAULT_PRIMARY_GPU", "")
 
+# Integrated GPUs (UHD/Iris) report shared system RAM as their memory and
+# must never be a placement target -- exclude them from the inventory by
+# name. Override the pattern with MODELCTL_GPU_EXCLUDE (regex, case
+# insensitive; empty string disables filtering).
+GPU_EXCLUDE_PATTERN = os.environ.get("MODELCTL_GPU_EXCLUDE", r"UHD Graphics|Iris")
+
 
 # Env vars worth carrying into generated configs if they're set in the
 # shell modelctl is run from (e.g. after sourcing llama-sycl-env.sh).
@@ -1919,6 +1925,9 @@ def get_gpu_inventory(force_remap: bool = False) -> list:
     it needs a slow llama-server --list-devices run. Returns [] when xpu-smi
     is unavailable -- callers degrade to warnings, never errors."""
     xpu = modelctl_vram.xpu_devices()
+    if GPU_EXCLUDE_PATTERN:
+        xpu = [d for d in xpu
+               if not re.search(GPU_EXCLUDE_PATTERN, d["name"], re.IGNORECASE)]
     if not xpu:
         return []
 
@@ -1930,6 +1939,9 @@ def get_gpu_inventory(force_remap: bool = False) -> list:
             mapping = None
     if mapping is None:
         sycl = modelctl_vram.llama_list_devices(LLAMA_SERVER_BIN)
+        if GPU_EXCLUDE_PATTERN:
+            sycl = [s for s in sycl
+                    if not re.search(GPU_EXCLUDE_PATTERN, s["name"], re.IGNORECASE)]
         mapping = modelctl_vram.match_devices(sycl, xpu)
         if mapping:
             GPU_MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
