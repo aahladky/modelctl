@@ -199,6 +199,42 @@ class TestVisionMtpScreen(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(app.state.mtp_choice)
             self.assertEqual(app.screen.STEP, "configure")
 
+    async def test_clicking_trailing_skip_row_on_nonempty_list_yields_none(self):
+        # Boundary case for the skip-last reordering: a list with a REAL
+        # file plus a trailing "(skip)" row, where the skip row itself
+        # (the LAST ListItem) is the one chosen. pilot.click("ListItem")
+        # always hits the first DOM match (the real file, given the
+        # reordering), so it can't reach the skip row here -- instead we
+        # drive the ListView's own keyboard cursor (arrow-key highlight,
+        # same mechanism on_button_pressed reads via `.index`) down past
+        # the real file to land on the trailing skip row.
+        app = PullWizardApp()
+        async with app.run_test() as pilot:
+            app.state = WizardState(repo_contents={
+                "mmproj_files": [{"name": "mmproj-F16.gguf", "size": 500}],
+                "mtp_files": [],
+            })
+            await app.push_screen(VisionMtpScreen())
+            await pilot.pause()
+            mmproj_options = app.screen.query_one("#mmproj-options", ListView)
+            # Sanity: 2 rows total (1 real file + 1 trailing skip), so
+            # index 1 (the last one) is the skip row, not the real file.
+            self.assertEqual(len(mmproj_options.children), 2)
+            app.set_focus(mmproj_options)
+            await pilot.pause()
+            # ListView.index starts at None; each "down" press moves the
+            # highlight one row, landing on the highest index (the skip
+            # row) after `len(files) + 1` presses.
+            for _ in range(len(app.screen._mmproj_files) + 1):
+                await pilot.press("down")
+            await pilot.pause()
+            # Confirm we actually reached the trailing skip row, not the
+            # real file, before trusting the Continue click below.
+            self.assertEqual(mmproj_options.index, 1)
+            await pilot.click("#continue-button")
+            await pilot.pause()
+            self.assertIsNone(app.state.mmproj_choice)
+
 
 if __name__ == "__main__":
     unittest.main()

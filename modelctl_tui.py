@@ -170,6 +170,13 @@ class VisionMtpScreen(Screen):
         yield Button("Continue", id="continue-button")
 
     def on_mount(self) -> None:
+        # "(skip)" is listed LAST, not first -- pilot.click()'s default
+        # ListItem selector resolves to the first DOM match, so a leading
+        # skip row would make "click a real result" tests always hit skip
+        # instead. This ordering is load-bearing for click-based testing,
+        # not just a UI preference -- see commit 2e578e6 for the empirical
+        # verification (ListView.index defaults to None, not 0, on this
+        # Textual version).
         mmproj_view = self.query_one("#mmproj-options", ListView)
         for f in self._mmproj_files:
             mmproj_view.append(ListItem(Label(f"{f['name']} ({modelctl._format_size(f.get('size'))})")))
