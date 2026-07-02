@@ -264,7 +264,7 @@ class ConfigureScreen(Screen):
     again later, but per the wizard design they are non-blocking --
     submitting always advances to the next step.
 
-    This screen has nine label/input pairs plus the step indicator,
+    This screen has ten label/input pairs plus the step indicator,
     warning area, and submit button -- comfortably taller than a typical
     80x24 terminal at Textual's default bordered Input height (3 rows
     each). CSS below collapses each Input to a single borderless row so
