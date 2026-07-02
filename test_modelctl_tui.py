@@ -1,11 +1,12 @@
 import unittest
 from unittest import mock
 
-from textual.widgets import Input, ListView, Static
+from textual.widgets import Button, Input, ListView, Static
 
 import modelctl
 from modelctl_tui import (
     ConfigureScreen,
+    DownloadScreen,
     NameScreen,
     PullWizardApp,
     QuantPickScreen,
@@ -400,8 +401,19 @@ class TestNameScreen(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(dest_input.value, str(modelctl.DEFAULT_MODELS_DIR))
 
     async def test_submit_stores_name_and_dest_dir_and_advances(self):
+        # DownloadScreen.on_mount is stubbed out even though this test is
+        # about NameScreen, not DownloadScreen: submitting advances INTO
+        # DownloadScreen, whose real on_mount (added in Task 9) immediately
+        # fires a background download_if_needed() worker. A same-value mock
+        # of download_if_needed would resolve near-instantly and race with
+        # the assertion below (the worker can finish and advance to
+        # "summary" within the same pilot.pause()), so instead the screen's
+        # own on_mount is replaced with a no-op -- this test only cares that
+        # NameScreen pushed DownloadScreen, not what DownloadScreen does
+        # once mounted (that's TestDownloadScreen's job).
         app = PullWizardApp()
-        with mock.patch("modelctl_tui.modelctl.next_unique_profile_name", side_effect=lambda s: s):
+        with mock.patch("modelctl_tui.modelctl.next_unique_profile_name", side_effect=lambda s: s), \
+             mock.patch("modelctl_tui.DownloadScreen.on_mount", lambda self: None):
             async with app.run_test() as pilot:
                 app.state = WizardState(
                     repo_id="repo/x",
@@ -416,8 +428,11 @@ class TestNameScreen(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(app.screen.STEP, "download")
 
     async def test_submit_strips_leading_and_trailing_whitespace(self):
+        # See test_submit_stores_name_and_dest_dir_and_advances for why
+        # DownloadScreen.on_mount is stubbed out here too.
         app = PullWizardApp()
-        with mock.patch("modelctl_tui.modelctl.next_unique_profile_name", side_effect=lambda s: s):
+        with mock.patch("modelctl_tui.modelctl.next_unique_profile_name", side_effect=lambda s: s), \
+             mock.patch("modelctl_tui.DownloadScreen.on_mount", lambda self: None):
             async with app.run_test() as pilot:
                 app.state = WizardState(
                     repo_id="repo/x",
@@ -441,8 +456,12 @@ class TestNameScreen(unittest.IsolatedAsyncioTestCase):
         # profile_name would make save_profile() write to
         # PROFILES_DIR / ".json", and an empty dest_dir would silently
         # resolve to the current working directory via Path("").
+        # DownloadScreen.on_mount is stubbed out for the same reason as the
+        # two tests above -- submitting advances into DownloadScreen's real
+        # worker, which isn't this test's concern.
         app = PullWizardApp()
-        with mock.patch("modelctl_tui.modelctl.next_unique_profile_name", side_effect=lambda s: s):
+        with mock.patch("modelctl_tui.modelctl.next_unique_profile_name", side_effect=lambda s: s), \
+             mock.patch("modelctl_tui.DownloadScreen.on_mount", lambda self: None):
             async with app.run_test() as pilot:
                 app.state = WizardState(
                     repo_id="repo/x",
@@ -459,6 +478,42 @@ class TestNameScreen(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertEqual(app.state.profile_name, "model")
                 self.assertEqual(app.state.dest_dir, "/some/dest")
+
+
+class TestDownloadScreen(unittest.IsolatedAsyncioTestCase):
+    async def test_downloads_model_file_and_advances_on_success(self):
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.download_if_needed", return_value="/models/model-Q4_K_M.gguf") as mock_dl:
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"], "sharded": False},
+                    dest_dir="/models",
+                )
+                await app.push_screen(DownloadScreen())
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                mock_dl.assert_called_once_with("repo/x", "model-Q4_K_M.gguf", modelctl.Path("/models"))
+                self.assertEqual(app.state.__dict__.get("model_path"), "/models/model-Q4_K_M.gguf")
+                self.assertEqual(app.screen.STEP, "summary")
+
+    async def test_download_failure_shows_retry_and_does_not_advance(self):
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.download_if_needed", side_effect=OSError("network drop")):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"], "sharded": False},
+                    dest_dir="/models",
+                )
+                await app.push_screen(DownloadScreen())
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                self.assertEqual(app.screen.STEP, "download")
+                retry_button = app.screen.query_one("#retry-download", Button)
+                self.assertFalse(retry_button.disabled)
 
 
 if __name__ == "__main__":

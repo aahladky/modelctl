@@ -8,6 +8,7 @@ sync_hermes_custom_providers) -- no business logic is duplicated here.
 See docs/superpowers/specs/2026-07-01-modelctl-tui-pull-wizard-design.md.
 """
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -34,6 +35,7 @@ class WizardState:
     dest_dir: str = str(modelctl.DEFAULT_MODELS_DIR)
     config: dict | None = None         # same shape prompt_config() returns today
     profile_name: str = ""
+    model_path: str | None = None      # local path of the primary model file, set by DownloadScreen
     warnings: list = field(default_factory=list)
 
 
@@ -355,11 +357,69 @@ class NameScreen(Screen):
 
 
 class DownloadScreen(Screen):
-    """Placeholder for Task 9."""
+    """Sixth wizard screen: actually pulls the chosen quant group's file(s)
+    (all shards if the group is split) plus mmproj/MTP extras if chosen, via
+    modelctl.download_if_needed() -- which is itself the only place skip-if-
+    already-present logic lives. Runs on a worker thread (SearchScreen's
+    established pattern) since a multi-GB model download would otherwise
+    freeze the whole Textual event loop. Any exception stops progress here
+    with a retry button rather than silently advancing to a summary for a
+    profile whose files aren't actually on disk."""
     STEP = "download"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="download")
+        yield Static("Downloading...", id="download-status")
+        yield Button("Retry", id="retry-download", disabled=True)
+
+    def on_mount(self) -> None:
+        self.run_download()
+
+    @work(thread=True)
+    def run_download(self) -> None:
+        state = self.app.state
+        dest = Path(state.dest_dir)
+        try:
+            parts = state.quant_group["files"]
+            primary_path = None
+            for part in parts:
+                path = modelctl.download_if_needed(state.repo_id, part, dest)
+                if primary_path is None:
+                    primary_path = path
+            if state.mmproj_choice:
+                state.mmproj_choice["local_path"] = modelctl.download_if_needed(
+                    state.repo_id, state.mmproj_choice["name"], dest)
+            if state.mtp_choice:
+                state.mtp_choice["local_path"] = modelctl.download_if_needed(
+                    state.repo_id, state.mtp_choice["name"], dest)
+        except Exception as e:
+            self.app.call_from_thread(self._on_failure, str(e))
+            return
+        state.model_path = primary_path
+        self.app.call_from_thread(self._on_success)
+
+    def _on_success(self) -> None:
+        next_step = next_screen_after("download", self.app.state)
+        self.app.push_screen(SCREENS_BY_NAME[next_step]())
+
+    def _on_failure(self, message: str) -> None:
+        self.query_one("#download-status", Static).update(f"Download failed: {message}")
+        self.query_one("#retry-download", Button).disabled = False
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "retry-download":
+            return
+        self.query_one("#retry-download", Button).disabled = True
+        self.query_one("#download-status", Static).update("Downloading...")
+        self.run_download()
+
+
+class SummaryScreen(Screen):
+    """Placeholder for Task 10."""
+    STEP = "summary"
+
+    def compose(self) -> ComposeResult:
+        yield StepIndicator(current="summary")
 
 
 SCREENS_BY_NAME = {
@@ -369,6 +429,7 @@ SCREENS_BY_NAME = {
     "configure": ConfigureScreen,
     "name": NameScreen,
     "download": DownloadScreen,
+    "summary": SummaryScreen,
 }
 
 
