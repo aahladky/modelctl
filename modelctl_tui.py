@@ -86,13 +86,20 @@ class SearchScreen(Screen):
         self.query_one("#search-status", Static).update("Searching...")
         self.run_search(query)
 
-    @work(thread=True)
+    @work(thread=True, exclusive=True)
     def run_search(self, query: str) -> None:
         """Runs search_models() on a worker thread -- it can make up to
         15+ sequential HTTP round-trips against the real Hugging Face API
         (list_models + get_repo_contents per hit when enrich=True), which
         would otherwise freeze the whole Textual event loop. Any exception
-        is caught here so a network hiccup can't take down the app."""
+        is caught here so a network hiccup can't take down the app.
+
+        exclusive=True (matching DownloadScreen/SummaryScreen, both fixed
+        for this same bug class already): a user retyping and resubmitting
+        a search before the first one resolves could otherwise interleave
+        two searches, with on_list_view_selected indexing into a
+        self._results array that might not match what's visually
+        displayed. The stale search's worker is cancelled instead."""
         try:
             results = modelctl.search_models(query, limit=15, enrich=True)
         except Exception as e:
@@ -124,20 +131,38 @@ class SearchScreen(Screen):
 class QuantPickScreen(Screen):
     """Second wizard screen: pick a quant group from the repo contents
     already fetched by SearchScreen. No network I/O here -- just reads
-    self.app.state.repo_contents -- so no background worker is needed."""
+    self.app.state.repo_contents -- so no background worker is needed.
+
+    Defensive case (design spec): a repo with zero real quant groups
+    (get_repo_contents() raised upstream, or the repo genuinely has no
+    selectable model files -- only mmproj/MTP files, say) must not render
+    a silent empty ListView with no way out. When that happens, this
+    screen shows an error message and lets Escape pop back to a fresh
+    SearchScreen instead of leaving the user stuck (Ctrl+C only)."""
     STEP = "quant"
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="quant")
+        yield Static("", id="quant-error")
         yield ListView(id="quant-options")
 
     def on_mount(self) -> None:
         groups = (self.app.state.repo_contents or {}).get("quant_groups", [])
         self._groups = groups
+        if not groups:
+            self.query_one("#quant-error", Static).update(
+                "No selectable model files found in this repo. Press Escape to search again."
+            )
+            return
         options = self.query_one("#quant-options", ListView)
         for g in groups:
             size = modelctl._format_size(g.get("total_size"))
             options.append(ListItem(Label(f"{g['label']} ({size})")))
+
+    def on_key(self, event) -> None:
+        if event.key == "escape" and not self._groups:
+            self.app.pop_screen()
+            self.app.push_screen(SCREENS_BY_NAME["search"]())
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         index = self.query_one("#quant-options", ListView).index
@@ -492,8 +517,9 @@ class SummaryScreen(Screen):
             saved = True
             modelctl.generate_artifacts(profile)
             with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-                modelctl.sync_all_backends()
-                modelctl.sync_hermes_custom_providers()
+                modelctl.sync_all_backends(restart_router=not self.app.no_router_restart)
+                if not self.app.no_hermes:
+                    modelctl.sync_hermes_custom_providers()
         except Exception as e:
             self.app.call_from_thread(self._on_failure, str(e), captured.getvalue(), saved)
             return
@@ -543,7 +569,18 @@ SCREENS_BY_NAME = {
 class PullWizardApp(App):
     """Entry point for `modelctl pull --tui`. Pushes SearchScreen first;
     each subsequent screen is pushed by the previous one via
-    next_screen_after(), carrying a shared WizardState forward."""
+    next_screen_after(), carrying a shared WizardState forward.
+
+    no_hermes/no_router_restart mirror the CLI's --no-hermes/
+    --no-router-restart flags (see cmd_pull), threaded through from
+    run_pull_wizard() so SummaryScreen can honor them when it calls
+    sync_all_backends()/sync_hermes_custom_providers() -- previously these
+    flags were accepted by argparse but silently ignored under --tui."""
+
+    def __init__(self, no_hermes: bool = False, no_router_restart: bool = False):
+        super().__init__()
+        self.no_hermes = no_hermes
+        self.no_router_restart = no_router_restart
 
     def on_mount(self) -> None:
         self.state = WizardState()

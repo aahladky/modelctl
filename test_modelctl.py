@@ -855,10 +855,42 @@ class TestPullTuiFlag(unittest.TestCase):
             parser.parse_args(["pull"])
 
     def test_cmd_pull_dispatches_to_tui_when_flag_set(self):
-        args = argparse.Namespace(tui=True, repo_id=None, no_hermes=False)
+        args = argparse.Namespace(tui=True, repo_id=None, no_hermes=False, no_router_restart=False)
         with mock.patch.object(modelctl, "run_pull_wizard") as mock_wizard:
             modelctl.cmd_pull(args)
-        mock_wizard.assert_called_once()
+        mock_wizard.assert_called_once_with(no_hermes=False, no_router_restart=False)
+
+    def test_cmd_pull_passes_no_hermes_and_no_router_restart_to_wizard(self):
+        # Regression test for the silent-ignore bug: `modelctl pull --tui
+        # --no-hermes --no-router-restart` must actually thread those flags
+        # through to run_pull_wizard(), not silently drop them.
+        args = argparse.Namespace(tui=True, repo_id=None, no_hermes=True, no_router_restart=True)
+        with mock.patch.object(modelctl, "run_pull_wizard") as mock_wizard:
+            modelctl.cmd_pull(args)
+        mock_wizard.assert_called_once_with(no_hermes=True, no_router_restart=True)
+
+    def test_cmd_pull_tui_flags_default_false_when_absent(self):
+        # getattr(args, ..., False) fallback -- args objects that lack these
+        # attributes entirely (shouldn't happen via the real parser, but
+        # cheap to guard) must not crash cmd_pull.
+        args = argparse.Namespace(tui=True, repo_id=None)
+        with mock.patch.object(modelctl, "run_pull_wizard") as mock_wizard:
+            modelctl.cmd_pull(args)
+        mock_wizard.assert_called_once_with(no_hermes=False, no_router_restart=False)
+
+    def test_run_pull_wizard_constructs_app_with_flags(self):
+        mock_app_instance = mock.MagicMock()
+        with mock.patch("modelctl_tui.PullWizardApp", return_value=mock_app_instance) as mock_app_cls:
+            modelctl.run_pull_wizard(no_hermes=True, no_router_restart=True)
+        mock_app_cls.assert_called_once_with(no_hermes=True, no_router_restart=True)
+        mock_app_instance.run.assert_called_once()
+
+    def test_run_pull_wizard_defaults_to_false(self):
+        mock_app_instance = mock.MagicMock()
+        with mock.patch("modelctl_tui.PullWizardApp", return_value=mock_app_instance) as mock_app_cls:
+            modelctl.run_pull_wizard()
+        mock_app_cls.assert_called_once_with(no_hermes=False, no_router_restart=False)
+        mock_app_instance.run.assert_called_once()
 
     def test_run_pull_wizard_shows_friendly_message_when_textual_missing(self):
         real_import = builtins.__import__

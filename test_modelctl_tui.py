@@ -68,6 +68,21 @@ class TestPullWizardAppBoots(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.screen.STEP, "search")
 
 
+class TestPullWizardAppFlags(unittest.TestCase):
+    # Regression tests: modelctl pull --tui --no-hermes/--no-router-restart
+    # were silently ignored because PullWizardApp never carried these flags
+    # forward from run_pull_wizard(). Confirms the constructor stores them.
+    def test_defaults_to_false_when_omitted(self):
+        app = PullWizardApp()
+        self.assertFalse(app.no_hermes)
+        self.assertFalse(app.no_router_restart)
+
+    def test_stores_constructor_flags(self):
+        app = PullWizardApp(no_hermes=True, no_router_restart=True)
+        self.assertTrue(app.no_hermes)
+        self.assertTrue(app.no_router_restart)
+
+
 class TestSearchScreen(unittest.IsolatedAsyncioTestCase):
     async def test_typing_query_and_pressing_enter_shows_results(self):
         fake_results = [
@@ -133,6 +148,33 @@ class TestSearchScreen(unittest.IsolatedAsyncioTestCase):
                 # Confirm we can still interact with the screen afterwards.
                 self.assertEqual(app.screen.STEP, "search")
 
+    async def test_rapid_resubmit_cancels_previous_search_worker(self):
+        # Regression test mirroring DownloadScreen's rapid-double-press race
+        # test: run_search lacked exclusive=True, so retyping and resubmitting
+        # a search before the first one resolves could interleave two
+        # searches, leaving on_list_view_selected indexing into a
+        # self._results array that doesn't match what's visually displayed.
+        # Calling run_search() twice back-to-back with zero `await` in
+        # between mirrors the DownloadScreen race: the first worker's thread
+        # body never gets a chance to start before exclusive=True cancels it.
+        app = PullWizardApp()
+        calls = []
+
+        def fake_search(query, **kwargs):
+            calls.append(query)
+            return []
+
+        with mock.patch("modelctl_tui.modelctl.search_models", side_effect=fake_search) as mock_search:
+            async with app.run_test() as pilot:
+                screen = app.screen
+                screen.run_search("first")
+                screen.run_search("second")
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                self.assertEqual(calls, ["second"])
+                mock_search.assert_called_once()
+
 
 class TestQuantPickScreen(unittest.IsolatedAsyncioTestCase):
     def _state_with_contents(self, mmproj=None, mtp=None):
@@ -177,6 +219,61 @@ class TestQuantPickScreen(unittest.IsolatedAsyncioTestCase):
             await pilot.click("ListItem")
             await pilot.pause()
             self.assertEqual(app.screen.STEP, "vision_mtp")
+
+    async def test_empty_quant_groups_shows_error_instead_of_silence(self):
+        # Regression test for Issue 3: a repo with zero real quant groups
+        # (get_repo_contents() returned no quant_groups, e.g. an mmproj-only
+        # or otherwise unusable repo) must show a visible error, not an
+        # empty ListView with no explanation and no way out.
+        app = PullWizardApp()
+        async with app.run_test() as pilot:
+            app.state = WizardState(
+                repo_id="repo/x",
+                repo_contents={"quant_groups": [], "mmproj_files": [], "mtp_files": []},
+            )
+            await app.push_screen(QuantPickScreen())
+            await pilot.pause()
+            error = app.screen.query_one("#quant-error", Static)
+            self.assertIn("No selectable model files", str(error.render()))
+            options = app.screen.query_one("#quant-options", ListView)
+            self.assertEqual(len(options.children), 0)
+
+    async def test_missing_repo_contents_does_not_crash_and_shows_error(self):
+        # Defensive: repo_contents=None (get_repo_contents() raised and
+        # SearchScreen never set anything) must not crash on_mount either.
+        app = PullWizardApp()
+        async with app.run_test() as pilot:
+            app.state = WizardState(repo_id="repo/x", repo_contents=None)
+            await app.push_screen(QuantPickScreen())
+            await pilot.pause()
+            error = app.screen.query_one("#quant-error", Static)
+            self.assertIn("No selectable model files", str(error.render()))
+
+    async def test_escape_on_empty_quant_groups_returns_to_search(self):
+        app = PullWizardApp()
+        async with app.run_test() as pilot:
+            app.state = WizardState(
+                repo_id="repo/x",
+                repo_contents={"quant_groups": [], "mmproj_files": [], "mtp_files": []},
+            )
+            await app.push_screen(QuantPickScreen())
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertEqual(app.screen.STEP, "search")
+
+    async def test_escape_is_a_no_op_when_quant_groups_exist(self):
+        # The escape-to-search affordance is specifically for the dead-end
+        # case; it must not fire (and pop a screen out from under the user)
+        # when there are real choices to make.
+        app = PullWizardApp()
+        async with app.run_test() as pilot:
+            app.state = self._state_with_contents()
+            await app.push_screen(QuantPickScreen())
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertEqual(app.screen.STEP, "quant")
 
 
 class TestVisionMtpScreen(unittest.IsolatedAsyncioTestCase):
@@ -870,6 +967,95 @@ class TestSummaryScreen(unittest.IsolatedAsyncioTestCase):
                 status = app.screen.query_one("#summary-status", Static)
                 rendered = str(status.render())
                 self.assertIn("couldn't restart llama-router", rendered)
+
+    async def test_router_restart_suppressed_when_app_no_router_restart_true(self):
+        # Regression test: `modelctl pull --tui --no-router-restart` must
+        # actually stop the router from restarting, not just be accepted
+        # and silently ignored.
+        app = PullWizardApp(no_router_restart=True)
+        with mock.patch("modelctl_tui.modelctl.save_profile"), \
+             mock.patch("modelctl_tui.modelctl.generate_artifacts", return_value=True), \
+             mock.patch("modelctl_tui.modelctl.sync_all_backends") as mock_sync, \
+             mock.patch("modelctl_tui.modelctl.sync_hermes_custom_providers"), \
+             mock.patch("modelctl_tui.modelctl.capture_env_passthrough", return_value=[]):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"]},
+                    profile_name="model",
+                    model_path="/models/model-Q4_K_M.gguf",
+                    config={"ctx": "32768"},
+                )
+                await app.push_screen(SummaryScreen())
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                mock_sync.assert_called_once_with(restart_router=False)
+
+    async def test_router_restart_happens_by_default(self):
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.save_profile"), \
+             mock.patch("modelctl_tui.modelctl.generate_artifacts", return_value=True), \
+             mock.patch("modelctl_tui.modelctl.sync_all_backends") as mock_sync, \
+             mock.patch("modelctl_tui.modelctl.sync_hermes_custom_providers"), \
+             mock.patch("modelctl_tui.modelctl.capture_env_passthrough", return_value=[]):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"]},
+                    profile_name="model",
+                    model_path="/models/model-Q4_K_M.gguf",
+                    config={"ctx": "32768"},
+                )
+                await app.push_screen(SummaryScreen())
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                mock_sync.assert_called_once_with(restart_router=True)
+
+    async def test_hermes_sync_skipped_when_app_no_hermes_true(self):
+        # Regression test: `modelctl pull --tui --no-hermes` must actually
+        # skip the Hermes sync, not just be accepted and silently ignored.
+        app = PullWizardApp(no_hermes=True)
+        with mock.patch("modelctl_tui.modelctl.save_profile"), \
+             mock.patch("modelctl_tui.modelctl.generate_artifacts", return_value=True), \
+             mock.patch("modelctl_tui.modelctl.sync_all_backends"), \
+             mock.patch("modelctl_tui.modelctl.sync_hermes_custom_providers") as mock_hermes, \
+             mock.patch("modelctl_tui.modelctl.capture_env_passthrough", return_value=[]):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"]},
+                    profile_name="model",
+                    model_path="/models/model-Q4_K_M.gguf",
+                    config={"ctx": "32768"},
+                )
+                await app.push_screen(SummaryScreen())
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                mock_hermes.assert_not_called()
+
+    async def test_hermes_sync_runs_by_default(self):
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.save_profile"), \
+             mock.patch("modelctl_tui.modelctl.generate_artifacts", return_value=True), \
+             mock.patch("modelctl_tui.modelctl.sync_all_backends"), \
+             mock.patch("modelctl_tui.modelctl.sync_hermes_custom_providers") as mock_hermes, \
+             mock.patch("modelctl_tui.modelctl.capture_env_passthrough", return_value=[]):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"]},
+                    profile_name="model",
+                    model_path="/models/model-Q4_K_M.gguf",
+                    config={"ctx": "32768"},
+                )
+                await app.push_screen(SummaryScreen())
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                mock_hermes.assert_called_once()
 
 
 class TestFullWizardFlow(unittest.IsolatedAsyncioTestCase):

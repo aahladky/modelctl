@@ -924,7 +924,10 @@ def prompt_pick(label: str, prompt: str) -> int:
 
 def cmd_pull(args):
     if getattr(args, "tui", False):
-        run_pull_wizard()
+        run_pull_wizard(
+            no_hermes=getattr(args, "no_hermes", False),
+            no_router_restart=getattr(args, "no_router_restart", False),
+        )
         return
 
     repo_id = args.repo_id
@@ -1752,7 +1755,7 @@ def build_arg_parser():
     return parser
 
 
-def run_pull_wizard():
+def run_pull_wizard(no_hermes: bool = False, no_router_restart: bool = False):
     """Launch the Textual pull wizard (modelctl pull --tui). Imports
     textual lazily so it never becomes a hard dependency for the rest of
     modelctl -- only --tui users need it installed."""
@@ -1768,7 +1771,7 @@ def run_pull_wizard():
             file=sys.stderr,
         )
         sys.exit(1)
-    PullWizardApp().run()
+    PullWizardApp(no_hermes=no_hermes, no_router_restart=no_router_restart).run()
 
 
 def main():
