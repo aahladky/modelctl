@@ -207,11 +207,101 @@ class VisionMtpScreen(Screen):
 
 
 class ConfigureScreen(Screen):
-    """Placeholder for Task 7."""
+    """Fourth wizard screen: runtime config for the profile, mirroring
+    prompt_config()'s field set exactly, pre-filled from load_defaults().
+    On submit, runs preflight() synchronously -- like cmd_test,
+    render_llama_swap_entry, and render_router_preset already do elsewhere
+    in modelctl.py, none of which use a worker for it. preflight() only
+    does local filesystem existence checks and (at most) a fast
+    `--list-devices` subprocess call to resolve the llama-server binary;
+    it does no network I/O, so it doesn't need the SearchScreen-style
+    background-worker treatment reserved for slow/blocking calls.
+
+    Any preflight issues (errors OR warnings) are surfaced in a warning
+    area and appended to WizardState.warnings for SummaryScreen to show
+    again later, but per the wizard design they are non-blocking --
+    submitting always advances to the next step.
+
+    This screen has nine label/input pairs plus the step indicator,
+    warning area, and submit button -- comfortably taller than a typical
+    80x24 terminal at Textual's default bordered Input height (3 rows
+    each). CSS below collapses each Input to a single borderless row so
+    the whole form (and, critically, the Continue button) fits within a
+    standard-size viewport without requiring the user -- or a test
+    Pilot, which can't click widgets scrolled out of view -- to scroll."""
     STEP = "configure"
+
+    DEFAULT_CSS = """
+    ConfigureScreen Input {
+        height: 1;
+        border: none;
+    }
+    """
 
     def compose(self) -> ComposeResult:
         yield StepIndicator(current="configure")
+        d = modelctl.load_defaults()
+        self._defaults = d
+        yield Label("Device (blank = use split strategy):")
+        yield Input(value=d.get("device", ""), id="config-device")
+        yield Label("Split mode:")
+        yield Input(value=d["split_mode"], id="config-split-mode")
+        yield Label("Tensor split:")
+        yield Input(value=d["tensor_split"], id="config-tensor-split")
+        yield Label("Context length:")
+        yield Input(value=str(d["ctx"]), id="config-ctx")
+        yield Label("KV cache quant:")
+        yield Input(value=d["kv_quant"], id="config-kv-quant")
+        yield Label("Flash attention:")
+        yield Input(value=d["flash_attn"], id="config-flash-attn")
+        yield Label("llama-swap idle TTL (seconds):")
+        yield Input(value=str(d["ttl"]), id="config-ttl")
+        yield Label("Multi-token prediction (on/off):")
+        yield Input(value=d.get("mtp", modelctl.DEFAULT_MTP), id="config-mtp")
+        yield Label("Extra llama-server flags (optional):")
+        yield Input(value="", id="config-extra")
+        yield Static("", id="preflight-warning")
+        yield Button("Continue", id="submit-config")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "submit-config":
+            return
+        config = {
+            "device": self.query_one("#config-device", Input).value,
+            "split_mode": self.query_one("#config-split-mode", Input).value,
+            "tensor_split": self.query_one("#config-tensor-split", Input).value,
+            "ctx": self.query_one("#config-ctx", Input).value,
+            "kv_quant": self.query_one("#config-kv-quant", Input).value,
+            "flash_attn": self.query_one("#config-flash-attn", Input).value,
+            "ttl": self.query_one("#config-ttl", Input).value,
+            "mtp": self.query_one("#config-mtp", Input).value,
+            "extra": self.query_one("#config-extra", Input).value,
+        }
+        self.app.state.config = config
+
+        # Build a throwaway profile dict just for preflight() -- same
+        # shape cmd_pull assembles, minus fields preflight doesn't read.
+        probe_profile = {
+            "name": "preflight-probe",
+            "model_path": (self.app.state.quant_group or {}).get("files", [""])[0],
+            "mmproj_path": (self.app.state.mmproj_choice or {}).get("name"),
+            "config": config,
+        }
+        ok, _, _, messages = modelctl.preflight(probe_profile, auto_fix=True)
+        if not ok or messages:
+            self.app.state.warnings.extend(messages)
+            self.query_one("#preflight-warning", Static).update("\n".join(messages))
+
+        next_step = next_screen_after("configure", self.app.state)
+        self.app.push_screen(SCREENS_BY_NAME[next_step]())
+
+
+class NameScreen(Screen):
+    """Placeholder for Task 8."""
+    STEP = "name"
+
+    def compose(self) -> ComposeResult:
+        yield StepIndicator(current="name")
 
 
 SCREENS_BY_NAME = {
@@ -219,6 +309,7 @@ SCREENS_BY_NAME = {
     "quant": QuantPickScreen,
     "vision_mtp": VisionMtpScreen,
     "configure": ConfigureScreen,
+    "name": NameScreen,
 }
 
 

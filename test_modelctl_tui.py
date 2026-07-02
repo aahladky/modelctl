@@ -3,7 +3,15 @@ from unittest import mock
 
 from textual.widgets import Input, ListView, Static
 
-from modelctl_tui import PullWizardApp, QuantPickScreen, StepIndicator, VisionMtpScreen, WizardState, next_screen_after
+from modelctl_tui import (
+    ConfigureScreen,
+    PullWizardApp,
+    QuantPickScreen,
+    StepIndicator,
+    VisionMtpScreen,
+    WizardState,
+    next_screen_after,
+)
 
 
 class TestNextScreenAfter(unittest.TestCase):
@@ -234,6 +242,64 @@ class TestVisionMtpScreen(unittest.IsolatedAsyncioTestCase):
             await pilot.click("#continue-button")
             await pilot.pause()
             self.assertIsNone(app.state.mmproj_choice)
+
+
+class TestConfigureScreen(unittest.IsolatedAsyncioTestCase):
+    async def test_prefills_from_defaults(self):
+        fake_defaults = {
+            "device": "", "split_mode": "layer", "tensor_split": "3,1",
+            "ctx": 32768, "kv_quant": "q8_0", "flash_attn": "auto",
+            "ttl": 3600, "mtp": "off",
+        }
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.load_defaults", return_value=fake_defaults):
+            async with app.run_test() as pilot:
+                app.state = WizardState()
+                await app.push_screen(ConfigureScreen())
+                await pilot.pause()
+                ctx_input = app.screen.query_one("#config-ctx", Input)
+                self.assertEqual(ctx_input.value, "32768")
+
+    async def test_submit_stores_config_and_advances(self):
+        fake_defaults = {
+            "device": "", "split_mode": "layer", "tensor_split": "3,1",
+            "ctx": 32768, "kv_quant": "q8_0", "flash_attn": "auto",
+            "ttl": 3600, "mtp": "off",
+        }
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.load_defaults", return_value=fake_defaults), \
+             mock.patch("modelctl_tui.modelctl.preflight", return_value=(True, "llama-server", {}, [])):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x", quant_group={"label": "Q4_K_M", "files": ["a.gguf"]},
+                )
+                await app.push_screen(ConfigureScreen())
+                await pilot.pause()
+                await pilot.click("#submit-config")
+                await pilot.pause()
+                self.assertEqual(app.state.config["ctx"], "32768")
+                self.assertEqual(app.screen.STEP, "name")
+
+    async def test_preflight_warning_does_not_block_submit(self):
+        fake_defaults = {
+            "device": "", "split_mode": "layer", "tensor_split": "3,1",
+            "ctx": 32768, "kv_quant": "q8_0", "flash_attn": "auto",
+            "ttl": 3600, "mtp": "off",
+        }
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.load_defaults", return_value=fake_defaults), \
+             mock.patch("modelctl_tui.modelctl.preflight",
+                         return_value=(False, None, {}, ["ERROR: llama-server not found"])):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x", quant_group={"label": "Q4_K_M", "files": ["a.gguf"]},
+                )
+                await app.push_screen(ConfigureScreen())
+                await pilot.pause()
+                await pilot.click("#submit-config")
+                await pilot.pause()
+                self.assertIn("ERROR: llama-server not found", app.state.warnings)
+                self.assertEqual(app.screen.STEP, "name")
 
 
 if __name__ == "__main__":
