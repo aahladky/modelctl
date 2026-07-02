@@ -794,6 +794,83 @@ class TestSummaryScreen(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertFalse(app.is_running)
 
+    async def test_exception_during_sync_shows_failure_and_does_not_crash_app(self):
+        # Critical issue 1: run_sync() previously had zero error handling,
+        # so any exception (disk full, permissions, network hiccup during
+        # Hermes sync) propagated unhandled out of the worker thread. With
+        # Textual's default exit_on_error=True, that crashes the whole app
+        # (app._handle_exception() exits, tears down the alt-screen, dumps
+        # a raw traceback) instead of showing the user an honest message.
+        # This test simulates save_profile itself failing (OSError("disk
+        # full")) -- i.e. nothing was actually saved -- and asserts the app
+        # survives with a visible failure message on #summary-status.
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.save_profile", side_effect=OSError("disk full")), \
+             mock.patch("modelctl_tui.modelctl.generate_artifacts", return_value=True), \
+             mock.patch("modelctl_tui.modelctl.sync_all_backends"), \
+             mock.patch("modelctl_tui.modelctl.sync_hermes_custom_providers"), \
+             mock.patch("modelctl_tui.modelctl.capture_env_passthrough", return_value=[]):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"]},
+                    profile_name="model",
+                    model_path="/models/model-Q4_K_M.gguf",
+                    config={"ctx": "32768"},
+                )
+                await app.push_screen(SummaryScreen())
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                self.assertTrue(app.is_running)
+                status = app.screen.query_one("#summary-status", Static)
+                rendered = str(status.render())
+                self.assertIn("disk full", rendered)
+                # Done must still work after a failure -- re-running the
+                # wizard is the recovery path, but the user must be able to
+                # exit cleanly rather than getting stuck on this screen.
+                await pilot.click("#done-button")
+                await pilot.pause()
+                self.assertFalse(app.is_running)
+
+    async def test_stderr_warnings_during_sync_reach_summary_status(self):
+        # Critical issue 2: restart_router_service() (called transitively
+        # via sync_all_backends -> sync_router_preset) reports failures by
+        # printing to stderr and returning False -- it never raises. While
+        # the Textual app is running, stdout/stderr are globally redirected
+        # by the framework, so nothing previously captured that output and
+        # the user saw a clean "Saved profile" message with zero indication
+        # the router preset was written but never actually reloaded. This
+        # simulates that by making sync_all_backends print a warning to
+        # stderr as a side effect, and asserts it shows up in
+        # #summary-status instead of silently vanishing.
+        import sys as _sys
+
+        def fake_sync_all_backends(*args, **kwargs):
+            print("WARNING: couldn't restart llama-router: unit not found", file=_sys.stderr)
+
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.save_profile"), \
+             mock.patch("modelctl_tui.modelctl.generate_artifacts", return_value=True), \
+             mock.patch("modelctl_tui.modelctl.sync_all_backends", side_effect=fake_sync_all_backends), \
+             mock.patch("modelctl_tui.modelctl.sync_hermes_custom_providers"), \
+             mock.patch("modelctl_tui.modelctl.capture_env_passthrough", return_value=[]):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"]},
+                    profile_name="model",
+                    model_path="/models/model-Q4_K_M.gguf",
+                    config={"ctx": "32768"},
+                )
+                await app.push_screen(SummaryScreen())
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                status = app.screen.query_one("#summary-status", Static)
+                rendered = str(status.render())
+                self.assertIn("couldn't restart llama-router", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

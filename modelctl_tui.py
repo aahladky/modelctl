@@ -7,6 +7,8 @@ download_if_needed, save_profile, generate_artifacts, sync_all_backends,
 sync_hermes_custom_providers) -- no business logic is duplicated here.
 See docs/superpowers/specs/2026-07-01-modelctl-tui-pull-wizard-design.md.
 """
+import contextlib
+import io
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -455,6 +457,23 @@ class SummaryScreen(Screen):
 
     @work(thread=True, exclusive=True)
     def run_sync(self) -> None:
+        """Runs the save/generate/sync sequence on a worker thread (see
+        class docstring for why). Every step is wrapped in try/except so a
+        real failure here -- disk full, permissions, a network hiccup during
+        Hermes sync -- resolves to a status update via call_from_thread
+        instead of propagating out of the worker thread, which Textual's
+        Worker (default exit_on_error=True) would otherwise turn into a full
+        app crash (app._handle_exception() exits the app, tears down the
+        alt-screen, dumps a raw traceback -- see code review on 0d6ab1b).
+
+        sync_all_backends()/sync_hermes_custom_providers() report some
+        failures (e.g. restart_router_service()'s systemctl failures) by
+        printing to stdout/stderr rather than raising or returning a value --
+        those prints vanish silently while Textual has stdout/stderr
+        redirected, unless we capture them ourselves. redirect_stdout/
+        redirect_stderr around just those two calls (not save_profile/
+        generate_artifacts, which communicate failure via exceptions) catches
+        that output so it can be shown to the user instead of lost."""
         state = self.app.state
         profile = {
             "name": state.profile_name,
@@ -466,19 +485,44 @@ class SummaryScreen(Screen):
             "config": state.config,
             "env": modelctl.capture_env_passthrough(),
         }
-        modelctl.save_profile(profile)
-        modelctl.generate_artifacts(profile)
-        modelctl.sync_all_backends()
-        modelctl.sync_hermes_custom_providers()
+        captured = io.StringIO()
+        saved = False
+        try:
+            modelctl.save_profile(profile)
+            saved = True
+            modelctl.generate_artifacts(profile)
+            with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
+                modelctl.sync_all_backends()
+                modelctl.sync_hermes_custom_providers()
+        except Exception as e:
+            self.app.call_from_thread(self._on_failure, str(e), captured.getvalue(), saved)
+            return
+        self.app.call_from_thread(self._on_success, captured.getvalue())
 
+    def _on_success(self, sync_output: str) -> None:
+        state = self.app.state
         lines = [f"Saved profile '{state.profile_name}'."]
         if state.warnings:
             lines.append("Warnings:")
             lines.extend(f"  {w}" for w in state.warnings)
-        self.app.call_from_thread(self._on_done, "\n".join(lines))
+        if sync_output.strip():
+            lines.append("Sync details:")
+            lines.append(sync_output.strip())
+        self.query_one("#summary-status", Static).update("\n".join(lines))
 
-    def _on_done(self, text: str) -> None:
-        self.query_one("#summary-status", Static).update(text)
+    def _on_failure(self, message: str, sync_output: str, saved: bool) -> None:
+        state = self.app.state
+        if saved:
+            lines = [
+                f"Profile '{state.profile_name}' was saved, but a later step failed: {message}",
+                "The saved profile may not be fully synced to llama-swap/router/Hermes yet.",
+            ]
+        else:
+            lines = [f"Nothing was saved -- save/sync failed: {message}"]
+        if sync_output.strip():
+            lines.append("Partial sync output:")
+            lines.append(sync_output.strip())
+        self.query_one("#summary-status", Static).update("\n".join(lines))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "done-button":
