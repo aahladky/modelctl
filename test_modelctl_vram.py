@@ -1,3 +1,4 @@
+import json
 import struct
 import unittest
 from pathlib import Path
@@ -172,6 +173,94 @@ class TestEstimateFromParts(unittest.TestCase):
     def test_mmproj_included_in_weights(self):
         est = modelctl_vram.estimate_from_parts(100, 1, "f16", mmproj_bytes=50)
         self.assertEqual(est["weights"], 150)
+
+
+def _fake_run_factory(responses):
+    """responses: list of (stdout, returncode) consumed in call order."""
+    it = iter(responses)
+
+    def fake_run(cmd, **kwargs):
+        stdout, code = next(it)
+        return mock.Mock(stdout=stdout, stderr="", returncode=code)
+    return fake_run
+
+
+class TestXpuDevices(unittest.TestCase):
+    LIST_JSON = json.dumps({"device_list": [
+        {"device_id": 0}, {"device_id": 1},
+    ]})
+    DEV0_JSON = json.dumps({"device_id": 0, "device_name": "Intel(R) Graphics [0xe223]",
+                            "memory_physical_size_byte": "34242297856",
+                            "memory_free_size_byte": "33705361408"})
+    DEV1_JSON = json.dumps({"device_id": 1, "device_name": "Intel(R) Arc(TM) B580 Graphics",
+                            "memory_physical_size_byte": "12809404416",
+                            "memory_free_size_byte": "12000000000"})
+
+    def test_enumerates_devices_with_memory(self):
+        fake = _fake_run_factory([(self.LIST_JSON, 0), (self.DEV0_JSON, 0),
+                                  (self.DEV1_JSON, 0)])
+        with mock.patch.object(modelctl_vram.subprocess, "run", side_effect=fake):
+            devices = modelctl_vram.xpu_devices()
+        self.assertEqual(len(devices), 2)
+        self.assertEqual(devices[0], {"xpu_id": 0,
+                                      "name": "Intel(R) Graphics [0xe223]",
+                                      "total_bytes": 34242297856,
+                                      "free_bytes": 33705361408})
+
+    def test_missing_tool_returns_empty(self):
+        with mock.patch.object(modelctl_vram.subprocess, "run",
+                               side_effect=FileNotFoundError()):
+            self.assertEqual(modelctl_vram.xpu_devices(), [])
+
+    def test_bad_json_returns_empty(self):
+        fake = _fake_run_factory([("not json", 0)])
+        with mock.patch.object(modelctl_vram.subprocess, "run", side_effect=fake):
+            self.assertEqual(modelctl_vram.xpu_devices(), [])
+
+
+class TestLlamaListDevices(unittest.TestCase):
+    OUTPUT = """\
+Available devices:
+  SYCL0: Intel(R) Graphics [0xe223] (32657 MiB, 32145 MiB free)
+  SYCL1: Intel(R) Arc(TM) B580 Graphics (12215 MiB, 11800 MiB free)
+"""
+
+    def test_parses_device_lines(self):
+        fake = _fake_run_factory([(self.OUTPUT, 0)])
+        with mock.patch.object(modelctl_vram.subprocess, "run", side_effect=fake):
+            devices = modelctl_vram.llama_list_devices("llama-server")
+        self.assertEqual(devices, [
+            {"device": "SYCL0", "name": "Intel(R) Graphics [0xe223]", "total_mib": 32657},
+            {"device": "SYCL1", "name": "Intel(R) Arc(TM) B580 Graphics", "total_mib": 12215},
+        ])
+
+    def test_failure_returns_empty(self):
+        with mock.patch.object(modelctl_vram.subprocess, "run",
+                               side_effect=OSError()):
+            self.assertEqual(modelctl_vram.llama_list_devices("llama-server"), [])
+
+
+class TestMatchDevices(unittest.TestCase):
+    XPU = [
+        {"xpu_id": 0, "name": "big", "total_bytes": 34242297856, "free_bytes": 0},
+        {"xpu_id": 1, "name": "small", "total_bytes": 12809404416, "free_bytes": 0},
+    ]
+
+    def test_matches_by_nearest_total(self):
+        sycl = [{"device": "SYCL0", "name": "big", "total_mib": 32657},
+                {"device": "SYCL1", "name": "small", "total_mib": 12215}]
+        self.assertEqual(modelctl_vram.match_devices(sycl, self.XPU),
+                         {"SYCL0": 0, "SYCL1": 1})
+
+    def test_reversed_enumeration_still_matches(self):
+        sycl = [{"device": "SYCL0", "name": "small", "total_mib": 12215},
+                {"device": "SYCL1", "name": "big", "total_mib": 32657}]
+        self.assertEqual(modelctl_vram.match_devices(sycl, self.XPU),
+                         {"SYCL0": 1, "SYCL1": 0})
+
+    def test_wildly_different_sizes_skipped(self):
+        sycl = [{"device": "SYCL0", "name": "?", "total_mib": 999999}]
+        self.assertEqual(modelctl_vram.match_devices(sycl, self.XPU), {})
 
 
 if __name__ == "__main__":

@@ -173,3 +173,77 @@ def estimate_from_parts(weights_bytes, ctx, kv_quant, gguf_params=None,
     overhead = max(1 << 30, int(weights * 0.10))
     return {"weights": weights, "kv_bytes": kv, "overhead": overhead,
             "total": weights + kv + overhead, "quality": quality}
+
+
+# Matches "  SYCL0: Intel(R) Graphics [0xe223] (32657 MiB, 32145 MiB free)"
+# from `llama-server --list-devices`.
+_DEVICE_LINE_RE = re.compile(
+    r"^\s*(?P<device>[A-Za-z]+\d+):\s+(?P<name>.+?)\s+\((?P<total>\d+)\s*MiB,"
+    r"\s*\d+\s*MiB free\)\s*$")
+
+
+def xpu_devices(timeout=15):
+    """Enumerate Intel GPUs with total/free memory via xpu-smi.
+    Two-phase because the device list JSON omits memory fields; the
+    per-device query includes them. Returns [] on any failure."""
+    try:
+        listing = subprocess.run(["xpu-smi", "discovery", "-j"],
+                                 capture_output=True, text=True, timeout=timeout)
+        device_ids = [d["device_id"]
+                      for d in json.loads(listing.stdout).get("device_list", [])]
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError,
+            TypeError):
+        return []
+
+    devices = []
+    for did in device_ids:
+        try:
+            detail = subprocess.run(["xpu-smi", "discovery", "-d", str(did), "-j"],
+                                    capture_output=True, text=True, timeout=timeout)
+            info = json.loads(detail.stdout)
+            devices.append({
+                "xpu_id": did,
+                "name": info.get("device_name", ""),
+                "total_bytes": int(info["memory_physical_size_byte"]),
+                "free_bytes": int(info["memory_free_size_byte"]),
+            })
+        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError,
+                KeyError, TypeError, ValueError):
+            continue
+    return devices
+
+
+def llama_list_devices(binary, timeout=30):
+    """Parse `llama-server --list-devices` into
+    [{device: 'SYCL0', name, total_mib}]. Returns [] on any failure."""
+    try:
+        result = subprocess.run([binary, "--list-devices"],
+                                capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    devices = []
+    for line in (result.stdout or "").splitlines() + (result.stderr or "").splitlines():
+        m = _DEVICE_LINE_RE.match(line)
+        if m:
+            devices.append({"device": m.group("device"), "name": m.group("name"),
+                            "total_mib": int(m.group("total"))})
+    return devices
+
+
+def match_devices(sycl_devices, xpu_device_list):
+    """Map SYCL device names to xpu-smi device ids by nearest total memory.
+    SYCL and xpu-smi enumeration orders aren't guaranteed to agree, but
+    total VRAM is a reliable fingerprint on a mixed-card system. Pairs
+    whose sizes differ by >25% are left unmapped rather than guessed."""
+    remaining = list(xpu_device_list)
+    mapping = {}
+    for s in sycl_devices:
+        if not remaining:
+            break
+        s_bytes = s["total_mib"] * 1024 * 1024
+        best = min(remaining, key=lambda d: abs(d["total_bytes"] - s_bytes))
+        if abs(best["total_bytes"] - s_bytes) > 0.25 * best["total_bytes"]:
+            continue
+        mapping[s["device"]] = best["xpu_id"]
+        remaining.remove(best)
+    return mapping
