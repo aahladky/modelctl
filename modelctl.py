@@ -1092,8 +1092,10 @@ def cmd_pull(args):
 
     if len(chosen_groups) > 1:
         print(f"\n{len(chosen_groups)} files selected -- config below is shared across all of them.")
+    placement_hint = compute_pull_placement_hint(chosen_groups[0].get("total_size"))
     shared_config = prompt_config(repo_id, chosen_groups[0]["label"] if chosen_groups else "",
-                                   mtp_file_chosen=bool(local_mtp_path))
+                                   mtp_file_chosen=bool(local_mtp_path),
+                                   placement=placement_hint)
     env = capture_env_passthrough()
     warn_if_env_empty(env)
 
@@ -1153,13 +1155,19 @@ def prompt_int(prompt: str, default: int) -> int:
 
 
 def prompt_config(repo_id: str = "", label: str = "", mtp_file_chosen: bool = False,
-                  current: dict = None):
+                  current: dict | None = None, placement: dict | None = None):
     """Prompt for a profile's runtime config. Defaults come from the saved
     user defaults, overlaid with `current` when editing an existing profile
     -- so pressing Enter through the prompts keeps that profile's values
     instead of silently resetting it to the global defaults."""
     print("\n--- runtime config (blank = keep the value shown) ---")
     d = {**load_defaults(), "extra": "", **(current or {})}
+    if placement and not current:
+        # Seed device/split defaults from the VRAM-fit recommendation for
+        # new profiles; edits keep the profile's own values instead.
+        d = {**d, "device": placement.get("device", ""),
+             "split_mode": placement.get("split_mode", "") or d["split_mode"],
+             "tensor_split": placement.get("tensor_split", "") or d["tensor_split"]}
     device = input(f"GPU device, '-' to clear [{d.get('device') or 'blank = use split strategy'}]: ").strip() or d.get("device", "")
     if device == "-":
         device = ""
@@ -1379,6 +1387,19 @@ def _file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else ""
 
 
+# Global preset section applied to every model instance the router spawns.
+# `metrics = true` enables each instance's Prometheus /metrics endpoint,
+# which the router forwards at GET /metrics?model=<name> -- `modelctl
+# router stats` reads it. Per-model sections override anything here.
+ROUTER_PRESET_HEADER = (
+    "version = 1\n"
+    "\n"
+    "[*]\n"
+    "metrics = true\n"
+    "\n"
+)
+
+
 def sync_router_preset(restart: bool = True) -> int:
     """Rebuild router.preset.ini from every saved profile. Detects
     changes before writing so it doesn't force an unnecessary router
@@ -1395,7 +1416,7 @@ def sync_router_preset(restart: bool = True) -> int:
     all_profiles = [json.loads(p.read_text()) for p in sorted(PROFILES_DIR.glob("*.json"))]
     profiles = [p for p in all_profiles if p.get("enabled", True)]
     n_disabled = len(all_profiles) - len(profiles)
-    body = ""
+    body = ROUTER_PRESET_HEADER
     any_unresolved = False
     for profile in profiles:
         entry, ok, messages = render_router_preset(profile)
@@ -1669,7 +1690,10 @@ def cmd_place(args):
                 save_profile(profile)
                 generate_artifacts(profile)
                 changed = True
-                print(f"  -> applied")
+                if rec["fits"]:
+                    print("  -> applied")
+                else:
+                    print("  -> WARNING: exceeds combined VRAM budget -- applied anyway")
 
     if changed:
         sync_all_backends(restart_router=not args.no_router_restart)
@@ -1811,6 +1835,36 @@ def resolve_primary_gpu(inventory, defaults=None) -> str:
     if d.get("primary_gpu"):
         return d["primary_gpu"]
     return inventory[0]["device"] if inventory else ""
+
+
+def compute_pull_placement_hint(weights_bytes):
+    """Placement recommendation for a not-yet-downloaded model, from its
+    remote size and the default ctx/kv_quant. Heuristic quality only (no
+    local GGUF header to parse yet) -- good enough to seed the pull
+    prompts' defaults. Returns None when size or GPU inventory is
+    unavailable."""
+    if not weights_bytes:
+        return None
+    inventory = get_gpu_inventory()
+    if not inventory:
+        return None
+    d = load_defaults()
+    # Use default ctx and kv_quant from defaults for heuristic estimate
+    default_ctx = d.get("ctx", DEFAULT_CTX)
+    default_kv_quant = d.get("kv_quant", "f16")
+    est = modelctl_vram.estimate_from_parts(
+        weights_bytes, int(default_ctx), default_kv_quant)
+    primary = resolve_primary_gpu(inventory, d)
+    rec = modelctl_vram.recommend_placement(
+        est["total"], inventory, d["vram_limit_pct"], primary)
+    if rec:
+        print(f"Estimated footprint at ctx={default_ctx}: "
+              f"~{_format_size(est['total'])} (heuristic) "
+              f"-> suggested placement: {_format_placement(rec)}")
+        if not rec["fits"]:
+            print("  WARNING: estimate exceeds combined VRAM budget -- "
+                  "consider a smaller quant.")
+    return rec
 
 
 def print_log_tail(log_path, n=40):

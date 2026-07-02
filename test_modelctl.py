@@ -602,6 +602,16 @@ class TestSyncRouterPreset(unittest.TestCase):
             modelctl.sync_router_preset(restart=False)
         mock_restart.assert_not_called()
 
+    def test_preset_starts_with_version_and_global_metrics_section(self):
+        with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
+             mock.patch.object(modelctl, "ROUTER_PRESET_PATH", self.router_path), \
+             mock.patch.object(modelctl, "preflight", return_value=(True, "llama-server", {}, [])), \
+             mock.patch.object(modelctl, "restart_router_service"):
+            modelctl.sync_router_preset()
+        content = self.router_path.read_text()
+        self.assertTrue(content.startswith("version = 1\n"))
+        self.assertIn("[*]\nmetrics = true\n", content)
+
 
 class TestRestartRouterService(unittest.TestCase):
     def test_returns_true_on_successful_restart(self):
@@ -1165,6 +1175,46 @@ class TestCmdPlace(unittest.TestCase):
              mock.patch.object(modelctl, "get_gpu_inventory", return_value=[]):
             with self.assertRaises(SystemExit):
                 modelctl.cmd_place(self._args())
+
+    def test_apply_over_budget_still_applies_with_warning(self):
+        tiny_inventory = [{"device": "SYCL0", "name": "tiny",
+                           "total_bytes": 1 << 30, "free_bytes": 1 << 30}]
+        big_estimate = {"weights": 10 << 30, "kv_bytes": 0, "overhead": 0,
+                        "total": 10 << 30, "quality": "exact"}
+        with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
+             mock.patch.object(modelctl, "get_gpu_inventory",
+                               return_value=tiny_inventory), \
+             mock.patch.object(modelctl, "estimate_vram_footprint",
+                               return_value=big_estimate), \
+             mock.patch.object(modelctl, "generate_artifacts"), \
+             mock.patch.object(modelctl, "sync_all_backends"):
+            modelctl.cmd_place(self._args(apply=True))
+        saved = json.loads((self.profiles_dir / "small-model.json").read_text())
+        # over-budget single-GPU recommendation keeps the pin; split cleared
+        self.assertEqual(saved["config"]["device"], "SYCL0")
+        self.assertEqual(saved["config"]["split_mode"], "")
+
+
+class TestPullPlacementHint(unittest.TestCase):
+    INVENTORY = [
+        {"device": "SYCL0", "name": "big", "total_bytes": 34242297856,
+         "free_bytes": 30 << 30},
+    ]
+
+    def test_hint_computed_from_remote_size(self):
+        with mock.patch.object(modelctl, "get_gpu_inventory",
+                               return_value=self.INVENTORY):
+            hint = modelctl.compute_pull_placement_hint(18 << 30)
+        self.assertEqual(hint["device"], "SYCL0")
+
+    def test_no_inventory_returns_none(self):
+        with mock.patch.object(modelctl, "get_gpu_inventory", return_value=[]):
+            self.assertIsNone(modelctl.compute_pull_placement_hint(18 << 30))
+
+    def test_no_size_returns_none(self):
+        with mock.patch.object(modelctl, "get_gpu_inventory",
+                               return_value=self.INVENTORY):
+            self.assertIsNone(modelctl.compute_pull_placement_hint(None))
 
 
 if __name__ == "__main__":
