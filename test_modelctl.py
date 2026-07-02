@@ -1440,5 +1440,72 @@ class TestStatsRow(unittest.TestCase):
         self.assertEqual(row["requests"], "?")
 
 
+class TestResolveCacheTypes(unittest.TestCase):
+    def test_both_new_fields(self):
+        self.assertEqual(
+            modelctl._resolve_cache_types({"cache_type_k": "q8_0", "cache_type_v": "q4_0"}),
+            ("q8_0", "q4_0"))
+
+    def test_legacy_only(self):
+        self.assertEqual(modelctl._resolve_cache_types({"kv_quant": "q8_0"}),
+                         ("q8_0", "q8_0"))
+
+    def test_one_new_field_no_legacy(self):
+        self.assertEqual(modelctl._resolve_cache_types({"cache_type_k": "q8_0"}),
+                         ("q8_0", None))
+
+    def test_neither(self):
+        self.assertEqual(modelctl._resolve_cache_types({}), (None, None))
+
+
+class TestSplitCacheTypeEmission(unittest.TestCase):
+    def _profile(self, cfg_extra):
+        cfg = {"flash_attn": "auto", "ctx": 4096, "split_mode": "",
+               "tensor_split": "", "ttl": 3600, "mtp": "off", "extra": ""}
+        cfg.update(cfg_extra)
+        return {"name": "m", "model_path": "/x/m.gguf", "mmproj_path": None,
+                "config": cfg}
+
+    def test_build_server_args_distinct_types(self):
+        args = modelctl.build_server_args(self._profile(
+            {"cache_type_k": "q8_0", "cache_type_v": "q4_0"}))
+        self.assertIn("q8_0", args[args.index("--cache-type-k") + 1])
+        self.assertIn("q4_0", args[args.index("--cache-type-v") + 1])
+
+    def test_build_server_args_legacy_kv_quant(self):
+        args = modelctl.build_server_args(self._profile({"kv_quant": "q8_0"}))
+        self.assertEqual(args[args.index("--cache-type-k") + 1], "q8_0")
+        self.assertEqual(args[args.index("--cache-type-v") + 1], "q8_0")
+
+    def test_build_server_args_k_only(self):
+        args = modelctl.build_server_args(self._profile({"cache_type_k": "q8_0"}))
+        self.assertIn("--cache-type-k", args)
+        self.assertNotIn("--cache-type-v", args)
+
+    def test_router_preset_distinct_types(self):
+        with mock.patch.object(modelctl, "preflight",
+                               return_value=(True, "llama-server", {}, [])):
+            text, _, _ = modelctl.render_router_preset(self._profile(
+                {"cache_type_k": "q8_0", "cache_type_v": "q4_0"}))
+        self.assertIn("cache-type-k = q8_0", text)
+        self.assertIn("cache-type-v = q4_0", text)
+
+    def test_router_preset_legacy(self):
+        with mock.patch.object(modelctl, "preflight",
+                               return_value=(True, "llama-server", {}, [])):
+            text, _, _ = modelctl.render_router_preset(self._profile(
+                {"kv_quant": "q5_1"}))
+        self.assertIn("cache-type-k = q5_1", text)
+        self.assertIn("cache-type-v = q5_1", text)
+
+    def test_router_preset_k_only(self):
+        with mock.patch.object(modelctl, "preflight",
+                               return_value=(True, "llama-server", {}, [])):
+            text, _, _ = modelctl.render_router_preset(self._profile(
+                {"cache_type_k": "q8_0"}))
+        self.assertIn("cache-type-k = q8_0", text)
+        self.assertNotIn("cache-type-v", text)
+
+
 if __name__ == "__main__":
     unittest.main()

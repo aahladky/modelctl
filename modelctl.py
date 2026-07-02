@@ -1337,6 +1337,18 @@ def load_profile(name):
     return json.loads(path.read_text())
 
 
+def _resolve_cache_types(cfg: dict):
+    """Resolve the effective --cache-type-k/--cache-type-v values for a
+    profile's config dict, with backward compatibility for profiles saved
+    before this feature existed (which only have a single 'kv_quant' field
+    applied to both). New profiles set cache_type_k/cache_type_v directly;
+    old ones fall back to kv_quant for whichever of the two isn't set.
+    Returns (None, None) if neither the new fields nor the legacy field
+    are present, matching the 'omit the flags entirely' behavior."""
+    legacy = cfg.get("kv_quant")
+    return cfg.get("cache_type_k") or legacy, cfg.get("cache_type_v") or legacy
+
+
 def build_server_args(profile):
     """Return a flat list of llama-server CLI tokens. Values with spaces are
     kept as single tokens so callers don't have to re-tokenize with shlex."""
@@ -1361,8 +1373,11 @@ def build_server_args(profile):
 
     if profile.get("mmproj_path"):
         args.extend(["--mmproj", str(profile['mmproj_path'])])
-    if cfg.get("kv_quant"):
-        args.extend(["--cache-type-k", cfg['kv_quant'], "--cache-type-v", cfg['kv_quant']])
+    ctk, ctv = _resolve_cache_types(cfg)
+    if ctk:
+        args.extend(["--cache-type-k", ctk])
+    if ctv:
+        args.extend(["--cache-type-v", ctv])
     # Multi-token prediction: self-speculative decoding using the model's own
     # MTP draft heads (no separate draft model needed). Only meaningful if the
     # checkpoint was trained with MTP heads and the GGUF conversion kept them --
@@ -1438,9 +1453,11 @@ def render_router_preset(profile):
         lines.append(f"device = {cfg['device']}")
     if profile.get("mmproj_path"):
         lines.append(f"mmproj = {profile['mmproj_path']}")
-    if cfg.get("kv_quant"):
-        lines.append(f"cache-type-k = {cfg['kv_quant']}")
-        lines.append(f"cache-type-v = {cfg['kv_quant']}")
+    ctk, ctv = _resolve_cache_types(cfg)
+    if ctk:
+        lines.append(f"cache-type-k = {ctk}")
+    if ctv:
+        lines.append(f"cache-type-v = {ctv}")
     if cfg.get("mtp", "off").strip().lower() == "on":
         lines.append("spec-type = draft-mtp")
         if profile.get("mtp_path"):
@@ -1906,9 +1923,11 @@ def estimate_vram_footprint(profile):
     ctx = int(cfg.get("ctx") or DEFAULT_CTX)
     params = modelctl_vram.gguf_kv_params(
         modelctl_vram.read_gguf_kv_metadata(str(model_path)))
+    ctk, ctv = _resolve_cache_types(cfg)
     return modelctl_vram.estimate_from_parts(
-        weights, ctx, cfg.get("kv_quant") or "f16",
-        gguf_params=params, mmproj_bytes=mmproj_bytes)
+        weights, ctx, ctk or "f16",
+        gguf_params=params, mmproj_bytes=mmproj_bytes,
+        cache_type_v=ctv or ctk or "f16")
 
 
 def get_gpu_inventory(force_remap: bool = False) -> list:
