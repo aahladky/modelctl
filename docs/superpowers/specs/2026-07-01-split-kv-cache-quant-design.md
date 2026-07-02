@@ -146,3 +146,47 @@ anyone to touch old files.
   in an existing `defaults.json`, if present, is simply left unused
   alongside the new keys once the user re-runs `modelctl defaults` --  not
   actively cleaned up).
+
+## Addendum (2026-07-02): estimator integration + standalone calculator
+
+Written after the VRAM-aware router work landed; approved verbally.
+
+### Estimator integration
+
+`modelctl_vram.kv_cache_bytes` currently takes one `kv_quant` applied to
+both caches. It gains an optional fourth parameter:
+
+```python
+def kv_cache_bytes(params, ctx, cache_type_k, cache_type_v=None):
+```
+
+`cache_type_v=None` means "same as K" (backward compatible; existing
+callers/tests unchanged). K and V are computed as separate sums: K uses
+k_dim (or k_dim_swa on SWA layers) x bytes_per_element(cache_type_k); V
+uses v_dim (or v_dim_swa) x bytes_per_element(cache_type_v). The return
+gains no new shape -- still total bytes -- but `estimate_from_parts`
+grows the same optional `cache_type_v` param and passes it through, and
+`modelctl.estimate_vram_footprint` resolves the profile's effective pair
+via `_resolve_cache_types(cfg)` so `place`, the load guard, and pull
+hints all see split-quant footprints automatically.
+
+### Standalone calculator
+
+`modelctl_vram.py` stays a pure, single-file, stdlib-only module -- which
+makes it copyable anywhere. It gains an argparse `__main__` so it works
+as a detached calculator:
+
+```
+python3 modelctl_vram.py <model.gguf> [--ctx N] [--cache-type-k T]
+                         [--cache-type-v T] [--mmproj PATH]
+```
+
+Output: detected architecture params (arch, layers, KV heads, head dims,
+SWA window/pattern summary), then the footprint breakdown (weights / KV
+with K and V shown separately / overhead / total). Defaults: ctx 32768,
+cache types f16. Sharded models: a new `weights_bytes_on_disk(path)`
+helper (shard-aware, own copy of the shard regex so the module stays
+modelctl-free) sums sibling shards; `modelctl._local_weights_bytes`
+delegates to it instead of duplicating the logic. Exit 1 with a message
+on an unparseable GGUF (the calculator's whole point is exact math; the
+heuristic path would be misleading here).
