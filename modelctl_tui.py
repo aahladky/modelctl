@@ -375,7 +375,7 @@ class DownloadScreen(Screen):
     def on_mount(self) -> None:
         self.run_download()
 
-    @work(thread=True)
+    @work(thread=True, exclusive=True)
     def run_download(self) -> None:
         state = self.app.state
         dest = Path(state.dest_dir)

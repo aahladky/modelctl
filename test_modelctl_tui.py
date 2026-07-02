@@ -515,6 +515,119 @@ class TestDownloadScreen(unittest.IsolatedAsyncioTestCase):
                 retry_button = app.screen.query_one("#retry-download", Button)
                 self.assertFalse(retry_button.disabled)
 
+    async def test_sharded_quant_group_downloads_each_shard_in_order(self):
+        app = PullWizardApp()
+        shard1 = "/models/model-Q4_K_M-00001-of-00002.gguf"
+        shard2 = "/models/model-Q4_K_M-00002-of-00002.gguf"
+        with mock.patch(
+            "modelctl_tui.modelctl.download_if_needed",
+            side_effect=[shard1, shard2],
+        ) as mock_dl:
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={
+                        "label": "model-Q4_K_M",
+                        "files": [
+                            "model-Q4_K_M-00001-of-00002.gguf",
+                            "model-Q4_K_M-00002-of-00002.gguf",
+                        ],
+                        "sharded": True,
+                    },
+                    dest_dir="/models",
+                )
+                await app.push_screen(DownloadScreen())
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                self.assertEqual(
+                    mock_dl.call_args_list,
+                    [
+                        mock.call("repo/x", "model-Q4_K_M-00001-of-00002.gguf", modelctl.Path("/models")),
+                        mock.call("repo/x", "model-Q4_K_M-00002-of-00002.gguf", modelctl.Path("/models")),
+                    ],
+                )
+                # model_path must be the FIRST shard's path, not the last.
+                self.assertEqual(app.state.__dict__.get("model_path"), shard1)
+                self.assertEqual(app.screen.STEP, "summary")
+
+    async def test_mmproj_and_mtp_choices_get_local_path_set_on_success(self):
+        app = PullWizardApp()
+        model_path = "/models/model-Q4_K_M.gguf"
+        mmproj_path = "/models/mmproj-F16.gguf"
+        mtp_path = "/models/model-mtp.gguf"
+        mmproj_choice = {"name": "mmproj-F16.gguf"}
+        mtp_choice = {"name": "model-mtp.gguf"}
+        with mock.patch(
+            "modelctl_tui.modelctl.download_if_needed",
+            side_effect=[model_path, mmproj_path, mtp_path],
+        ) as mock_dl:
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M", "files": ["model-Q4_K_M.gguf"], "sharded": False},
+                    mmproj_choice=mmproj_choice,
+                    mtp_choice=mtp_choice,
+                    dest_dir="/models",
+                )
+                await app.push_screen(DownloadScreen())
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                self.assertEqual(
+                    mock_dl.call_args_list,
+                    [
+                        mock.call("repo/x", "model-Q4_K_M.gguf", modelctl.Path("/models")),
+                        mock.call("repo/x", "mmproj-F16.gguf", modelctl.Path("/models")),
+                        mock.call("repo/x", "model-mtp.gguf", modelctl.Path("/models")),
+                    ],
+                )
+                self.assertEqual(app.state.model_path, model_path)
+                self.assertEqual(mmproj_choice.get("local_path"), mmproj_path)
+                self.assertEqual(mtp_choice.get("local_path"), mtp_path)
+                self.assertEqual(app.screen.STEP, "summary")
+
+    async def test_rapid_double_press_of_retry_does_not_spawn_two_workers(self):
+        # Simulates two Button.Pressed messages landing back-to-back, which
+        # is what happens if two physical clicks are queued before the first
+        # handler's `disabled = True` assignment takes effect (Button only
+        # consults `disabled` at click time, not at dispatch time). We call
+        # on_button_pressed() twice with zero `await` between the calls --
+        # that's the crux of the race: run_download's @work(exclusive=True)
+        # cancels the first worker's asyncio Task before the event loop ever
+        # gets a chance to hand its thread body to the executor, so the
+        # first download attempt never actually starts. If a rapid double
+        # click landed further apart in time (e.g. the first worker had
+        # already reached the executor thread), exclusive=True would not be
+        # able to stop the in-flight thread -- but that's not the race this
+        # fix targets: this test asserts the specific "both clicks land
+        # before the first thread body starts" case is safe.
+        app = PullWizardApp()
+        calls = []
+        with mock.patch(
+            "modelctl_tui.modelctl.download_if_needed",
+            side_effect=lambda repo_id, name, dest: (calls.append(name), f"/models/{name}")[1],
+        ) as mock_dl, mock.patch("modelctl_tui.DownloadScreen.on_mount", lambda self: None):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "x", "files": ["model.gguf"], "sharded": False},
+                    dest_dir="/models",
+                )
+                screen = DownloadScreen()
+                await app.push_screen(screen)
+                retry_button = screen.query_one("#retry-download", Button)
+                press_event = Button.Pressed(retry_button)
+                screen.on_button_pressed(press_event)
+                screen.on_button_pressed(press_event)
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                mock_dl.assert_called_once_with("repo/x", "model.gguf", modelctl.Path("/models"))
+                self.assertEqual(calls, ["model.gguf"])
+                summary_screens = [s for s in app.screen_stack if type(s).__name__ == "SummaryScreen"]
+                self.assertEqual(len(summary_screens), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
