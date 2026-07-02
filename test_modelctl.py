@@ -1223,5 +1223,113 @@ class TestPullPlacementHint(unittest.TestCase):
             self.assertIsNone(modelctl.compute_pull_placement_hint(None))
 
 
+class TestCheckVramForLoad(unittest.TestCase):
+    INVENTORY = [
+        {"device": "SYCL0", "name": "big", "total_bytes": 34242297856,
+         "free_bytes": 10 << 30},
+        {"device": "SYCL1", "name": "small", "total_bytes": 12809404416,
+         "free_bytes": 12 << 30},
+    ]
+
+    def _profile(self, device="SYCL0"):
+        return {"name": "m", "model_path": "/x/model.gguf",
+                "config": {"ctx": 4096, "kv_quant": "q8_0", "device": device,
+                           "split_mode": "", "tensor_split": ""}}
+
+    def test_no_inventory_degrades_open(self):
+        with mock.patch.object(modelctl, "get_gpu_inventory", return_value=[]):
+            ok, msgs = modelctl.check_vram_for_load(self._profile())
+        self.assertTrue(ok)
+        self.assertTrue(any("skipping VRAM check" in m for m in msgs))
+
+    def test_no_estimate_degrades_open(self):
+        with mock.patch.object(modelctl, "get_gpu_inventory",
+                               return_value=self.INVENTORY), \
+             mock.patch.object(modelctl, "estimate_vram_footprint",
+                               return_value=None):
+            ok, _ = modelctl.check_vram_for_load(self._profile())
+        self.assertTrue(ok)
+
+    def test_fits_passes(self):
+        est = {"total": 5 << 30, "quality": "exact"}
+        with mock.patch.object(modelctl, "get_gpu_inventory",
+                               return_value=self.INVENTORY), \
+             mock.patch.object(modelctl, "estimate_vram_footprint",
+                               return_value=est):
+            ok, _ = modelctl.check_vram_for_load(self._profile())
+        self.assertTrue(ok)
+
+    def test_exact_over_free_blocks(self):
+        est = {"total": 20 << 30, "quality": "exact"}
+        with mock.patch.object(modelctl, "get_gpu_inventory",
+                               return_value=self.INVENTORY), \
+             mock.patch.object(modelctl, "estimate_vram_footprint",
+                               return_value=est), \
+             mock.patch.object(modelctl, "router_status", return_value=[]):
+            ok, msgs = modelctl.check_vram_for_load(self._profile())
+        self.assertFalse(ok)
+        self.assertTrue(any("--evict" in m for m in msgs))
+
+    def test_heuristic_over_free_warns_but_passes(self):
+        est = {"total": 20 << 30, "quality": "heuristic"}
+        with mock.patch.object(modelctl, "get_gpu_inventory",
+                               return_value=self.INVENTORY), \
+             mock.patch.object(modelctl, "estimate_vram_footprint",
+                               return_value=est):
+            ok, msgs = modelctl.check_vram_for_load(self._profile())
+        self.assertTrue(ok)
+        self.assertTrue(any("heuristic" in m for m in msgs))
+
+    def test_split_profile_targets_all_gpus(self):
+        est = {"total": 20 << 30, "quality": "exact"}
+        profile = self._profile()
+        profile["config"]["split_mode"] = "layer"
+        profile["config"]["tensor_split"] = "8,3"
+        # 10 + 12 GiB free combined > 20 GiB estimate -> fits
+        with mock.patch.object(modelctl, "get_gpu_inventory",
+                               return_value=self.INVENTORY), \
+             mock.patch.object(modelctl, "estimate_vram_footprint",
+                               return_value=est):
+            ok, _ = modelctl.check_vram_for_load(profile)
+        self.assertTrue(ok)
+
+    def test_evict_unloads_largest_first(self):
+        est = {"total": 20 << 30, "quality": "exact"}
+        rows = [
+            {"name": "small-loaded", "status": "loaded", "failed": False,
+             "exit_code": None, "gpu": "SYCL0", "from_preset": True},
+            {"name": "big-loaded", "status": "loaded", "failed": False,
+             "exit_code": None, "gpu": "SYCL0", "from_preset": True},
+        ]
+        estimates = {"m": est,
+                     "small-loaded": {"total": 2 << 30, "quality": "exact"},
+                     "big-loaded": {"total": 18 << 30, "quality": "exact"}}
+        # After evicting big-loaded, free jumps enough to fit.
+        inventories = [self.INVENTORY,
+                       [dict(self.INVENTORY[0], free_bytes=28 << 30),
+                        self.INVENTORY[1]]]
+
+        def fake_est(profile):
+            return estimates[profile["name"]]
+
+        def fake_load_profile(name):
+            return {"name": name, "model_path": "/x", "config": {"device": "SYCL0"}}
+
+        with mock.patch.object(modelctl, "get_gpu_inventory",
+                               side_effect=inventories), \
+             mock.patch.object(modelctl, "estimate_vram_footprint",
+                               side_effect=fake_est), \
+             mock.patch.object(modelctl, "load_profile",
+                               side_effect=fake_load_profile), \
+             mock.patch.object(modelctl, "router_status", return_value=rows), \
+             mock.patch.object(modelctl, "router_unload",
+                               return_value=(True, "ok")) as mock_unload, \
+             mock.patch.object(modelctl, "_wait_for_router_model",
+                               return_value="unloaded"):
+            ok, _ = modelctl.check_vram_for_load(self._profile(), evict=True)
+        self.assertTrue(ok)
+        mock_unload.assert_called_once_with("big-loaded")
+
+
 if __name__ == "__main__":
     unittest.main()

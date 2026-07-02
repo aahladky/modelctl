@@ -301,6 +301,119 @@ def router_unload(name: str, timeout: int = 30):
     return _router_models_action("unload", name, timeout=timeout)
 
 
+def _wait_for_router_model(name, want, timeout=300, poll=2):
+    """Poll router_status() until model `name` reaches `want` ('loaded' or
+    'unloaded'), returns 'failed' if it fails, or None on timeout/router
+    unreachable."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            rows = router_status()
+        except RuntimeError:
+            return None
+        row = next((r for r in rows if r["name"] == name), None)
+        if row and row["failed"]:
+            return "failed"
+        status = row["status"] if row else "unloaded"
+        if want == "loaded" and status == "loaded":
+            return "loaded"
+        if want == "unloaded" and status in ("unloaded", "stopped"):
+            return "unloaded"
+        time.sleep(poll)
+    return None
+
+
+def _load_target_gpus(profile, inventory):
+    """The inventory entries a profile's placement actually lands on:
+    its pinned device, or every GPU when split (or unplaced)."""
+    cfg = profile.get("config", {})
+    if cfg.get("split_mode") and cfg.get("tensor_split"):
+        return inventory
+    device = cfg.get("device")
+    if device:
+        matched = [d for d in inventory if d["device"] == device]
+        if matched:
+            return matched
+    return inventory
+
+
+def check_vram_for_load(profile, evict=False):
+    """VRAM guard for explicit router loads. Returns (ok, messages).
+
+    Degrades open (ok=True with a warning) when xpu-smi, the estimate, or
+    exact GGUF metadata is unavailable -- the guard should never make a
+    load impossible just because tooling is missing. Only a confident
+    (exact) over-budget estimate blocks; --evict unloads the largest
+    loaded profiles until the target fits."""
+    inventory = get_gpu_inventory()
+    if not inventory:
+        return True, ["WARNING: xpu-smi unavailable -- skipping VRAM check."]
+    est = estimate_vram_footprint(profile)
+    if est is None:
+        return True, ["WARNING: couldn't estimate footprint (model file "
+                      "missing?) -- skipping VRAM check."]
+
+    targets = _load_target_gpus(profile, inventory)
+    free = sum(d["free_bytes"] for d in targets)
+    target_names = ", ".join(d["device"] for d in targets)
+    msgs = [f"Estimated footprint: ~{_format_size(est['total'])} "
+            f"({est['quality']}); free on {target_names}: {_format_size(free)}"]
+
+    if est["total"] <= free:
+        return True, msgs
+    if est["quality"] == "heuristic":
+        msgs.append("WARNING: heuristic estimate exceeds free VRAM -- "
+                    "proceeding anyway (couldn't parse GGUF header for an "
+                    "exact number).")
+        return True, msgs
+
+    if not evict:
+        try:
+            loaded = [r for r in router_status()
+                      if r["status"] == "loaded" and r["from_preset"]]
+        except RuntimeError:
+            loaded = []
+        if loaded:
+            msgs.append("Currently loaded: " + ", ".join(r["name"] for r in loaded))
+        msgs.append("Not enough free VRAM. Re-run with --evict to unload "
+                    "loaded models until it fits, or --force to skip this check.")
+        return False, msgs
+
+    # Evict largest-estimate first until the target fits.
+    try:
+        rows = [r for r in router_status()
+                if r["status"] == "loaded" and r["from_preset"]
+                and r["name"] != profile["name"]]
+    except RuntimeError as e:
+        msgs.append(f"ERROR: can't evict -- {e}")
+        return False, msgs
+
+    def loaded_estimate(row):
+        try:
+            e = estimate_vram_footprint(load_profile(row["name"]))
+        except SystemExit:
+            return 0
+        return e["total"] if e else 0
+
+    rows.sort(key=loaded_estimate, reverse=True)
+    for row in rows:
+        msgs.append(f"Evicting '{row['name']}' to free VRAM ...")
+        ok, unload_msg = router_unload(row["name"])
+        msgs.append(f"  {unload_msg}")
+        if not ok:
+            continue
+        _wait_for_router_model(row["name"], "unloaded", timeout=60)
+        inventory = get_gpu_inventory()
+        targets = _load_target_gpus(profile, inventory)
+        free = sum(d["free_bytes"] for d in targets)
+        if est["total"] <= free:
+            msgs.append(f"Free VRAM now {_format_size(free)} -- proceeding.")
+            return True, msgs
+    msgs.append("Still not enough free VRAM after evicting everything "
+                "evictable. Use --force to try anyway.")
+    return False, msgs
+
+
 def sync_hermes_custom_providers(dry_run: bool = False):
     """Rebuild Hermes' provider entries from all saved modelctl profiles,
     for the router-mode endpoint.
@@ -1986,10 +2099,36 @@ def cmd_router_status(args):
 
 
 def cmd_router_load(args):
+    profile_path = PROFILES_DIR / f"{args.name}.json"
+    if getattr(args, "force", False):
+        pass  # explicit override: no check
+    elif profile_path.exists():
+        profile = json.loads(profile_path.read_text())
+        ok, msgs = check_vram_for_load(profile, evict=getattr(args, "evict", False))
+        for m in msgs:
+            print(m)
+        if not ok:
+            sys.exit(1)
+    else:
+        print(f"NOTE: no modelctl profile named '{args.name}' -- "
+              f"skipping VRAM check.")
+
+    start = time.time()
     ok, msg = router_load(args.name)
     print(msg)
     if not ok:
         sys.exit(1)
+    outcome = _wait_for_router_model(args.name, "loaded", timeout=300)
+    elapsed = time.time() - start
+    if outcome == "loaded":
+        print(f"'{args.name}' loaded in {elapsed:.1f}s.")
+    elif outcome == "failed":
+        print(f"'{args.name}' FAILED to load after {elapsed:.1f}s -- "
+              f"check `modelctl router status` and the router logs.")
+        sys.exit(1)
+    else:
+        print(f"'{args.name}' still not loaded after {elapsed:.0f}s -- "
+              f"check `modelctl router status` later.")
 
 
 def cmd_router_unload(args):
@@ -2127,6 +2266,10 @@ def build_arg_parser():
 
     p_router_load = router_sub.add_parser("load", help="load a model now instead of waiting for a request")
     p_router_load.add_argument("name")
+    p_router_load.add_argument("--evict", action="store_true",
+                                help="unload loaded models (largest first) until this one fits")
+    p_router_load.add_argument("--force", action="store_true",
+                                help="skip the VRAM fit check entirely")
     p_router_load.set_defaults(func=cmd_router_load)
 
     p_router_unload = router_sub.add_parser("unload", help="unload a model now to free its GPU memory")
