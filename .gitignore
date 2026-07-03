@@ -1,3 +1,4 @@
 llama.cpp/
 *.pyc
 __pycache__/
+.worktrees/
