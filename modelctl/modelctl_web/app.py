@@ -415,11 +415,48 @@ def create_app(token=None, store=None, runner=None):
         return RedirectResponse(f"/jobs/{job_id}?back=/", status_code=303)
 
     # ---- runtime ---------------------------------------------------------
+    def _scrape_moe_cache_metrics(port):
+        """Fetch /metrics from a running model and extract moe_cache stats."""
+        import re as _re
+        try:
+            import urllib.request
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=3) as r:
+                text = r.read().decode()
+            stats = {}
+            for line in text.splitlines():
+                if not line.startswith("llamacpp:moe_cache_"):
+                    continue
+                m = _re.match(r"llamacpp:moe_cache_(\w+)\{device=\"([^\"]+)\"\}\s+(\S+)", line)
+                if m:
+                    key, dev, val = m.group(1), m.group(2), m.group(3)
+                    stats.setdefault(dev, {})[key] = val
+            return stats or None
+        except Exception:
+            return None
+
     @app.get("/runtime", response_class=HTMLResponse)
     def runtime_page(request: Request):
         state = _runtime_state()
+        cache_stats = {}
+        for mid, m in state.items():
+            profile = None
+            try:
+                profile = modelctl.load_profile(mid)
+            except Exception:
+                pass
+            if not profile:
+                continue
+            mc = profile.get("moe_cache", {})
+            if mc.get("mode", "off") == "off":
+                continue
+            port = m.get("port")
+            if not port:
+                continue
+            stats = _scrape_moe_cache_metrics(port)
+            if stats:
+                cache_stats[mid] = stats
         return templates.TemplateResponse(request=request, name="runtime.html", context=ctx(
-            request, runtime=state))
+            request, runtime=state, cache_stats=cache_stats))
 
     @app.get("/api/runtime")
     def api_runtime():
@@ -465,6 +502,20 @@ def create_app(token=None, store=None, runner=None):
     def model_restart(name: str):
         job_id = mutate.submit_restart(runner, name)
         return RedirectResponse(f"/jobs/{job_id}?back=/runtime", status_code=303)
+
+    @app.post("/models/{name:path}/cache/reset")
+    def model_cache_reset(name: str):
+        rt = _runtime_state().get(name, {})
+        port = rt.get("port")
+        if port:
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/cache/reset", method="POST")
+                urllib.request.urlopen(req, timeout=5)
+            except Exception:
+                pass
+        return RedirectResponse("/runtime", status_code=303)
 
     @app.post("/runtime/unload-all")
     def runtime_unload_all():

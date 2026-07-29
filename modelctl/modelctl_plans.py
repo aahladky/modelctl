@@ -452,6 +452,39 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
     except Exception:
         pass
 
+    # F/G/H. MoE cache variants (small/balanced/large) — only when the
+    # profile has moe_cache enabled and the binary supports it.
+    mc = profile.get("moe_cache", {})
+    if mc.get("mode", "off") != "off":
+        try:
+            import modelctl_capabilities
+            binary = profile.get("binary") or modelctl.LLAMA_SERVER_BIN
+            caps = modelctl_capabilities.probe_backend(binary)
+            if modelctl_capabilities.is_cache_capable(caps):
+                gpus_enabled = [g for g in hardware.gpus if g.enabled]
+                for frac, label_suffix in ((0.20, "cache-small"),
+                                             (0.50, "cache-balanced"),
+                                             (0.80, "cache-large")):
+                    for g in gpus_enabled:
+                        usable = g.total_bytes * 0.9  # VRAM limit pct
+                        budget = int(usable * frac)
+                        if budget < 64 * (1 << 20):  # minimum 64 MiB
+                            continue
+                        # Build a plan with this cache budget.
+                        cache_cfg = {
+                            "device": g.device,
+                            "split_mode": "",
+                            "tensor_split": "",
+                            "extra": f"--moe-cache-bytes {budget}",
+                        }
+                        cache_cfg["_moe_cache_budget"] = budget
+                        cache_cfg["_moe_cache_device"] = g.device
+                        plan = _make_plan(profile, cache_cfg,
+                                          label_suffix, hardware)
+                        add(plan)
+        except Exception:
+            pass
+
     # C. Single-GPU plans
     gpus = [g for g in hardware.gpus if g.enabled]
     weights = 0

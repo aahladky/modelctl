@@ -7,7 +7,9 @@
 {% else %}
 <table>
   <thead><tr>
-    <th>model</th><th>state</th><th>pid</th><th>port</th><th>uptime</th><th></th>
+    <th>model</th><th>state</th><th>pid</th><th>port</th><th>uptime</th>
+    {% if cache_stats %}<th>cache</th>{% endif %}
+    <th></th>
   </tr></thead>
   <tbody>
   {% for mid, m in runtime.items() | sort %}
@@ -17,6 +19,19 @@
     <td class="muted">{{ m.pid or '' }}</td>
     <td class="muted">{{ m.port or '' }}</td>
     <td class="muted">{{ m.started | elapsed }}</td>
+    {% if cache_stats %}
+    <td class="muted">
+      {% if mid in cache_stats %}
+        {% for dev, stats in cache_stats[mid].items() | sort %}
+          {{ dev }}: hit {{ stats.get('hit_ratio', '0') | float | round(3) }}
+          ({{ stats.get('slots_used', '0') }}/{{ stats.get('slot_count', '0') }})
+          {% if not loop.last %}<br>{% endif %}
+        {% endfor %}
+      {% else %}
+        <span class="muted">-</span>
+      {% endif %}
+    </td>
+    {% endif %}
     <td class="actions">
       {% if m.state == 'ready' %}
         <form method="post" action="/models/{{ mid }}/unload"><button>unload</button></form>
@@ -28,6 +43,11 @@
       {% endif %}
       {% if m.registered or m.running %}
         <a href="/runtime/logs/{{ mid }}">logs</a>
+      {% endif %}
+      {% if mid in cache_stats %}
+        <form method="post" action="/models/{{ mid }}/cache/reset" style="display:inline">
+          <button class="muted" title="reset expert cache">reset cache</button>
+        </form>
       {% endif %}
     </td>
   </tr>
