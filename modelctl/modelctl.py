@@ -2238,6 +2238,11 @@ def build_moe_cache_args(profile, plan=None, capabilities=None):
     if storage_mode == "mlock":
         args.extend(["--no-mmap"])
 
+    # The web console scrapes moe_cache_* from the server's Prometheus
+    # endpoint; without --metrics llama-server doesn't serve /metrics at
+    # all (501) and the runtime cache column is permanently blank.
+    args.append("--metrics")
+
     return args
 
 

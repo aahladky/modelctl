@@ -442,6 +442,8 @@ class TestBuildServerArgsMoeCache(unittest.TestCase):
         args = modelctl.build_server_args(profile)
         self.assertIn("--moe-cache-bytes", args)
         self.assertIn("--moe-cache-policy", args)
+        # cache telemetry needs the Prometheus endpoint up
+        self.assertIn("--metrics", args)
 
     def test_moe_cache_off_no_flags(self):
         import modelctl
@@ -456,3 +458,4 @@ class TestBuildServerArgsMoeCache(unittest.TestCase):
         }
         args = modelctl.build_server_args(profile)
         self.assertNotIn("--moe-cache-bytes", args)
+        self.assertNotIn("--metrics", args)
