@@ -1,0 +1,4 @@
+[submodule "llama.cpp"]
+	path = llama.cpp
+	url = ../llama.cpp.git
+	branch = feature/sycl-moe-expert-cache
