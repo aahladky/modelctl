@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>jobs</h1>
+<table>
+  <thead><tr><th>title</th><th>type</th><th>status</th><th>progress</th><th>started</th></tr></thead>
+  <tbody>
+  {% for j in jobs %}
+  <tr>
+    <td><a href="/jobs/{{ j.id }}">{{ j.title }}</a></td>
+    <td>{{ j.type }}</td>
+    <td class="{{ 'ok' if j.status == 'done' else ('warn' if j.status in ('failed','cancelled','interrupted') else '') }}">{{ j.status }}</td>
+    <td>{% if j.progress >= 0 %}{{ (j.progress * 100) | round(0) }}%{% else %}—{% endif %}</td>
+    <td class="muted">{% if j.started %}{{ (j.started | round(0)) }}{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

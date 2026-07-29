@@ -19,11 +19,28 @@ before you ever start the server.
 
 | File | Role |
 |---|---|
+| [modelctl](modelctl) | Stable shell launcher. Resolves the checkout's `.venv` and runs `modelctl.py` with it, so the `~/.local/bin/modelctl` symlink doesn't depend on system-Python packages. |
 | [modelctl.py](modelctl.py) | Main CLI. Profile lifecycle (search/pull/list/show/edit/regen/verify), placement (`place`), and router management (`router status/stats/load/unload`). |
-| [modelctl_vram.py](modelctl_vram.py) | Pure-stdlib VRAM math: GGUF header parsing, KV-cache/weights/overhead estimation, GPU probing (`xpu-smi`), and the placement rule. No `modelctl` import — also works as a **standalone calculator** (see below). |
+| [modelctl_vram.py](modelctl_vram.py) | Pure-stdlib VRAM math: GGUF header + tensor-table parsing, KV-cache/weights/overhead estimation, GPU probing (`xpu-smi`, with `llama-server --list-devices` fallback), and the placement rule. No `modelctl` import — also works as a **standalone calculator** (see below). |
+| [modelctl_tiers.py](modelctl_tiers.py) | Pure tier planner for `place --tiers`: tier 1–4 decisions, MoE expert-layer assignment (bandwidth-ordered), dense `-ngl` math, llama-server flag emission. |
 | [modelctl_tui.py](modelctl_tui.py) | Textual wizard for `modelctl pull --tui`. Pure interaction layer; every screen calls an existing function from `modelctl.py` rather than duplicating logic. |
 
 Tests: `test_modelctl.py`, `test_modelctl_vram.py`, `test_modelctl_tui.py` (`python3 -m unittest test_modelctl test_modelctl_vram test_modelctl_tui`).
+
+## Installation
+
+This checkout keeps its Python dependencies in a project-local virtualenv;
+system Python on this host is externally managed and does not provide them.
+
+```
+cd ~/workspace/modelctl
+uv venv .venv --python python3
+uv pip install --python .venv/bin/python -r requirements.txt
+ln -sfn "$PWD/modelctl" ~/.local/bin/modelctl
+```
+
+Run `modelctl ...` normally afterward. The pinned requirements include
+`huggingface-hub`, `PyYAML`, and `textual` (for `pull --tui`).
 
 ## Profiles
 
@@ -38,6 +55,39 @@ type(s), flash-attn, TTL, etc.). From a profile, `modelctl` generates:
 
 Profiles are plain JSON so they're easy to inspect, hand-edit, or
 regenerate (`modelctl regen <name>`) after a manual tweak.
+
+## Zero-config pulls (`pull --yes`)
+
+For the common case — "new ~27B-class fine-tune, get it serving" —
+`modelctl pull <repo> --yes` asks nothing:
+
+- **Auto-quant**: picks the *largest* quant whose estimated footprint
+  (weights + KV + overhead) fits the primary GPU — best quality that stays
+  tier 1. If nothing fits, it takes the smallest quant and tells you to
+  re-plan with `place --tiers` afterward. (`imatrix` files are never
+  mistaken for models.)
+- **Auto-config**: your saved defaults (`modelctl defaults`), pinned to the
+  primary GPU when the quant fits. KV cache types, flash-attn, TTL — all
+  from defaults, no prompts.
+- **Auto-context**: after download, the context is computed from the actual
+  GGUF — the largest step (8k…1M, capped at the model's own max) whose
+  *exact* KV cache (sliding-window aware) fits the tier-1 budget. No more
+  guessing 32k vs 131k per model; if even 8k doesn't fit, it says so and
+  points at `place --tiers`.
+- **Load-time adaptation**: tier-1 profiles get `--fit on` and no fixed
+  `-ngl`/`-c` flags, so llama.cpp sizes the context to whatever *actually*
+  fits when the model loads — more than the ceiling on an empty card, a
+  graceful shrink (not an OOM) when another model is resident. The computed
+  auto-context stays in the profile as the advertised ceiling clients see
+  (fit refuses to adjust user-set values, which is why the flags must be
+  omitted). Tier-3/4 offload plans keep `--fit off` -- the fit simulation
+  crashes against multi-device `-ot` overrides.
+- **Auto-env**: populates the oneAPI `LD_LIBRARY_PATH` from your env script
+  so SYCL launches don't depend on how modelctl was invoked.
+- **Auto-MTP**: if the repo ships a separate MTP draft-head file, it's
+  pulled and enabled (free speculative-decoding speed).
+- **Auto-name**: the repo label, quant-stripped and slugified; mmproj is
+  skipped (text-only) — re-run interactively if you want vision.
 
 ## GPU placement
 
@@ -56,6 +106,35 @@ Gemma-family (sliding-window-attention) models get per-layer-aware KV
 math — a naive full-context formula over-counts their footprint by
 close to 17x, since SWA layers only cache `swa_window` tokens, not the
 full context.
+
+## Tiered placement (`place --tiers`)
+
+`modelctl place --tiers` is the multi-tier variant for models that don't
+fit VRAM. It parses the GGUF tensor table (exact per-layer and per-expert
+bytes) and plans across four tiers:
+
+| tier | model fits in | what the planner emits |
+|---|---|---|
+| 1 | primary GPU alone | `--device SYCL0` |
+| 2 | all GPUs | `--split-mode layer --tensor-split <capacity ratio>` |
+| 3 | GPUs + system RAM | GPU spill to CPU, `--no-mmap` (fully resident) |
+| 4 | beyond RAM (SSD streaming) | same layout, mmap left on |
+
+MoE models get **expert-granular** placement — attention/KV/shared experts
+stay on the primary GPU, routed-expert layers are assigned to each GPU
+fastest-bandwidth-first (per the card table in `modelctl_tiers.py`), and
+the remainder goes to CPU as an `-ot` override bundle. Dense models get a
+computed `-ngl` instead. Generated flags encode the llama.cpp quirks this
+stack needs: `-ot` specific-ranges-before-catch-all (first match wins),
+`--split-mode layer` + explicit `--device` for multi-SYCL, and `--fit off`
+when overrides span devices.
+
+`--apply` rewrites the profile's placement fields (preserving non-placement
+`extra` flags like `--ubatch-size`), fills in the oneAPI `env` from your env
+script if the profile has none, and re-syncs. Per-profile `"binary"` pins
+in the profile JSON override the global llama-server resolution — use them
+for models that need a specific build (e.g. a fork with a not-yet-upstream
+architecture), so env-less regen/sync runs can't clobber the choice.
 
 ## Independent K/V cache quantization
 
@@ -117,3 +196,29 @@ live in `docs/superpowers/specs/` (design docs) and
 - VRAM-aware placement + router observability
 - Split K/V cache quantization + standalone calculator
 - TUI pull wizard
+
+## Web console (`modelctl web` / modelctl-web.service)
+
+A FastAPI + HTMX console on `:9293` for the cases the CLI's auto-config
+doesn't cover. The CLI remains the primary path; the UI is for visibility
+and edge-case overrides.
+
+- **Dashboard**: all profiles with live state (llama-swap loaded/registered),
+  per-GPU VRAM and RAM gauges.
+- **Profile edit**: every config field (device, split, ctx, KV types, fit,
+  extra flags, binary pin, env), with the rendered command preview. Saves
+  regenerate artifacts and re-sync.
+- **Tier planner**: the `place --tiers` dry-run rendered per profile (layout
+  table, warnings, config diff) with one-click apply.
+- **Pull wizard**: HF search → quant table with the auto recommendation →
+  background download job with progress → auto-config profile.
+- **Benchmarks**: speed.py runs as jobs with persistent history.
+- **Jobs**: everything long-running is a serialized background job (SQLite at
+  `~/.local/share/modelctl/web_jobs.db`) — all mutations flow through a
+  single writer, since profiles and the llama-swap config are plain files.
+
+Auth: one shared token (Bearer header, `?token=`, or login cookie). Stored at
+`~/.local/share/modelctl/web_token` (created on first start, override with
+`MODELCTL_WEB_TOKEN`). Binds `MODELCTL_WEB_BIND` (default `0.0.0.0:9293`).
+Run in the foreground with `modelctl web`, or as a service:
+`systemctl --user enable --now modelctl-web`.

@@ -232,8 +232,10 @@ Available devices:
         with mock.patch.object(modelctl_vram.subprocess, "run", side_effect=fake):
             devices = modelctl_vram.llama_list_devices("llama-server")
         self.assertEqual(devices, [
-            {"device": "SYCL0", "name": "Intel(R) Graphics [0xe223]", "total_mib": 32657},
-            {"device": "SYCL1", "name": "Intel(R) Arc(TM) B580 Graphics", "total_mib": 12215},
+            {"device": "SYCL0", "name": "Intel(R) Graphics [0xe223]",
+             "total_mib": 32657, "free_mib": 32145},
+            {"device": "SYCL1", "name": "Intel(R) Arc(TM) B580 Graphics",
+             "total_mib": 12215, "free_mib": 11800},
         ])
 
     def test_failure_returns_empty(self):

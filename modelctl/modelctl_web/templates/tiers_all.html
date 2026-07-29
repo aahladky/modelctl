@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>tier plans</h1>
+<table>
+  <thead><tr><th>profile</th><th>tier</th><th>layout</th><th></th></tr></thead>
+  <tbody>
+  {% for row in plans %}
+  <tr>
+    <td><a href="/profiles/{{ row.name }}/tiers">{{ row.name }}</a></td>
+    {% if row.plan %}
+    <td>tier {{ row.plan.tier }}</td>
+    <td class="muted">
+      {% for label, gib, desc in row.plan.layout %}
+        {{ label }} {{ gib | round(1) }}G{% if not loop.last %} · {% endif %}
+      {% endfor %}
+    </td>
+    {% else %}
+    <td colspan="2" class="muted">not analyzable</td>
+    {% endif %}
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

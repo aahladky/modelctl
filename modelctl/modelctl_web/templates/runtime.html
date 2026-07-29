@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}runtime - modelctl{% endblock %}
+{% block content %}
+<h1>runtime</h1>
+{% if not runtime %}
+<div class="card"><span class="warn">llama-swap unreachable or no models registered</span></div>
+{% else %}
+<table>
+  <thead><tr>
+    <th>model</th><th>state</th><th>pid</th><th>port</th><th>uptime</th><th></th>
+  </tr></thead>
+  <tbody>
+  {% for mid, m in runtime.items() | sort %}
+  <tr>
+    <td><a href="/profiles/{{ mid }}">{{ mid }}</a></td>
+    <td>{{ m.state | state_badge(m.state_class) | safe }}</td>
+    <td class="muted">{{ m.pid or '' }}</td>
+    <td class="muted">{{ m.port or '' }}</td>
+    <td class="muted">{{ m.started | elapsed }}</td>
+    <td class="actions">
+      {% if m.state == 'ready' %}
+        <form method="post" action="/models/{{ mid }}/unload"><button>unload</button></form>
+        <form method="post" action="/models/{{ mid }}/restart"><button>restart</button></form>
+      {% elif m.state in ('stopped', 'failed') and m.registered %}
+        <form method="post" action="/models/{{ mid }}/load"><button>load</button></form>
+      {% elif m.state in ('loading', 'queued') %}
+        <span class="muted">in progress...</span>
+      {% endif %}
+      {% if m.registered or m.running %}
+        <a href="/runtime/logs/{{ mid }}">logs</a>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<div class="card" style="margin-top:1rem">
+  <form method="post" action="/runtime/unload-all"
+        onsubmit="return confirm('unload ALL running models?')">
+    <button class="danger">unload all</button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

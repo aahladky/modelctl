@@ -1,4 +1,14 @@
 llama.cpp/
 *.pyc
 __pycache__/
+.venv/
 .worktrees/
+# secrets
+.env
+# non-project workspace junk (kept on disk, never tracked)
+workspace-tools/
+touchpad_mouse/
+scripts/
+.claude/
+*.log
+*.pid

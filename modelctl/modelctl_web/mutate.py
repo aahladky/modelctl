@@ -1,0 +1,344 @@
+"""Mutation helpers: every write path in the console submits through here.
+
+Functions accept a JobContext (ctx) with logging, progress, and cancellation
+support.  The submit_* helpers route jobs to the appropriate lane.
+"""
+import json
+import time
+
+import modelctl
+
+
+def submit_edit(runner, name, updates):
+    """Apply config/profile field updates, regenerate, sync."""
+    def fn(ctx):
+        ctx.log(f"applying updates to '{name}': {', '.join(sorted(updates))}")
+        profile, messages = modelctl.update_profile_config(name, updates)
+        for m in messages:
+            ctx.log(m)
+        return {"name": name, "messages": messages}
+    return runner.submit("edit", f"edit {name}", fn, payload={"name": name, "updates": updates},
+                         lane="mutation")
+
+
+def submit_tier_apply(runner, name):
+    """Compute the tier plan for one profile and apply it."""
+    import modelctl_tiers
+
+    def fn(ctx):
+        profile = modelctl.load_profile(name)
+        inventory = modelctl.get_gpu_inventory()
+        d = modelctl.load_defaults()
+        primary = modelctl.resolve_primary_gpu(inventory, d)
+        plan = modelctl_tiers.plan_tiers(profile, inventory, d["vram_limit_pct"], primary,
+                                          cache_request=profile.get("moe_cache"))
+        if plan is None:
+            raise RuntimeError(f"couldn't analyze model layout for '{name}'")
+        cfg = profile.get("config", {})
+        cfg.update(plan["config"])
+        profile["config"] = cfg
+        if not profile.get("env"):
+            env = modelctl._env_from_scripts()
+            if env:
+                profile["env"] = env
+                ctx.log("populated env from env script")
+        modelctl.save_profile(profile)
+        modelctl.generate_artifacts(profile)
+        modelctl.sync_all_backends(restart_router=True, restart_openarc=True)
+        for label, gib, desc in plan["layout"]:
+            ctx.log(f"{label}: {gib:.1f} GiB  {desc}")
+        for w in plan["warnings"]:
+            ctx.log(f"WARNING: {w}")
+        return {"tier": plan["tier"], "config": plan["config"],
+                "warnings": plan["warnings"]}
+    return runner.submit("tier-apply", f"tier apply {name}", fn,
+                         payload={"name": name}, lane="mutation")
+
+
+def submit_pull(runner, repo_id, quant_label=None, want_mtp=True):
+    """Zero-config pull as a background job, with download progress."""
+    def fn(ctx):
+        from pathlib import Path
+        current = {"file": None}
+
+        def progress(event, name):
+            if event == "file_start":
+                current["file"] = name
+                ctx.log(f"downloading {name}")
+                ctx.set_progress(detail=name)
+            elif event == "file_done":
+                ctx.log(f"done {name}")
+
+        def poller():
+            while True:
+                time.sleep(3)
+                if not current["file"]:
+                    job = ctx.store.get(ctx.job_id)
+                    if not job or job["status"] != "running":
+                        return
+                    continue
+                target = Path(modelctl.DEFAULT_MODELS_DIR) / repo_id / current["file"]
+                total = modelctl._remote_file_size(repo_id, current["file"])
+                try:
+                    have = target.stat().st_size if target.exists() else 0
+                except OSError:
+                    have = 0
+                if total:
+                    ctx.set_progress(
+                        min(0.99, have / total),
+                        f"{current['file']}: "
+                        f"{modelctl._format_size(have)} / "
+                        f"{modelctl._format_size(total)}")
+                job = ctx.store.get(ctx.job_id)
+                if not job or job["status"] != "running":
+                    return
+
+        import threading
+        t = threading.Thread(target=poller, daemon=True)
+        t.start()
+        ctx.raise_if_cancelled()
+        profile = modelctl.pull_model(repo_id, quant_label=quant_label,
+                                      want_mtp=want_mtp, progress_cb=progress)
+        current["file"] = None
+        if profile is None:
+            raise RuntimeError(f"pull of {repo_id} failed -- see job log")
+        ctx.log(f"profile '{profile['name']}' saved and synced")
+        return {"profile": profile["name"], "config": profile["config"]}
+    return runner.submit("pull", f"pull {repo_id}", fn,
+                         payload={"repo_id": repo_id, "quant": quant_label},
+                         lane="download")
+
+
+def submit_smoke_test(runner, name):
+    def fn(ctx):
+        ctx.raise_if_cancelled()
+        res = modelctl.smoke_test_profile(name, proc_register=ctx.register_process)
+        for m in res["messages"]:
+            ctx.log(m)
+        if res.get("tok_per_s"):
+            ctx.log(f"{res['tok_per_s']:.1f} tok/s")
+        ctx.log("PASS" if res["ok"] else f"not ok ({res['stage']})")
+        if not res["ok"] and res["stage"] not in ("ovms",):
+            raise RuntimeError(f"smoke test failed at stage {res['stage']}")
+        return res
+    return runner.submit("smoke", f"smoke test {name}", fn,
+                         payload={"name": name}, lane="benchmark")
+
+
+def submit_bench(runner, name, max_tokens=256, runs=3):
+    import subprocess as _sp
+    import os
+
+    def fn(ctx):
+        cmd = modelctl.build_speed_command(name, max_tokens=max_tokens, runs=runs)
+        ctx.log(" ".join(cmd))
+        ctx.raise_if_cancelled()
+        proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True,
+                         preexec_fn=os.setpgrp if hasattr(os, "setpgrp") else None)
+        ctx.register_process(proc)
+        out_lines = []
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            out_lines.append(line)
+            ctx.log(line)
+            ctx.raise_if_cancelled()
+        proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError(f"speed.py exited {proc.returncode}")
+        return {"output_tail": out_lines[-5:]}
+    return runner.submit("bench", f"benchmark {name}", fn,
+                         payload={"name": name}, lane="benchmark")
+
+
+def submit_load(runner, name):
+    from .swap import LlamaSwapClient, ModelctlSwapError
+
+    def fn(ctx):
+        client = LlamaSwapClient()
+        ctx.log(f"warm-loading '{name}' through llama-swap ...")
+        ctx.raise_if_cancelled()
+        try:
+            res = client.warm_load(name)
+        except ModelctlSwapError as e:
+            raise RuntimeError(f"{e.code}: {e.message}")
+        ctx.log(f"loaded={res['loaded']} response_ok={res['response_ok']} in {res['elapsed_s']}s")
+        if not res["loaded"]:
+            raise RuntimeError("model did not appear in /running after warm load")
+        return res
+    return runner.submit("load", f"load {name}", fn,
+                         payload={"name": name}, lane="runtime")
+
+
+def submit_unload(runner, name):
+    from .swap import LlamaSwapClient
+
+    def fn(ctx):
+        client = LlamaSwapClient()
+        client.unload(name)
+        ctx.log(f"unloaded '{name}'")
+        return {"unloaded": name}
+    return runner.submit("unload", f"unload {name}", fn,
+                         payload={"name": name}, lane="runtime")
+
+
+def submit_restart(runner, name):
+    from .swap import LlamaSwapClient
+
+    def fn(ctx):
+        client = LlamaSwapClient()
+        if name in client.running_model_ids():
+            ctx.log(f"unloading '{name}' ...")
+            client.unload(name)
+        ctx.log(f"warm-loading '{name}' ...")
+        ctx.raise_if_cancelled()
+        res = client.warm_load(name)
+        ctx.log(f"loaded={res['loaded']} in {res['elapsed_s']}s")
+        if not res["loaded"]:
+            raise RuntimeError("model did not come back after restart")
+        return res
+    return runner.submit("restart", f"restart {name}", fn,
+                         payload={"name": name}, lane="runtime")
+
+
+def submit_unload_all(runner):
+    from .swap import LlamaSwapClient
+
+    def fn(ctx):
+        client = LlamaSwapClient()
+        running = client.running_model_ids()
+        client.unload_all()
+        ctx.log(f"unloaded all ({len(running)} model(s))")
+        return {"unloaded": sorted(running)}
+    return runner.submit("unload-all", "unload all models", fn,
+                         lane="runtime")
+
+
+def submit_runtime_policy(runner, name, runtime):
+    def fn(store, job_id):
+        store.append_result_line(job_id, f"runtime policy for '{name}': "
+                                 + json.dumps(runtime))
+        modelctl.update_runtime_policy(name, runtime)
+        store.append_result_line(job_id, "profile saved, artifacts regenerated, synced")
+        return {"name": name, "runtime": runtime}
+    return runner.submit("mutation", f"runtime policy {name}", fn,
+                         payload={"name": name, "runtime": runtime})
+
+
+def submit_plan_select(runner, name, plan_id, disable=False):
+    def fn(store, job_id):
+        profile = modelctl.load_profile(name)
+        rt = dict(profile.get("runtime") or {"mode": "managed",
+                                             "objective": "balanced",
+                                             "allow_fallback": True,
+                                             "allow_untested": False,
+                                             "minimum_context": 8192,
+                                             "maximum_cpu_bytes": None,
+                                             "maximum_storage_tier": 3,
+                                             "disabled_plan_ids": []})
+        disabled = list(rt.get("disabled_plan_ids", []))
+        if disable:
+            if plan_id not in disabled:
+                disabled.append(plan_id)
+            store.append_result_line(job_id, f"disabled plan {plan_id}")
+        else:
+            rt["pinned_plan_id"] = plan_id
+            if plan_id in disabled:
+                disabled.remove(plan_id)
+            store.append_result_line(job_id, f"pinned plan {plan_id}")
+        rt["disabled_plan_ids"] = disabled
+        rt["mode"] = "managed"
+        modelctl.update_runtime_policy(name, rt)
+        return {"name": name, "runtime": rt}
+    label = "disable" if disable else "select"
+    return runner.submit("mutation", f"{label} plan {plan_id} on {name}", fn,
+                         payload={"name": name, "plan_id": plan_id,
+                                  "disable": disable})
+
+
+def submit_plan_test(runner, name, plan_id):
+    def fn(ctx):
+        import modelctl_tune
+        run = modelctl_tune.test_launch_plan(
+            name, plan_id, log=ctx.log, proc_register=ctx.register_process,
+            cancel_check=ctx.is_cancelled)
+        if not run.get("success"):
+            raise RuntimeError(f"plan test failed: {run.get('failure_class')}")
+        return run
+    return runner.submit("benchmark", f"plan test {name}/{plan_id[:8]}", fn,
+                         payload={"name": name, "plan_id": plan_id})
+
+
+def submit_autotune(runner, name, objective="balanced", candidate_ids=None):
+    def fn(ctx):
+        import modelctl_tune
+        res = modelctl_tune.autotune_profile(
+            name, objective=objective, candidate_ids=candidate_ids,
+            log=ctx.log, proc_register=ctx.register_process,
+            cancel_check=ctx.is_cancelled)
+        return res
+    return runner.submit("benchmark", f"autotune {name}", fn,
+                         payload={"name": name, "objective": objective})
+
+
+def submit_matrix_apply(runner):
+    def fn(store, job_id):
+        import shutil
+        import modelctl_matrix
+        cfg_path = modelctl.LLAMA_SWAP_CONFIG_PATH
+        config = modelctl.yaml.safe_load(cfg_path.read_text()) or {}
+        generated = modelctl_matrix.generate_matrix()
+        merged = modelctl_matrix.merge_matrix(config.get("matrix"), generated)
+
+        backup = cfg_path.with_suffix(f".yaml.bak-matrix-{int(time.time())}")
+        shutil.copy2(cfg_path, backup)
+        store.append_result_line(job_id, f"backup: {backup}")
+
+        new_config = dict(config)
+        new_config["matrix"] = merged
+        tmp = cfg_path.with_suffix(".yaml.tmp")
+        tmp.write_text(modelctl.yaml.safe_dump(new_config, sort_keys=False))
+        import os as _os
+        with open(tmp) as f:
+            _os.fsync(f.fileno())
+        tmp.replace(cfg_path)
+        store.append_result_line(job_id, "config.yaml written, restarting llama-swap")
+
+        import subprocess
+        proc = subprocess.run(["systemctl", "--user", "restart", "llama-swap.service"],
+                              capture_output=True, text=True, timeout=60)
+        store.append_result_line(job_id, proc.stdout + proc.stderr)
+        if proc.returncode != 0:
+            shutil.copy2(backup, cfg_path)
+            subprocess.run(["systemctl", "--user", "restart", "llama-swap.service"],
+                           capture_output=True, timeout=60)
+            raise RuntimeError("restart failed -- rolled back to backup")
+
+        from .swap import LlamaSwapClient, ModelctlSwapError
+        for _ in range(15):
+            try:
+                LlamaSwapClient().health()
+                store.append_result_line(job_id, "llama-swap healthy after apply")
+                return {"sets": len(merged["sets"]), "backup": str(backup)}
+            except ModelctlSwapError:
+                time.sleep(2)
+        shutil.copy2(backup, cfg_path)
+        subprocess.run(["systemctl", "--user", "restart", "llama-swap.service"],
+                       capture_output=True, timeout=60)
+        raise RuntimeError("llama-swap unhealthy after apply -- rolled back")
+    return runner.submit("mutation", "apply managed matrix", fn)
+
+
+def submit_moe_cache(runner, name, moe_cache):
+    """Save moe_cache section for a profile, regenerate artifacts, and sync."""
+    def fn(ctx):
+        profile = modelctl.load_profile(name)
+        ctx.log(f"updating moe_cache for '{name}': mode={moe_cache.get('mode', 'off')}")
+        profile["moe_cache"] = moe_cache
+        modelctl.save_profile(profile)
+        modelctl.generate_artifacts(profile)
+        modelctl.sync_all_backends(restart_router=True, restart_openarc=True)
+        ctx.log("saved, artifacts regenerated, synced")
+        return {"name": name, "moe_cache": moe_cache}
+    return runner.submit("moe-cache", f"moe cache {name}", fn,
+                         payload={"name": name, "moe_cache": moe_cache},
+                         lane="mutation")

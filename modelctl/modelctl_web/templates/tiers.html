@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>tiers: {{ p.name }}</h1>
+{% if not plan %}
+<p class="warn">couldn't analyze this model's layout.</p>
+{% else %}
+<p>tier {{ plan.tier }} — {{ plan.analysis.weights_gib | round(1) }} GiB weights,
+{{ plan.analysis.kv_gib | round(1) }} GiB KV{% if plan.analysis.is_moe %}, MoE{% endif %}</p>
+<table>
+  <thead><tr><th>tier</th><th>GiB</th><th>what</th></tr></thead>
+  <tbody>
+  {% for label, gib, desc in plan.layout %}
+  <tr><td>{{ label }}</td><td>{{ gib | round(1) }}</td><td>{{ desc }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if plan.warnings %}
+<div class="warn card">{% for w in plan.warnings %}<p>WARNING: {{ w }}</p>{% endfor %}</div>
+{% endif %}
+<h2>config diff</h2>
+<table>
+  <thead><tr><th>field</th><th>current</th><th>planned</th></tr></thead>
+  <tbody>
+  {% for k in ["device", "split_mode", "tensor_split", "extra"] %}
+  <tr>
+    <td>{{ k }}</td>
+    <td><code>{{ current.get(k, '') }}</code></td>
+    <td><code>{{ plan.config[k] }}</code></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<form method="post" action="/profiles/{{ p.name }}/tiers/apply"
+      onsubmit="return confirm('apply this plan to {{ p.name }}?')">
+  <button type="submit">apply plan</button>
+</form>
+{% endif %}
+{% endblock %}

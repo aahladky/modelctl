@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}logs: {{ name }} - modelctl{% endblock %}
+{% block content %}
+<h1>logs: {{ name }}</h1>
+<p class="muted">
+  state: {{ rt.state | state_badge(rt.state_class) | safe }}
+  {% if rt.pid %} · pid {{ rt.pid }}{% endif %}
+  {% if rt.port %} · port {{ rt.port }}{% endif %}
+</p>
+<div class="actions" style="margin-bottom:1rem">
+  {% if rt.state == 'ready' %}
+    <form method="post" action="/models/{{ name }}/unload"><button>unload</button></form>
+    <form method="post" action="/models/{{ name }}/restart"><button>restart</button></form>
+  {% elif rt.state in ('stopped', 'failed') and rt.registered %}
+    <form method="post" action="/models/{{ name }}/load"><button>load</button></form>
+  {% endif %}
+  <a href="/runtime">back to runtime</a>
+</div>
+<div class="card">
+  <pre>{{ log_text }}</pre>
+</div>
+{% endblock %}

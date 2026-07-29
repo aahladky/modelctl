@@ -7,9 +7,11 @@ None) on failure, so callers degrade to warnings instead of crashing when
 files/tools are absent. The exception is main(), the deliberate CLI entry
 point, which does print.
 """
+import hashlib
 import json
 import math
 import re
+import os
 import struct
 import subprocess
 
@@ -222,7 +224,7 @@ def estimate_from_parts(weights_bytes, ctx, kv_quant, gguf_params=None,
 # from `llama-server --list-devices`.
 _DEVICE_LINE_RE = re.compile(
     r"^\s*(?P<device>[A-Za-z]+\d+):\s+(?P<name>.+?)\s+\((?P<total>\d+)\s*MiB,"
-    r"\s*\d+\s*MiB free\)\s*$")
+    r"\s*(?P<free>\d+)\s*MiB free\)\s*$")
 
 
 def xpu_devices(timeout=15):
@@ -256,12 +258,16 @@ def xpu_devices(timeout=15):
     return devices
 
 
-def llama_list_devices(binary, timeout=30):
+def llama_list_devices(binary, timeout=30, env=None):
     """Parse `llama-server --list-devices` into
-    [{device: 'SYCL0', name, total_mib}]. Returns [] on any failure."""
+    [{device: 'SYCL0', name, total_mib, free_mib}]. Returns [] on any failure.
+    `env` (dict of extra vars, e.g. from source_env_script) is overlaid on the
+    current process environment for the probe."""
     try:
+        import os as _os
         result = subprocess.run([binary, "--list-devices"],
-                                capture_output=True, text=True, timeout=timeout)
+                                capture_output=True, text=True, timeout=timeout,
+                                env={**_os.environ, **env} if env else None)
     except (OSError, subprocess.TimeoutExpired):
         return []
     devices = []
@@ -269,7 +275,8 @@ def llama_list_devices(binary, timeout=30):
         m = _DEVICE_LINE_RE.match(line)
         if m:
             devices.append({"device": m.group("device"), "name": m.group("name"),
-                            "total_mib": int(m.group("total"))})
+                            "total_mib": int(m.group("total")),
+                            "free_mib": int(m.group("free"))})
     return devices
 
 
@@ -347,6 +354,172 @@ def weights_bytes_on_disk(model_path):
                if pm and pm.group(1) == prefix)
 
 
+def _shard_paths(model_path):
+    """All GGUF shard paths for a model: the file itself, or every sibling
+    shard sharing its -NNNNN-of-MMMMM prefix (sorted)."""
+    from pathlib import Path
+    model_path = Path(model_path)
+    m = SHARD_RE.match(model_path.name)
+    if not m:
+        return [model_path]
+    prefix = m.group(1)
+    return sorted(p for p in model_path.parent.glob(f"{prefix}-*-of-*.gguf")
+                  if (pm := SHARD_RE.match(p.name)) and pm.group(1) == prefix)
+
+
+# ggml quant type traits: type id -> (block_size, block_bytes), mirrored from
+# ggml/src/ggml.c type_traits[] + ggml.h's enum ggml_type. Used to compute
+# exact tensor byte sizes from the GGUF tensor table. Ids not listed here
+# (newer/exotic quants) are counted as unknown so callers can warn that the
+# layout math is incomplete rather than silently undercounting.
+GGML_TYPE_BLOCK = {
+    0: (1, 4),        # F32
+    1: (1, 2),        # F16
+    2: (32, 18),      # Q4_0
+    3: (32, 20),      # Q4_1
+    6: (32, 22),      # Q5_0
+    7: (32, 24),      # Q5_1
+    8: (32, 34),      # Q8_0
+    9: (32, 36),      # Q8_1
+    10: (256, 84),    # Q2_K
+    11: (256, 110),   # Q3_K
+    12: (256, 144),   # Q4_K
+    13: (256, 176),   # Q5_K
+    14: (256, 210),   # Q6_K
+    15: (256, 292),   # Q8_K
+    16: (256, 66),    # IQ2_XXS
+    17: (256, 74),    # IQ2_XS
+    18: (256, 98),    # IQ3_XXS
+    19: (256, 50),    # IQ1_S
+    20: (32, 18),     # IQ4_NL
+    21: (256, 110),   # IQ3_S
+    22: (256, 82),    # IQ2_S
+    23: (256, 136),   # IQ4_XS
+    24: (1, 1),       # I8
+    25: (1, 2),       # I16
+    26: (1, 4),       # I32
+    27: (1, 8),       # I64
+    28: (1, 8),       # F64
+    29: (256, 56),    # IQ1_M
+    30: (1, 2),       # BF16
+    34: (256, 54),    # TQ1_0
+    35: (256, 66),    # TQ2_0
+    39: (32, 17),     # MXFP4
+    40: (16, 10),     # NVFP4
+    41: (32, 17),     # Q1_0
+}
+
+# Routed MoE expert tensors (blk.N.ffn_gate_exps.weight etc.). Shared experts
+# (_shexp) deliberately do NOT match -- they run every token and belong with
+# the non-expert/GPU-resident set.
+_EXPERT_RE = re.compile(r"^blk\.(\d+)\.ffn_.*_exps\.weight$")
+
+# Repeating (per-layer) tensors of any kind, for dense per-layer byte math.
+_LAYER_TENSOR_RE = re.compile(r"^blk\.(\d+)\.")
+
+
+def read_gguf_tensors(path):
+    """Parse one GGUF shard fully: (metadata_dict, [(name, type_id, n_elements)]).
+
+    Same degrade-to-empty contract as read_gguf_kv_metadata: returns ({}, [])
+    on any failure. Split GGUFs keep their tensor infos in each shard (a
+    metadata-only first shard legitimately has zero), so callers must iterate
+    all shards -- see gguf_model_layout."""
+    try:
+        with open(path, "rb") as f:
+            if _read_exact(f, 4) != GGUF_MAGIC:
+                return {}, []
+            (version,) = struct.unpack("<I", _read_exact(f, 4))
+            if version < 2:
+                return {}, []
+            tensor_count, kv_count = struct.unpack("<QQ", _read_exact(f, 16))
+            meta = {}
+            for _ in range(kv_count):
+                key = _read_string(f)
+                (type_id,) = struct.unpack("<I", _read_exact(f, 4))
+                value = _read_value(f, type_id)
+                if value is not None:
+                    meta[key] = value
+            tensors = []
+            for _ in range(tensor_count):
+                name = _read_string(f)
+                (n_dims,) = struct.unpack("<I", _read_exact(f, 4))
+                dims = struct.unpack(f"<{n_dims}Q", _read_exact(f, 8 * n_dims))
+                (type_id,) = struct.unpack("<I", _read_exact(f, 4))
+                _read_exact(f, 8)  # in-shard data offset -- not needed
+                n_el = 1
+                for d in dims:
+                    n_el *= d
+                tensors.append((name, type_id, n_el))
+            return meta, tensors
+    except (OSError, struct.error, MemoryError, OverflowError):
+        return {}, []
+
+
+def gguf_model_layout(model_path):
+    """Weight layout of a (possibly sharded) GGUF for tier placement.
+
+    Returns None on failure; otherwise a dict with:
+      arch, meta, block_count, is_moe,
+      weight_bytes           -- sum over all tensors
+      non_expert_bytes       -- attention/norms/embeddings/shared experts
+      other_bytes            -- non-expert, non-layer tensors (embd/output)
+      layer_bytes            -- non-expert bytes inside blk.N.* (dense FFN etc.)
+      expert_bytes_per_layer -- {layer_index: bytes} for routed experts
+      unknown_type_tensors   -- count of tensors skipped (unlisted quant type)
+    """
+    meta = {}
+    total = non_expert = other = layer_non_expert = 0
+    expert = {}
+    unknown = 0
+    saw_tensors = False
+    for shard in _shard_paths(model_path):
+        shard_meta, tensors = read_gguf_tensors(shard)
+        if shard_meta:
+            meta = meta or shard_meta
+        for name, type_id, n_el in tensors:
+            saw_tensors = True
+            traits = GGML_TYPE_BLOCK.get(type_id)
+            if traits is None:
+                unknown += 1
+                continue
+            block_size, block_bytes = traits
+            nbytes = (n_el // block_size) * block_bytes
+            total += nbytes
+            em = _EXPERT_RE.match(name)
+            if em:
+                layer = int(em.group(1))
+                expert[layer] = expert.get(layer, 0) + nbytes
+            else:
+                non_expert += nbytes
+                if _LAYER_TENSOR_RE.match(name):
+                    layer_non_expert += nbytes
+                else:
+                    other += nbytes
+    if not saw_tensors:
+        return None
+    arch = meta.get("general.architecture", "")
+    block_count = meta.get(f"{arch}.block_count") if arch else None
+    return {"arch": arch, "meta": meta, "block_count": block_count or 0,
+            "is_moe": bool(expert), "weight_bytes": total,
+            "non_expert_bytes": non_expert, "other_bytes": other,
+            "layer_bytes": layer_non_expert,
+            "expert_bytes_per_layer": expert,
+            "unknown_type_tensors": unknown}
+
+
+def system_ram_available():
+    """MemAvailable from /proc/meminfo in bytes; 0 when unreadable."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
 def _fmt_gib(n):
     return f"{n / (1 << 30):.2f}GiB"
 
@@ -408,3 +581,38 @@ def main(argv=None):
 if __name__ == "__main__":
     import sys as _sys
     _sys.exit(main())
+
+
+_FP_CACHE = {}
+
+
+def file_fingerprint(path, full_limit=512 << 20, head_tail=1 << 20):
+    """Content fingerprint of a file: full sha256 up to `full_limit`;
+    head+tail+size+mtime sha256 for larger files (a 183 GB GGUF can't be
+    hashed whole on every plan compile). Cached by (path, size, mtime) so
+    repeated compiles don't re-read. Returns 'missing' for absent paths and
+    '' for None."""
+    if not path:
+        return ""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return "missing"
+    key = (path, st.st_size, int(st.st_mtime))
+    if key in _FP_CACHE:
+        return _FP_CACHE[key]
+    h = hashlib.sha256()
+    h.update(str(st.st_size).encode())
+    if st.st_size <= full_limit:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    else:
+        h.update(str(int(st.st_mtime)).encode())
+        with open(path, "rb") as f:
+            h.update(f.read(head_tail))
+            f.seek(max(0, st.st_size - head_tail))
+            h.update(f.read(head_tail))
+    fp = h.hexdigest()[:16]
+    _FP_CACHE[key] = fp
+    return fp

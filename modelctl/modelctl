@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+# Resolve through ~/.local/bin/modelctl so the launcher works from the symlink.
+script_path="$(readlink -f "$0")"
+project_root="$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd)"
+python_bin="$project_root/.venv/bin/python"
+
+if [ ! -x "$python_bin" ]; then
+    echo "modelctl's virtualenv is missing. Install its dependencies with:" >&2
+    echo "  cd \"$project_root\"" >&2
+    echo "  uv venv .venv --python python3" >&2
+    echo "  uv pip install --python .venv/bin/python -r requirements.txt" >&2
+    exit 1
+fi
+
+exec "$python_bin" "$project_root/modelctl.py" "$@"

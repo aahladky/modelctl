@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>measurements: {{ name }}</h1>
+<table>
+  <thead><tr><th>when</th><th>plan</th><th>result</th><th>load</th><th>prompt</th><th>gen</th><th>peak VRAM</th><th>peak RAM</th></tr></thead>
+  <tbody>
+  {% for r in runs %}
+  <tr>
+    <td class="muted">{{ '%.0f' | format(r.started_at) }}</td>
+    <td><code>{{ r.plan_id[:12] }}</code></td>
+    <td class="{{ 'ok' if r.success else 'warn' }}">{{ 'ok' if r.success else (r.failure_class or 'fail') }}</td>
+    <td>{{ '%.1fs' | format(r.load_seconds or 0) }}</td>
+    <td>{{ '%.1f' | format(r.prompt_tps or 0) }}</td>
+    <td>{{ '%.1f' | format(r.generation_tps or 0) }}</td>
+    <td class="muted">
+      {% for dev, b in (r.peak_vram_json | fromjson).items() %}{{ dev }}: {{ (b / 1073741824) | round(1) }}G {% endfor %}
+    </td>
+    <td class="muted">{{ ((r.peak_ram_bytes or 0) / 1073741824) | round(1) }}G</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p><a href="/profiles/{{ name }}/plans">back to plans</a></p>
+{% endblock %}

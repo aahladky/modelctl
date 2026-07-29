@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>pull a model</h1>
+<form method="get" action="/pull" class="card">
+  <input name="q" value="{{ q }}" placeholder="search hugging face (e.g. Qwen3.6-27B-GGUF)" style="width:70%">
+  <button type="submit">search</button>
+</form>
+{% if results %}
+<table>
+  <thead><tr><th>repo</th><th>downloads</th><th></th><th></th></tr></thead>
+  <tbody>
+  {% for r in results %}
+  {% if r.is_gguf %}
+  <tr>
+    <td>{{ r.repo_id }}</td>
+    <td class="muted">{{ r.downloads }}</td>
+    <td>{% if r.has_mtp %}<span class="ok">MTP</span>{% endif %}</td>
+    <td><a href="/pull/{{ r.repo_id }}">select</a></td>
+  </tr>
+  {% endif %}
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

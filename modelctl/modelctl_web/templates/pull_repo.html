@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>pull: {{ repo_id }}</h1>
+{% if rec %}
+<p class="card">recommended: <strong>{{ rec.group.label }}</strong>
+  ({{ (rec.group.total_size / 1073741824) | round(1) }} GiB) — {{ rec.reason }}</p>
+{% endif %}
+<table>
+  <thead><tr><th>quant</th><th>size</th><th>split</th><th></th></tr></thead>
+  <tbody>
+  {% for g in contents.quant_groups %}
+  {% if 'imatrix' not in g.label.lower() %}
+  <tr class="{{ 'hl' if rec and g.label == rec.group.label else '' }}">
+    <td>{{ g.label }}</td>
+    <td>{{ (g.total_size / 1073741824) | round(1) }} GiB</td>
+    <td>{{ g.files | length }}p</td>
+    <td>
+      <form method="post" action="/pull/{{ repo_id }}">
+        <input type="hidden" name="quant" value="{{ g.label }}">
+        <button type="submit">pull{{ ' (recommended)' if rec and g.label == rec.group.label else '' }}</button>
+      </form>
+    </td>
+  </tr>
+  {% endif %}
+  {% endfor %}
+  </tbody>
+</table>
+{% if contents.mtp_files %}
+<p class="muted">MTP draft head available ({{ contents.mtp_files[0].name }}) — included automatically.</p>
+{% endif %}
+{% endblock %}

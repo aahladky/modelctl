@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}plans: {{ profile_name }} - modelctl{% endblock %}
+{% block content %}
+<h1>launch plans: {{ profile_name }}</h1>
+{% set rt = p.get('runtime') or {} %}
+{% set managed = rt.get('mode') == 'managed' %}
+{% set disabled_ids = rt.get('disabled_plan_ids', []) %}
+
+<div class="card">
+  <strong>runtime mode:</strong>
+  <span class="{{ 'ok' if managed else 'muted' }}">{{ 'managed placement' if managed else 'fixed command' }}</span>
+  {% if managed %}
+    · objective {{ rt.get('objective', 'balanced') }}
+    {% if rt.get('pinned_plan_id') %} · pinned <code>{{ rt.pinned_plan_id }}</code>{% endif %}
+    · fallback {{ 'on' if rt.get('allow_fallback') else 'off' }}
+    · untested {{ 'allowed' if rt.get('allow_untested') else 'no' }}
+    · min ctx {{ rt.get('minimum_context') or '—' }}
+  {% endif %}
+</div>
+
+<details class="card">
+  <summary><strong>runtime policy</strong> (edit)</summary>
+  <form method="post" action="/profiles/{{ profile_name }}/runtime-policy">
+    <label>mode
+      <select name="mode">
+        <option value="fixed" {{ 'selected' if not managed }}>fixed command</option>
+        <option value="managed" {{ 'selected' if managed }}>managed placement</option>
+      </select>
+    </label>
+    <label>objective
+      <select name="objective">
+        {% for o in ['balanced', 'fastest_generation', 'fastest_prompt', 'largest_context', 'fastest_load', 'lowest_ram'] %}
+        <option value="{{ o }}" {{ 'selected' if rt.get('objective', 'balanced') == o }}>{{ o.replace('_', ' ') }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>pinned plan id <input name="pinned_plan_id" value="{{ rt.get('pinned_plan_id') or '' }}" placeholder="(none)"></label>
+    <label>minimum context <input name="minimum_context" type="number" value="{{ rt.get('minimum_context') or 8192 }}"></label>
+    <label>max CPU offload (GiB) <input name="maximum_cpu_gib" type="number" value="{{ (rt.get('maximum_cpu_bytes') or 0) // 1073741824 if rt.get('maximum_cpu_bytes') else '' }}" placeholder="(no limit)"></label>
+    <label>max tier
+      <select name="maximum_storage_tier">
+        <option value="1" {{ 'selected' if rt.get('maximum_storage_tier') == 1 }}>GPU only</option>
+        <option value="2" {{ 'selected' if rt.get('maximum_storage_tier') == 2 }}>GPU + RAM</option>
+        <option value="3" {{ 'selected' if not rt.get('maximum_storage_tier') or rt.get('maximum_storage_tier') == 3 }}>GPU + RAM + SSD</option>
+      </select>
+    </label>
+    <input type="hidden" name="disabled_plan_ids" value="{{ disabled_ids | tojson }}">
+    <label><input type="checkbox" name="allow_fallback" {{ 'checked' if rt.get('allow_fallback', true) }}> allow fallback</label>
+    <label><input type="checkbox" name="allow_untested" {{ 'checked' if rt.get('allow_untested') }}> allow untested plans</label>
+    <p><button type="submit">save policy &amp; resync</button></p>
+  </form>
+</details>
+
+<p class="muted">{{ plans | length }} candidate(s) generated · <a href="/profiles/{{ profile_name }}/history">measurement history</a></p>
+<table>
+  <thead><tr>
+    <th>plan</th><th>source</th><th>placement</th><th>ctx</th><th>VRAM</th><th>RAM</th><th>status</th><th>last speed</th><th>warnings</th><th>actions</th>
+  </tr></thead>
+  <tbody>
+  {% for pl in plans %}
+  <tr class="{{ 'disabled' if pl.id in disabled_ids }}">
+    <td>
+      <strong>{{ pl.label }}</strong><br><span class="muted">{{ pl.id }}</span>
+      {% if rt.get('pinned_plan_id') == pl.id %}<span class="ok">[pinned]</span>{% endif %}
+      {% if pl.id in disabled_ids %}<span class="warn">[disabled]</span>{% endif %}
+    </td>
+    <td>{{ pl.source }}</td>
+    <td>
+      {% for dev, bytes in pl.claim.vram_bytes.items() %}
+        {{ dev }}: {{ (bytes / 1073741824) | round(1) }}G<br>
+      {% endfor %}
+    </td>
+    <td>{{ pl.claim.expected_context or '—' }}</td>
+    <td>{{ (pl.estimated.total_vram / 1073741824) | round(1) }}G</td>
+    <td>{{ (pl.claim.ram_bytes / 1073741824) | round(1) }}G</td>
+    <td>
+      {% set obs = observations.get(pl.id) %}
+      {% if obs and obs.stale %}<span class="warn">stale</span>
+      {% elif obs %}<span class="ok">validated</span>
+      {% else %}<span class="muted">untested</span>{% endif %}
+    </td>
+    <td>{% if obs and obs.generation_tps %}{{ obs.generation_tps | round(1) }} t/s{% else %}—{% endif %}</td>
+    <td>{% for w in pl.warnings %}<span class="warn">{{ w }}</span><br>{% endfor %}</td>
+    <td class="actions">
+      <form method="post" action="/profiles/{{ profile_name }}/plans/{{ pl.id }}/test"><button>test</button></form>
+      <form method="post" action="/profiles/{{ profile_name }}/plans/{{ pl.id }}/select"><button>select</button></form>
+      {% if pl.id in disabled_ids %}
+      <form method="post" action="/profiles/{{ profile_name }}/plans/{{ pl.id }}/enable"><button>enable</button></form>
+      {% else %}
+      <form method="post" action="/profiles/{{ profile_name }}/plans/{{ pl.id }}/disable"><button class="danger">disable</button></form>
+      {% endif %}
+      <details>
+        <summary>command</summary>
+        <pre>{{ pl.argv | join(' \\\n  ') }}</pre>
+      </details>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p><a href="/profiles/{{ profile_name }}">back to profile</a></p>
+{% endblock %}

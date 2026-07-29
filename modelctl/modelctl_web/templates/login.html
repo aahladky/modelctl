@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>login</h1>
+<form method="post" action="/login" class="card" style="max-width:24rem">
+  <input type="hidden" name="next" value="{{ next }}">
+  <label>token<br><input type="password" name="token_field" autofocus style="width:100%"></label>
+  <p class="muted">stored at ~/.local/share/modelctl/web_token</p>
+  <button type="submit">sign in</button>
+</form>
+{% endblock %}
