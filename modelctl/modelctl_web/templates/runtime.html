@@ -24,7 +24,7 @@
       {% if mid in cache_stats %}
         {% for dev, stats in cache_stats[mid].items() | sort %}
           {{ dev }}: hit {{ stats.get('hit_ratio', '0') | float | round(3) }}
-          ({{ stats.get('slots_used', '0') }}/{{ stats.get('slot_count', '0') }})
+          ({{ stats.get('slots_used', '0') }}/{{ stats.get('slots', '0') }})
           {% if not loop.last %}<br>{% endif %}
         {% endfor %}
       {% else %}
