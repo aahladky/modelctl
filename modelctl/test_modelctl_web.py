@@ -1143,3 +1143,249 @@ class TestSwapClientPlainText(unittest.TestCase):
             client = LlamaSwapClient()
             result = client.unload("some-model")
         self.assertEqual(result, {"text": "OK"})
+
+
+class _FakeTextResp:
+    """Minimal urlopen stand-in returning fixed text."""
+    def __init__(self, text):
+        self._text = text
+
+    def read(self):
+        return self._text.encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class TestMoeCacheMetrics(WebTestBase):
+    METRICS = "\n".join([
+        "# HELP llamacpp:moe_cache_hits_total MoE expert cache hits",
+        "# TYPE llamacpp:moe_cache_hits_total counter",
+        'llamacpp:moe_cache_hits_total{device="0"} 42',
+        'llamacpp:moe_cache_misses_total{device="0"} 7',
+        'llamacpp:moe_cache_hit_ratio{device="1"} 0.75',
+        'llamacpp:moe_cache_slots_used{device="0",layer="3"} 100',
+        "llamacpp:moe_cache_slots 128",
+        "llamacpp:prompt_tokens_total 999",
+    ])
+
+    def _runtime_state(self, port=5000):
+        return mock.patch("modelctl_web.swap.LlamaSwapClient.runtime_state",
+                          return_value={
+                              "m1": {"model_id": "m1", "state": "ready",
+                                     "registered": True, "running": True,
+                                     "pid": 1234, "port": port,
+                                     "started": time.time() - 60,
+                                     "state_class": "ok"}})
+
+    def _enable_moe_cache(self):
+        p = dict(PROFILE)
+        p["moe_cache"] = {"mode": "auto",
+                          "gpu": {"budgets_bytes": {"SYCL0": 8 << 30}}}
+        (self.profiles_dir / "m1.json").write_text(json.dumps(p))
+
+    def test_scrape_parses_metrics_label_agnostic(self):
+        from modelctl_web.app import _scrape_moe_cache_metrics
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_FakeTextResp(self.METRICS)):
+            stats = _scrape_moe_cache_metrics(5000)
+        self.assertEqual(stats["0"]["hits_total"], "42")
+        self.assertEqual(stats["0"]["misses_total"], "7")
+        # extra labels beyond device= still parse
+        self.assertEqual(stats["0"]["slots_used"], "100")
+        self.assertEqual(stats["1"]["hit_ratio"], "0.75")
+        # no label block at all -> "" device key
+        self.assertEqual(stats[""]["slots"], "128")
+        # non-moe_cache metrics are ignored
+        self.assertNotIn("prompt_tokens_total",
+                         [k for dev in stats.values() for k in dev])
+
+    def test_scrape_returns_none_on_error(self):
+        from modelctl_web.app import _scrape_moe_cache_metrics
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("down")):
+            self.assertIsNone(_scrape_moe_cache_metrics(5000))
+
+    def test_scrape_returns_none_without_moe_metrics(self):
+        from modelctl_web.app import _scrape_moe_cache_metrics
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_FakeTextResp("llamacpp:prompt_tokens_total 9\n")):
+            self.assertIsNone(_scrape_moe_cache_metrics(5000))
+
+    def test_runtime_page_renders_cache_stats(self):
+        self._enable_moe_cache()
+        with self._runtime_state(), \
+             mock.patch("urllib.request.urlopen",
+                        return_value=_FakeTextResp(self.METRICS)):
+            resp = self.client.get("/runtime", headers=self.auth)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("hit 0.75", resp.text)
+        self.assertIn("/models/m1/cache/reset", resp.text)
+
+    def test_cache_reset_posts_to_server(self):
+        with self._runtime_state(port=5000), \
+             mock.patch("urllib.request.urlopen") as uo:
+            resp = self.client.post("/models/m1/cache/reset",
+                                    headers=self.auth, follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
+        uo.assert_called_once()
+        req = uo.call_args[0][0]
+        self.assertEqual(req.full_url, "http://127.0.0.1:5000/cache/reset")
+        self.assertEqual(req.get_method(), "POST")
+
+    def test_cache_reset_without_port_skips_request(self):
+        with self._runtime_state(port=None), \
+             mock.patch("urllib.request.urlopen") as uo:
+            resp = self.client.post("/models/m1/cache/reset",
+                                    headers=self.auth, follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
+        uo.assert_not_called()
+
+
+class TestCacheVariants(WebTestBase):
+    """compile_launch_plans cache variants: structured budgets (never a
+    duplicate --moe-cache-bytes), configured limits, feasibility."""
+
+    def _mock_hardware(self):
+        from modelctl_hardware import HardwareSnapshot, GpuSnapshot
+        return HardwareSnapshot(
+            captured_at=1000.0, fingerprint="test",
+            gpus=(GpuSnapshot("SYCL0", "B70", 32 << 30, 30 << 30, 0, True,
+                              "primary", 608),),
+            ram_total_bytes=64 << 30, ram_available_bytes=50 << 30,
+            ram_reserve_bytes=0, storage=(), backend_fingerprints={})
+
+    def _profile(self, model_path="/nonexistent"):
+        return {"name": "m1", "backend": "llama-cpp", "model_path": model_path,
+                "config": {"device": "SYCL0", "split_mode": "", "tensor_split": "",
+                           "ctx": 32768, "cache_type_k": "q8_0",
+                           "cache_type_v": "q8_0", "fit": "on", "extra": "",
+                           "flash_attn": "auto", "ttl": 3600, "mtp": "off"},
+                "moe_cache": {"mode": "auto",
+                              "gpu": {"budgets_bytes": {"SYCL0": 4 << 30},
+                                      "policy": "slru", "admission_misses": 2}}}
+
+    def _compile(self, profile, extra_patches=()):
+        import modelctl_plans
+        patches = [
+            mock.patch("modelctl_capabilities.probe_backend",
+                       return_value={"features": {"moe_expert_cache": True}}),
+            mock.patch("modelctl.load_defaults",
+                       return_value={"vram_limit_pct": 90, "primary_gpu": "SYCL0"}),
+            mock.patch("modelctl.get_gpu_inventory", return_value=[]),
+            mock.patch("modelctl_hardware.load_settings", return_value={}),
+            *extra_patches,
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        return modelctl_plans.compile_launch_plans(profile, self._mock_hardware())
+
+    def test_variants_emit_single_structured_budget(self):
+        plans = self._compile(self._profile())
+        variants = [p for p in plans if p.source.startswith("cache-")]
+        self.assertEqual({p.source for p in variants},
+                         {"cache-small", "cache-balanced", "cache-large"})
+        # distinct plan IDs -- the cache budget is part of plan identity
+        self.assertEqual(len({p.id for p in variants}), 3)
+        usable = (32 << 30) * 0.9
+        for p in variants:
+            argv = list(p.argv)
+            # exactly one --moe-cache-bytes, from the structured path
+            self.assertEqual(argv.count("--moe-cache-bytes"), 1, p.source)
+            self.assertIn("--moe-cache-policy", argv)
+        small = next(p for p in variants if p.source == "cache-small")
+        i = list(small.argv).index("--moe-cache-bytes")
+        self.assertEqual(small.argv[i + 1], str(int(usable * 0.20)))
+
+    def test_infeasible_variants_skipped(self):
+        # 20 GiB static footprint on a 28.8 GiB-usable card: only the small
+        # (20%) budget leaves room for weights + KV.
+        model = Path(self.tmp.name) / "big.gguf"
+        model.write_bytes(b"x")
+        plans = self._compile(self._profile(str(model)), extra_patches=[
+            mock.patch("modelctl_vram.weights_bytes_on_disk",
+                       return_value=20 << 30),
+            mock.patch("modelctl_vram.estimate_from_parts",
+                       return_value={"total": 20 << 30, "kv_bytes": 1 << 30}),
+        ])
+        sources = {p.source for p in plans if p.source.startswith("cache-")}
+        self.assertEqual(sources, {"cache-small"})
+
+    def test_variants_honor_vram_limit_pct(self):
+        import modelctl_plans
+        with mock.patch("modelctl_capabilities.probe_backend",
+                        return_value={"features": {"moe_expert_cache": True}}), \
+             mock.patch("modelctl.load_defaults",
+                        return_value={"vram_limit_pct": 50, "primary_gpu": "SYCL0"}), \
+             mock.patch("modelctl.get_gpu_inventory", return_value=[]), \
+             mock.patch("modelctl_hardware.load_settings", return_value={}):
+            plans = modelctl_plans.compile_launch_plans(self._profile(),
+                                                        self._mock_hardware())
+        small = next(p for p in plans if p.source == "cache-small")
+        i = list(small.argv).index("--moe-cache-bytes")
+        # 50% limit, not the old hardcoded 0.9
+        self.assertEqual(small.argv[i + 1], str(int((32 << 30) * 0.5 * 0.20)))
+
+    def test_tier_candidate_passes_cache_request(self):
+        import modelctl_plans
+        import modelctl_tiers
+        profile = self._profile()
+        with mock.patch.object(modelctl_tiers, "plan_tiers",
+                               return_value=None) as pt, \
+             mock.patch("modelctl.get_gpu_inventory", return_value=[
+                 {"device": "SYCL0", "name": "B70", "total_bytes": 32 << 30,
+                  "free_bytes": 30 << 30}]), \
+             mock.patch("modelctl.load_defaults",
+                        return_value={"vram_limit_pct": 90, "primary_gpu": "SYCL0",
+                                      "ctx": 32768, "cache_type_k": "q8_0",
+                                      "cache_type_v": "q8_0"}):
+            modelctl_plans.compile_launch_plans(profile, self._mock_hardware())
+        pt.assert_called_once()
+        self.assertEqual(pt.call_args.kwargs.get("cache_request"),
+                         profile["moe_cache"])
+
+
+class TestTierApplyCacheWriteback(WebTestBase):
+    """M2b: tier-apply writes the planner's effective cache budgets back to
+    the profile so the server allocates exactly what the planner reserved."""
+
+    PLAN = {"tier": 3, "config": {"device": "", "split_mode": "layer",
+                                  "tensor_split": "8,3", "extra": "--fit off"},
+            "layout": [("SYCL0", 10.0, "experts")],
+            "warnings": [], "analysis": {}}
+
+    def _profile_with_cache(self, budgets):
+        p = dict(PROFILE)
+        p["moe_cache"] = {"mode": "auto", "gpu": {"budgets_bytes": budgets}}
+        (self.profiles_dir / "m1.json").write_text(json.dumps(p))
+
+    def _apply(self, plan):
+        import modelctl_tiers
+        with mock.patch.object(modelctl, "get_gpu_inventory", return_value=[
+                {"device": "SYCL0", "name": "big", "total_bytes": 32 << 30,
+                 "free_bytes": 30 << 30}]), \
+             mock.patch.object(modelctl_tiers, "plan_tiers", return_value=plan), \
+             mock.patch.object(modelctl, "save_profile") as save, \
+             mock.patch.object(modelctl, "generate_artifacts"), \
+             mock.patch.object(modelctl, "sync_all_backends"):
+            resp = self.client.post("/api/tiers/m1/apply", headers=self.auth)
+            job = self.wait_job(resp.json()["job"])
+        self.assertEqual(job["status"], "done")
+        return save.call_args[0][0]
+
+    def test_oversize_request_is_cleared(self):
+        self._profile_with_cache({"SYCL0": 20 << 30})
+        plan = dict(self.PLAN, cache_budgets=None,
+                    warnings=["cache budget 20.0 GiB exceeds usable VRAM"])
+        saved = self._apply(plan)
+        self.assertEqual(saved["moe_cache"]["gpu"]["budgets_bytes"], {})
+
+    def test_request_normalized_to_planner_budgets(self):
+        self._profile_with_cache({"SYCL0": 4 << 30, "SYCL1": 6 << 30})
+        effective = {"SYCL0": 6 << 30, "SYCL1": 6 << 30}
+        plan = dict(self.PLAN, cache_budgets=effective)
+        saved = self._apply(plan)
+        self.assertEqual(saved["moe_cache"]["gpu"]["budgets_bytes"], effective)

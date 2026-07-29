@@ -272,3 +272,69 @@ class TestAutoCtx(unittest.TestCase):
         rec = modelctl_tiers.auto_ctx(self._write_model(), 1 << 20, "q8_0")
         self.assertEqual(rec["ctx"], modelctl_tiers.AUTO_CTX_FLOOR)
         self.assertFalse(rec["fits"])
+
+
+class TestCacheRequest(unittest.TestCase):
+    """cache_request: the planner reserves a UNIFORM per-GPU cache budget
+    (the fork applies one --moe-cache-bytes to every device) before static
+    expert placement."""
+
+    def _req(self, budgets, mode="auto"):
+        return {"mode": mode, "gpu": {"budgets_bytes": budgets}}
+
+    def _plan(self, cache_request=None, **kw):
+        args = dict(profile=profile(ctx=kw.pop("ctx", 8192)),
+                    inventory=INVENTORY, limit_pct=90, primary="SYCL0",
+                    ram_available=kw.pop("ram", 64 * GIB),
+                    layout=kw.pop("layout", moe_layout(40, 1.2)))
+        return modelctl_tiers.plan_tiers(cache_request=cache_request, **args)
+
+    def test_budget_subtracted_shrinks_gpu_share(self):
+        no_cache = self._plan()
+        with_cache = self._plan(self._req({"SYCL0": 8 * GIB}))
+        # uniform budget reserved on EVERY participating device
+        self.assertEqual(with_cache["cache_budgets"],
+                         {"SYCL0": 8 * GIB, "SYCL1": 8 * GIB})
+        rows_nc = {l: g for l, g, _ in no_cache["layout"]}
+        rows_wc = {l: g for l, g, _ in with_cache["layout"]}
+        # reserved cache pushes more expert layers to CPU
+        self.assertGreater(rows_wc["CPU"], rows_nc["CPU"])
+
+    def test_per_device_budgets_collapse_to_uniform_max(self):
+        plan = self._plan(self._req({"SYCL0": 4 * GIB, "SYCL1": 6 * GIB}))
+        self.assertEqual(plan["cache_budgets"],
+                         {"SYCL0": 6 * GIB, "SYCL1": 6 * GIB})
+        self.assertEqual(plan["analysis"]["cache_budgets_gib"],
+                         {"SYCL0": 6.0, "SYCL1": 6.0})
+
+    def test_oversize_budget_disables_cache_loudly(self):
+        # B580 usable is ~10.7 GiB; 20 GiB can't be reserved there, and the
+        # fork has no per-device budgets -- so the whole cache is disabled.
+        req = self._req({"SYCL0": 20 * GIB})
+        plan = self._plan(req)
+        self.assertIsNone(plan["cache_budgets"])
+        self.assertIsNone(plan["analysis"]["cache_budgets_gib"])
+        self.assertTrue(any("disabled" in w for w in plan["warnings"]))
+        # ...and the placement is exactly the no-cache placement
+        no_cache = self._plan()
+        self.assertEqual(plan["tier"], no_cache["tier"])
+        self.assertEqual(plan["config"], no_cache["config"])
+
+    def test_layout_has_cache_rows(self):
+        plan = self._plan(self._req({"SYCL0": 8 * GIB}))
+        rows = {l: (g, d) for l, g, d in plan["layout"]}
+        self.assertIn("SYCL0 (cache)", rows)
+        self.assertIn("SYCL1 (cache)", rows)
+        self.assertEqual(rows["SYCL0 (cache)"][0], 8.0)
+        self.assertIn("cache", rows["SYCL0 (cache)"][1])
+
+    def test_off_zero_and_absent_budgets(self):
+        for req in (None,
+                    self._req({}, mode="off"),
+                    self._req({"SYCL0": 0}),
+                    self._req({})):
+            plan = self._plan(req)
+            self.assertIsNone(plan["cache_budgets"], req)
+            # docstring contract: the key is always present, value or None
+            self.assertIn("cache_budgets_gib", plan["analysis"])
+            self.assertIsNone(plan["analysis"]["cache_budgets_gib"], req)
