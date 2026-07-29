@@ -73,6 +73,40 @@ class TestProbeRaw(unittest.TestCase):
             self.assertIsNotNone(result)
             self.assertTrue(result["features"]["moe_expert_cache"])
 
+    def test_retries_with_env_script_after_bare_failure(self):
+        # SYCL binaries crash without their oneAPI env even for the probe;
+        # _probe_raw must retry with the launch path's env scripts.
+        caps_json = json.dumps({"schema": 1,
+                                "features": {"moe_expert_cache": True}})
+        with TemporaryDirectory() as d:
+            script = Path(d) / "fake-server"
+            script.write_text(
+                "#!/bin/sh\n"
+                '[ -n "$PROBE_TEST_MARKER" ] || exit 1\n'
+                f"echo '{caps_json}'\n")
+            script.chmod(0o755)
+            import modelctl
+            with mock.patch.object(modelctl, "find_env_script_candidates",
+                                   return_value=["/fake/env.sh"]), \
+                 mock.patch.object(modelctl, "source_env_script",
+                                   return_value={"PROBE_TEST_MARKER": "1"}):
+                result = modelctl_capabilities._probe_raw(str(script))
+            self.assertIsNotNone(result)
+            self.assertTrue(result["features"]["moe_expert_cache"])
+
+    def test_env_fallback_not_used_when_bare_probe_works(self):
+        caps_json = json.dumps({"schema": 1, "features": {}})
+        with TemporaryDirectory() as d:
+            script = Path(d) / "fake-server"
+            script.write_text(f"#!/bin/sh\necho '{caps_json}'\n")
+            script.chmod(0o755)
+            import modelctl
+            with mock.patch.object(
+                    modelctl, "find_env_script_candidates",
+                    side_effect=AssertionError("should not be called")):
+                result = modelctl_capabilities._probe_raw(str(script))
+            self.assertIsNotNone(result)
+
 
 class TestProbeBackend(unittest.TestCase):
     def setUp(self):

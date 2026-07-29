@@ -62,16 +62,41 @@ def _version_string(binary_path: str) -> str:
         return ""
 
 
-def _probe_raw(binary_path: str) -> dict | None:
-    """Run --modelctl-capabilities and parse JSON, or None on failure."""
+def _run_probe(binary_path: str, extra_env: dict | None) -> dict | None:
+    env = None
+    if extra_env:
+        env = dict(os.environ)
+        env.update(extra_env)
     try:
         r = subprocess.run([binary_path, "--modelctl-capabilities"],
-                           capture_output=True, text=True, timeout=10)
+                           capture_output=True, text=True, timeout=10, env=env)
         if r.returncode != 0:
             return None
         return json.loads(r.stdout)
     except (json.JSONDecodeError, subprocess.TimeoutExpired, OSError):
         return None
+
+
+def _probe_raw(binary_path: str) -> dict | None:
+    """Run --modelctl-capabilities and parse JSON, or None on failure.
+
+    SYCL builds initialize the backend registry (and thus the GPU driver)
+    even for the probe, so they crash without their oneAPI env. Retry with
+    the env scripts the launch path uses before giving up."""
+    raw = _run_probe(binary_path, None)
+    if raw is not None:
+        return raw
+    try:
+        import modelctl
+        for script in modelctl.find_env_script_candidates():
+            env = modelctl.source_env_script(script)
+            if env:
+                raw = _run_probe(binary_path, env)
+                if raw is not None:
+                    return raw
+    except ImportError:
+        pass
+    return None
 
 
 def _classify_probe_failure(binary_path: str) -> dict:

@@ -1301,18 +1301,41 @@ class TestCacheVariants(WebTestBase):
         self.assertEqual(small.argv[i + 1], str(int(usable * 0.20)))
 
     def test_infeasible_variants_skipped(self):
-        # 20 GiB static footprint on a 28.8 GiB-usable card: only the small
-        # (20%) budget leaves room for weights + KV.
+        # GPU-resident floor (KV 20 GiB + overhead 2 GiB) on a 28.8
+        # GiB-usable card: only the small (20%) budget leaves room.
         model = Path(self.tmp.name) / "big.gguf"
         model.write_bytes(b"x")
         plans = self._compile(self._profile(str(model)), extra_patches=[
             mock.patch("modelctl_vram.weights_bytes_on_disk",
                        return_value=20 << 30),
             mock.patch("modelctl_vram.estimate_from_parts",
-                       return_value={"total": 20 << 30, "kv_bytes": 1 << 30}),
+                       return_value={"total": 24 << 30,
+                                     "kv_bytes": 20 << 30,
+                                     "overhead": 2 << 30}),
         ])
         sources = {p.source for p in plans if p.source.startswith("cache-")}
         self.assertEqual(sources, {"cache-small"})
+
+    def test_oversized_spill_model_still_gets_variants(self):
+        # Regression: a model whose FULL static footprint exceeds one card
+        # must still get cache variants -- weights spill to CPU, so the bar
+        # is KV + overhead + budget, not total + budget. This is the MoE
+        # spill case the cache exists for.
+        model = Path(self.tmp.name) / "huge.gguf"
+        model.write_bytes(b"x")
+        plans = self._compile(self._profile(str(model)), extra_patches=[
+            mock.patch("modelctl_vram.weights_bytes_on_disk",
+                       return_value=54 << 30),
+            mock.patch("modelctl_vram.estimate_from_parts",
+                       return_value={"total": 76 << 30,
+                                     "kv_bytes": 6 << 30,
+                                     "overhead": 6 << 30}),
+        ])
+        variants = [p for p in plans if p.source.startswith("cache-")]
+        self.assertTrue(variants, "spill model lost all cache variants")
+        self.assertTrue(all(p.label.endswith(p.source) for p in variants))
+        for p in variants:
+            self.assertEqual(list(p.argv).count("--moe-cache-bytes"), 1)
 
     def test_variants_honor_vram_limit_pct(self):
         import modelctl_plans

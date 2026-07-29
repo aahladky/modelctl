@@ -99,6 +99,9 @@ def _plan_label(config, source, gpu_names=None):
     if source == "tier-planner":
         tier = config.get("_tier", "?")
         return f"tier {tier} plan"
+    if source.startswith("cache-"):
+        base = f"{device} only" if device else source
+        return f"{base} {source}"
 
     if split and "," in split:
         names = ",".join(gpu_names) if gpu_names else device
@@ -473,8 +476,12 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
                 except Exception:
                     hw_settings = {}
                 dev_cfg = hw_settings.get("devices", {})
-                # Static footprint for the feasibility check: weights + KV +
-                # overhead must fit in what the cache budget leaves behind.
+                # GPU-resident floor for the feasibility check: KV cache +
+                # compute overhead stay on the card even in a spill plan;
+                # the cache budget must fit in what they leave behind.
+                # (Weights may spill to CPU, so the full static footprint
+                # is NOT the right bar -- it would kill every variant for
+                # exactly the oversized MoE models the cache is for.)
                 cfg0 = profile.get("config", {})
                 weights = 0
                 model_path = profile.get("model_path", "")
@@ -483,13 +490,13 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
                         weights = modelctl_vram.weights_bytes_on_disk(model_path)
                     except Exception:
                         pass
-                static_footprint = 0
+                gpu_resident = 0
                 if weights:
                     est = modelctl_vram.estimate_from_parts(
                         weights, int(cfg0.get("ctx", 8192)),
                         cfg0.get("cache_type_k", "q8_0"),
                         cache_type_v=cfg0.get("cache_type_v", "q8_0"))
-                    static_footprint = est["total"]
+                    gpu_resident = est["kv_bytes"] + est["overhead"]
                 gpus_enabled = [g for g in hardware.gpus if g.enabled]
                 for frac, label_suffix in ((0.20, "cache-small"),
                                              (0.50, "cache-balanced"),
@@ -502,9 +509,9 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
                         budget = int(usable * frac)
                         if budget < 64 * (1 << 20):  # minimum 64 MiB
                             continue
-                        if (static_footprint
-                                and static_footprint + budget > usable):
-                            continue  # infeasible: model + cache exceed the card
+                        if (gpu_resident
+                                and gpu_resident + budget > usable):
+                            continue  # infeasible: cache crowds out KV/overhead
                         # Pass the budget through the STRUCTURED moe_cache
                         # path, not a raw extra flag -- build_server_args
                         # would otherwise emit two --moe-cache-bytes values.
