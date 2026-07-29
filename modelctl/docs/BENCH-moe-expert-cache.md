@@ -42,3 +42,25 @@ token, so caching the CPU-resident 19/47 layers pays off per token.
 3. Throughput: `llama-bench` or server timings, prompt + gen.
 4. Check `moe_cache_*` metrics (`/metrics`) for hit ratio on the
    CPU-resident layers.
+
+## Post-C1-fix validation, 2026-07-29 (fork @ f42f2fe4e, qwen3-5-122b-a10b-ud)
+
+First run with *correct* cached weights. 19/48 expert layers forced to
+CPU (`-ot blk.(2[9]|3[0-9]|4[0-7]).ffn_.*_exps=CPU`), 1 GiB cache, SLRU,
+admission=1, `--metrics` on.
+
+- **Correctness: PASS.** All final `content` outputs bit-identical
+  cache-off vs cache-on (and vs a cache-off/off control). The one
+  reasoning-stream divergence observed also occurs off-vs-off — baseline
+  SYCL nondeterminism, not the cache.
+- **Cache engages only for batches >= the op-offload threshold (~32
+  tokens).** Short prompts and single-user decode (batch 1) run
+  CPU-expert MUL_MAT_ID on the CPU backend; the scheduler hook only
+  fires on the GPU split path. Cache benefit is prefill/batched-decode
+  only under current upstream gating.
+- **Throughput: neutral here.** prompt ~130-210 t/s and gen ~22 t/s
+  with and without cache; hit ratio only 9.6% — 1 GiB (441 slots)
+  thrashes against this model's expert working set. Laguna's gains do
+  not generalize to every geometry; budget sizing matters.
+- Metrics, /cache/reset, and the modelctl web telemetry + reset proxy
+  all verified end-to-end.
