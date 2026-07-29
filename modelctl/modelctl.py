@@ -2135,12 +2135,37 @@ def build_server_args(profile):
         if profile.get("mtp_path"):
             args.extend(["--spec-draft-model", str(profile["mtp_path"])])
     # MoE expert cache flags from structured moe_cache settings.
-    args.extend(build_moe_cache_args(profile))
+    moe_cache_args = build_moe_cache_args(profile)
+    args.extend(moe_cache_args)
     if cfg.get("extra"):
         # Extra is a raw string the user typed; split it safely to preserve
         # quoted values with spaces, but only if they provided it.
-        args.extend(shlex.split(cfg["extra"]))
+        extra_toks = shlex.split(cfg["extra"])
+        if moe_cache_args:
+            # Structured moe_cache settings take precedence over raw extra
+            # flags: drop any --moe-cache-* tokens from extra so the two
+            # sources never emit conflicting values (llama.cpp is last-wins,
+            # which would make the effective budget order-dependent).
+            extra_toks = _strip_moe_cache_flags(extra_toks)
+        args.extend(extra_toks)
     return args
+
+
+def _strip_moe_cache_flags(tokens):
+    """Remove --moe-cache-* flags (and their values) from an argv token list."""
+    out = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("--moe-cache"):
+            i += 1
+            # "--flag value" drops the value too; "--flag=value" is complete.
+            if "=" not in tok and i < len(tokens) and not tokens[i].startswith("--"):
+                i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return out
 
 
 def build_moe_cache_args(profile, plan=None, capabilities=None):
@@ -2165,8 +2190,8 @@ def build_moe_cache_args(profile, plan=None, capabilities=None):
         plan_mc = plan.decision_data.get("moe_cache", {})
 
     # Resolve effective settings: plan overrides > profile > defaults.
+    # (decode.miss_execution has no fork CLI flag, so no decode section here.)
     gpu_section = {**mc.get("gpu", {}), **plan_mc.get("gpu", {})}
-    decode_section = {**mc.get("decode", {}), **plan_mc.get("decode", {})}
     prefill_section = {**mc.get("prefill", {}), **plan_mc.get("prefill", {})}
     storage_section = {**mc.get("storage", {}), **plan_mc.get("storage", {})}
 
@@ -2180,17 +2205,21 @@ def build_moe_cache_args(profile, plan=None, capabilities=None):
     cache_policy_flag = cli.get("cache_policy", "--moe-cache-policy")
     admission_flag = cli.get("admission_misses", "--moe-cache-admission-misses")
     prefill_admission_flag = cli.get("prefill_admission", "--moe-cache-prefill-admission")
-    miss_exec_flag = cli.get("miss_execution", "--moe-cache-miss-execution")
 
     args = []
 
-    # Per-device cache budgets.
+    # Per-device cache budgets.  The fork's --moe-cache-bytes is a single
+    # UNIFORM per-GPU budget: server.cpp copies it into one global
+    # (g_moe_cache_budget_bytes) and ggml-sycl lazy-init applies that same
+    # value to EVERY device's cache instance.  There is no per-device flag,
+    # so per-device budgets collapse to their max -- summing would hand each
+    # card MORE cache than the tier planner reserved there, letting the
+    # cache collide with statically placed experts (OOM).
     budgets = gpu_section.get("budgets_bytes", {})
     if budgets:
-        for device, budget_bytes in sorted(budgets.items()):
-            if budget_bytes and budget_bytes > 0:
-                args.extend([f"--moe-cache-device", device,
-                             cache_bytes_flag, str(budget_bytes)])
+        per_gpu_budget = max((b for b in budgets.values() if b > 0), default=0)
+        if per_gpu_budget > 0:
+            args.extend([cache_bytes_flag, str(per_gpu_budget)])
 
     policy = gpu_section.get("policy", "slru")
     if policy:
@@ -2203,17 +2232,11 @@ def build_moe_cache_args(profile, plan=None, capabilities=None):
     prefill_admit = prefill_section.get("admit_to_gpu_cache", False)
     args.extend([prefill_admission_flag, "on" if prefill_admit else "off"])
 
-    miss_exec = decode_section.get("miss_execution", "cpu")
-    if miss_exec:
-        args.extend([miss_exec_flag, miss_exec])
-
-    # Storage mode: mmap is the default; --load-mode maps to the upstream
-    # llama.cpp flag.  Only emit when explicitly set.
+    # Storage mode: the fork uses --no-mmap for fully-resident loading.
+    # Only emit when explicitly set (mmap is the default).
     storage_mode = storage_section.get("mode", "mmap")
-    if storage_mode == "mmap":
-        args.extend(["--load-mode", "mmap"])
-    elif storage_mode == "mlock":
-        args.extend(["--load-mode", "mlock"])
+    if storage_mode == "mlock":
+        args.extend(["--no-mmap"])
 
     return args
 

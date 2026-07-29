@@ -318,6 +318,9 @@ def _make_plan(profile, config, source, hardware, extra_warnings=(), decision=No
         "cache_type_v": merged.get("cache_type_v", "q8_0"),
         "fit": merged.get("fit", "on"),
         "extra": merged.get("extra", ""),
+        # Cache configuration is part of plan identity: a budget or policy
+        # change must produce a different plan ID.
+        "moe_cache": profile.get("moe_cache", {}),
         "env": sorted(profile.get("env") or []),
     }
     pid = _plan_id(normalized)
@@ -441,7 +444,8 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
         inventory = modelctl.get_gpu_inventory()
         primary = modelctl.resolve_primary_gpu(inventory, d)
         tier = modelctl_tiers.plan_tiers(
-            profile, inventory, d["vram_limit_pct"], primary)
+            profile, inventory, d["vram_limit_pct"], primary,
+            cache_request=profile.get("moe_cache"))
         if tier and tier.get("config"):
             tc = dict(tier["config"])
             tc["_tier"] = tier.get("tier", "?")
@@ -458,29 +462,63 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
     if mc.get("mode", "off") != "off":
         try:
             import modelctl_capabilities
+            import modelctl_hardware
             binary = profile.get("binary") or modelctl.LLAMA_SERVER_BIN
             caps = modelctl_capabilities.probe_backend(binary)
             if modelctl_capabilities.is_cache_capable(caps):
+                d = modelctl.load_defaults()
+                limit_pct = d.get("vram_limit_pct", 90)
+                try:
+                    hw_settings = modelctl_hardware.load_settings()
+                except Exception:
+                    hw_settings = {}
+                dev_cfg = hw_settings.get("devices", {})
+                # Static footprint for the feasibility check: weights + KV +
+                # overhead must fit in what the cache budget leaves behind.
+                cfg0 = profile.get("config", {})
+                weights = 0
+                model_path = profile.get("model_path", "")
+                if model_path and os.path.exists(model_path):
+                    try:
+                        weights = modelctl_vram.weights_bytes_on_disk(model_path)
+                    except Exception:
+                        pass
+                static_footprint = 0
+                if weights:
+                    est = modelctl_vram.estimate_from_parts(
+                        weights, int(cfg0.get("ctx", 8192)),
+                        cfg0.get("cache_type_k", "q8_0"),
+                        cache_type_v=cfg0.get("cache_type_v", "q8_0"))
+                    static_footprint = est["total"]
                 gpus_enabled = [g for g in hardware.gpus if g.enabled]
                 for frac, label_suffix in ((0.20, "cache-small"),
                                              (0.50, "cache-balanced"),
                                              (0.80, "cache-large")):
                     for g in gpus_enabled:
-                        usable = g.total_bytes * 0.9  # VRAM limit pct
+                        # Honor the configured per-card limit and hardware
+                        # reserve -- the same reality the tier planner uses.
+                        usable = (g.total_bytes * limit_pct / 100.0
+                                  - dev_cfg.get(g.device, {}).get("reserve_bytes", 0))
                         budget = int(usable * frac)
                         if budget < 64 * (1 << 20):  # minimum 64 MiB
                             continue
-                        # Build a plan with this cache budget.
+                        if (static_footprint
+                                and static_footprint + budget > usable):
+                            continue  # infeasible: model + cache exceed the card
+                        # Pass the budget through the STRUCTURED moe_cache
+                        # path, not a raw extra flag -- build_server_args
+                        # would otherwise emit two --moe-cache-bytes values.
+                        variant_mc = {**mc,
+                                      "gpu": {**mc.get("gpu", {}),
+                                              "budgets_bytes": {g.device: budget}}}
                         cache_cfg = {
                             "device": g.device,
                             "split_mode": "",
                             "tensor_split": "",
-                            "extra": f"--moe-cache-bytes {budget}",
                         }
-                        cache_cfg["_moe_cache_budget"] = budget
-                        cache_cfg["_moe_cache_device"] = g.device
-                        plan = _make_plan(profile, cache_cfg,
-                                          label_suffix, hardware)
+                        plan = _make_plan({**profile, "moe_cache": variant_mc},
+                                          cache_cfg, label_suffix, hardware,
+                                          decision={"moe_cache": variant_mc})
                         add(plan)
         except Exception:
             pass
@@ -551,7 +589,10 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
             if ngl > 0:
                 # Preserve the user's non-placement extra flags (ubatch-size
                 # etc.) -- only -ngl is planner-owned here.
-                import modelctl_tiers
+                # NB: no local "import modelctl_tiers" here -- a function-
+                # local import shadows the module-level one and makes the
+                # section-B plan_tiers() call above die with
+                # UnboundLocalError (silently swallowed by its except).
                 _, other_flags = modelctl_tiers.split_extra_flags(
                     profile.get("config", {}).get("extra", ""))
                 spill_extra = " ".join([f"-ngl {ngl}"] + other_flags)

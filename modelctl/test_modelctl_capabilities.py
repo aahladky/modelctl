@@ -191,14 +191,45 @@ class TestMoeCacheArgsIntegration(unittest.TestCase):
             }
         }
         args = modelctl.build_moe_cache_args(profile)
-        self.assertIn("--moe-cache-device", args)
         self.assertIn("--moe-cache-bytes", args)
         self.assertIn("--moe-cache-policy", args)
         self.assertIn("slru", args)
-        self.assertIn("--moe-cache-miss-execution", args)
-        self.assertIn("cpu", args)
-        self.assertIn("--load-mode", args)
-        self.assertIn("mmap", args)
+
+    def test_multiple_budgets_emit_uniform_max_not_sum(self):
+        # The fork applies --moe-cache-bytes per GPU (one global copied into
+        # every device's cache), so per-device budgets collapse to their max.
+        # Summing would over-allocate on every card vs the planner's reserve.
+        import modelctl
+        profile = {
+            "moe_cache": {
+                "mode": "auto",
+                "gpu": {"budgets_bytes": {"SYCL0": 10 * (1 << 30),
+                                          "SYCL1": 4 * (1 << 30)}},
+            }
+        }
+        args = modelctl.build_moe_cache_args(profile)
+        self.assertEqual(args.count("--moe-cache-bytes"), 1)
+        i = args.index("--moe-cache-bytes")
+        self.assertEqual(args[i + 1], str(10 * (1 << 30)))
+
+    def test_structured_budget_overrides_extra_flag(self):
+        # build_server_args: structured moe_cache settings take precedence --
+        # raw --moe-cache-* tokens in extra are dropped, not duplicated.
+        import modelctl
+        profile = {
+            "model_path": "/x.gguf",
+            "config": {"device": "", "split_mode": "", "tensor_split": "",
+                       "ctx": 8192, "flash_attn": "auto", "fit": "on",
+                       "mtp": "off",
+                       "extra": "--moe-cache-bytes 123 --verbose-prompt"},
+            "moe_cache": {"mode": "auto",
+                          "gpu": {"budgets_bytes": {"SYCL0": 10 * (1 << 30)}}},
+        }
+        args = modelctl.build_server_args(profile)
+        self.assertEqual(args.count("--moe-cache-bytes"), 1)
+        i = args.index("--moe-cache-bytes")
+        self.assertEqual(args[i + 1], str(10 * (1 << 30)))
+        self.assertIn("--verbose-prompt", args)
 
     def test_capabilities_override_flag_names(self):
         import modelctl
@@ -218,7 +249,6 @@ class TestMoeCacheArgsIntegration(unittest.TestCase):
                 "cache_policy": "--custom-policy",
                 "admission_misses": "--custom-admission",
                 "prefill_admission": "--custom-prefill-admission",
-                "miss_execution": "--custom-miss-exec",
             }
         }
         args = modelctl.build_moe_cache_args(profile, capabilities=caps)
@@ -226,7 +256,6 @@ class TestMoeCacheArgsIntegration(unittest.TestCase):
         self.assertIn("--custom-policy", args)
         self.assertIn("--custom-admission", args)
         self.assertIn("--custom-prefill-admission", args)
-        self.assertIn("--custom-miss-exec", args)
 
 
 class TestPreflightMoeCache(unittest.TestCase):

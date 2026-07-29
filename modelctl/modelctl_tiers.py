@@ -287,7 +287,12 @@ def plan_tiers(profile, inventory, limit_pct, primary, ram_available=None,
       {tier, config: {device, split_mode, tensor_split, extra},
        layout: [(label, gib, description)], warnings: [...],
        analysis: {weights_gib, kv_gib, is_moe, n_layers, ram_budget_gib,
-                  cache_budgets_gib: {...} or None}}
+                  cache_budgets_gib: {...} or None},
+       cache_budgets: {dev: bytes} or None}
+    cache_budgets is the effective UNIFORM per-GPU reserve the planner
+    actually accounted for (None when the cache is off or didn't fit);
+    apply paths should write it back to the profile so the server
+    allocates exactly what the planner reserved.
     """
     cfg = profile.get("config", {})
     model_path = profile.get("model_path")
@@ -342,22 +347,33 @@ def plan_tiers(profile, inventory, limit_pct, primary, ram_available=None,
     _, other_flags = split_extra_flags(cfg.get("extra", ""))
     other = " ".join(other_flags)
 
-    # Extract per-device dynamic cache budgets from cache_request.
-    # The cache reserve is subtracted from each device's usable budget
-    # BEFORE static expert layers are assigned, so the cache and static
-    # experts never fight for the same VRAM.
+    # Extract the dynamic cache budget from cache_request.  The llama.cpp
+    # fork's --moe-cache-bytes is a single UNIFORM per-GPU budget: one global
+    # (g_moe_cache_budget_bytes) is applied to every device's lazily-created
+    # cache instance -- there is no per-device flag.  So per-device requests
+    # collapse to their max, and that uniform budget must be reserved on
+    # EVERY participating device BEFORE static expert layers are assigned,
+    # or the runtime cache can collide with statically placed experts (OOM).
+    # If the uniform budget doesn't fit on even one device, the cache is
+    # disabled for the whole plan -- a half-reserved cache would diverge
+    # from what the server actually allocates.
     cache_budgets = {}
     if cache_request and cache_request.get("mode", "off") != "off":
-        for dev, budget in cache_request.get("gpu", {}).get("budgets_bytes", {}).items():
-            if budget > 0 and dev in usable:
-                if budget > usable[dev]:
-                    warnings.append(
-                        f"cache budget {budget / (1<<30):.1f} GiB for {dev} "
-                        f"exceeds usable VRAM ({usable[dev] / (1<<30):.1f} GiB); "
-                        "cache disabled for this device")
-                else:
-                    cache_budgets[dev] = budget
-                    usable[dev] -= budget
+        requested = [b for b in cache_request.get("gpu", {})
+                     .get("budgets_bytes", {}).values() if b > 0]
+        if requested:
+            uniform = max(requested)
+            too_small = sorted(d for d, u in usable.items() if uniform > u)
+            if too_small:
+                warnings.append(
+                    f"cache budget {uniform / (1<<30):.1f} GiB exceeds usable "
+                    f"VRAM on {', '.join(too_small)} -- the fork applies one "
+                    "per-GPU budget to every device, so the cache is disabled "
+                    "for this plan")
+            else:
+                cache_budgets = {d: uniform for d in usable}
+                for d in usable:
+                    usable[d] -= uniform
     if cache_budgets:
         for dev, b in cache_budgets.items():
             if b > usable[dev]:
@@ -368,9 +384,9 @@ def plan_tiers(profile, inventory, limit_pct, primary, ram_available=None,
 
     analysis = {"weights_gib": _gib(weights), "kv_gib": _gib(kv),
                 "is_moe": layout["is_moe"], "n_layers": layout["block_count"],
-                "ram_budget_gib": _gib(ram_budget)}
-    if cache_budgets:
-        analysis["cache_budgets_gib"] = {d: _gib(b) for d, b in cache_budgets.items()}
+                "ram_budget_gib": _gib(ram_budget),
+                "cache_budgets_gib": ({d: _gib(b) for d, b in cache_budgets.items()}
+                                      if cache_budgets else None)}
     if layout.get("unknown_type_tensors"):
         warnings.append(
             f"{layout['unknown_type_tensors']} tensors use quant types this "
@@ -378,7 +394,8 @@ def plan_tiers(profile, inventory, limit_pct, primary, ram_available=None,
 
     def result(tier, config, layout_rows):
         return {"tier": tier, "config": config, "layout": layout_rows,
-                "warnings": warnings, "analysis": analysis}
+                "warnings": warnings, "analysis": analysis,
+                "cache_budgets": dict(cache_budgets) if cache_budgets else None}
 
     # --- tier 1: primary GPU alone --------------------------------------
     if total <= usable[primary]:

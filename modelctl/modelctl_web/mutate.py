@@ -34,6 +34,26 @@ def submit_tier_apply(runner, name):
                                           cache_request=profile.get("moe_cache"))
         if plan is None:
             raise RuntimeError(f"couldn't analyze model layout for '{name}'")
+        # Keep the runtime consistent with the plan: the planner reserves a
+        # uniform per-GPU cache budget (the fork applies one budget to every
+        # device) and may disable the cache entirely when it doesn't fit.
+        # Write the effective budgets back so build_moe_cache_args emits
+        # exactly what the planner reserved -- never the stale request.
+        mc = profile.get("moe_cache", {})
+        if mc.get("mode", "off") != "off":
+            requested = mc.get("gpu", {}).get("budgets_bytes", {})
+            effective = plan.get("cache_budgets") or {}
+            if effective != requested:
+                if not effective:
+                    ctx.log("planner disabled the expert cache (budget "
+                            "exceeds usable VRAM); clearing moe_cache "
+                            "budgets so the server matches the plan")
+                else:
+                    gib = {d: round(b / (1 << 30), 1) for d, b in effective.items()}
+                    ctx.log(f"planner reserved a uniform per-GPU cache "
+                            f"budget: {gib} GiB")
+                mc.setdefault("gpu", {})["budgets_bytes"] = effective
+                profile["moe_cache"] = mc
         cfg = profile.get("config", {})
         cfg.update(plan["config"])
         profile["config"] = cfg
