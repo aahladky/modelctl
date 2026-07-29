@@ -453,7 +453,9 @@ def create_app(token=None, store=None, runner=None):
             profile = None
             try:
                 profile = modelctl.load_profile(mid)
-            except Exception:
+            except (Exception, SystemExit):
+                # llama-swap may run models with no modelctl profile;
+                # load_profile sys.exit()s on those (not an Exception).
                 pass
             if not profile:
                 continue
