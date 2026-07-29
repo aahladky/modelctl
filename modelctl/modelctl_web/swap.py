@@ -111,6 +111,20 @@ class LlamaSwapClient:
             return {"state": "stopped", "worker": None}
         return {"state": "unregistered", "worker": None}
 
+    @staticmethod
+    def _worker_port(worker):
+        """Upstream port for a running model. Newer llama-swap /running
+        payloads omit "port"/"pid"/"started" and expose the upstream as
+        "proxy": "http://localhost:PORT" -- derive the port from that."""
+        port = worker.get("port")
+        if port:
+            return port
+        proxy = worker.get("proxy") or ""
+        try:
+            return int(urllib.parse.urlparse(proxy).port)
+        except (TypeError, ValueError):
+            return None
+
     def runtime_state(self):
         """Aggregate state for all registered + running models.
 
@@ -142,7 +156,7 @@ class LlamaSwapClient:
                 "registered": mid in reg_ids,
                 "running": mid in run_map,
                 "pid": worker.get("pid") if worker else None,
-                "port": worker.get("port") if worker else None,
+                "port": self._worker_port(worker) if worker else None,
                 "started": worker.get("started") if worker else None,
                 "state_class": self._state_class(raw),
             }

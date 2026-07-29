@@ -298,6 +298,19 @@ class TestSwapClient(unittest.TestCase):
         self.assertFalse(state["m2"]["running"])
         self.assertTrue(state["m2"]["registered"])
 
+    def test_runtime_state_derives_port_from_proxy(self):
+        # Newer llama-swap /running payloads have no "port" key; the
+        # upstream address is in "proxy". The cache-metric scrape depends
+        # on this port being populated.
+        from modelctl_web.swap import LlamaSwapClient
+        client = LlamaSwapClient()
+        with mock.patch.object(client, "registered_models", return_value=[]), \
+             mock.patch.object(client, "running_models",
+                               return_value=[{"model": "m1", "state": "ready",
+                                              "proxy": "http://localhost:5815"}]):
+            state = client.runtime_state()
+        self.assertEqual(state["m1"]["port"], 5815)
+
     def test_runtime_state_empty_when_swap_down(self):
         from modelctl_web.swap import LlamaSwapClient, ModelctlSwapError
         client = LlamaSwapClient()
