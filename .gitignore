@@ -10,5 +10,8 @@ workspace-tools/
 touchpad_mouse/
 scripts/
 .claude/
+firecrawl/
+kvm-agent/
+kvm-working-branch/
 *.log
 *.pid
