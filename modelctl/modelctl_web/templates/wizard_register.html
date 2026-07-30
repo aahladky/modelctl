@@ -16,6 +16,21 @@
   </table>
 </div>
 
+{% if w.registration_error %}
+<div class="card">
+  <p class="err"><strong>Registration failed:</strong> {{ w.registration_error }}</p>
+  <p>The profile <strong>{{ profile.name }}</strong> is saved and valid — only
+  the registration step failed. Nothing was rolled back and nothing was lost.
+  Retry, or leave it unregistered and register it later from the profile page.</p>
+  <div class="actions">
+    <form method="post" action="/add/{{ w.wizard_id }}/retry/register">
+      <button type="submit" class="btn btn-primary">Retry registration</button>
+    </form>
+    <a href="/profiles/{{ profile.name }}" class="btn">Go to the profile</a>
+    <a href="/profiles/{{ profile.name }}/plans" class="btn">Pick a different plan</a>
+  </div>
+</div>
+{% else %}
 <div class="card">
   <p>This will register <strong>{{ profile.name }}</strong> with llama-swap
   and perform a warm-load verification.</p>
@@ -26,6 +41,7 @@
     <button type="submit" class="btn btn-primary">Register & Verify</button>
   </div>
 </form>
+{% endif %}
 {% else %}
 <p class="error">Profile not found.</p>
 {% endif %}

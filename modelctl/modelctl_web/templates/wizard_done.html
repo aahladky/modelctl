@@ -3,16 +3,65 @@
 {% block content %}
 <h1>Add Model: Complete</h1>
 
-<div class="card ok">
+<div class="card">
   <h3>{{ w.profile_name }}</h3>
-  <p>Model successfully added and registered.</p>
+  {% if w.registration_complete %}
+  <p class="ok">Registered with llama-swap and warm-loading.</p>
+  {% else %}
+  <p class="warn">The profile was created but not registered.</p>
+  {% endif %}
+
   <table>
-    <tr><td><strong>Profile</strong></td><td>{{ w.profile_name }}</td></tr>
-    {% if w.registration_complete %}
-    <tr><td><strong>Status</strong></td><td>Registered with llama-swap</td></tr>
-    {% endif %}
+    <tr><td><strong>profile</strong></td><td><code>{{ w.profile_name }}</code></td></tr>
+    <tr><td><strong>endpoint</strong></td>
+        <td>{% if w.endpoint %}<code>{{ w.endpoint }}</code>
+            <br><span class="muted">request model
+              <code>{{ w.profile_name }}</code></span>
+            {% else %}<span class="muted">not registered</span>{% endif %}</td></tr>
+    <tr><td><strong>selected plan</strong></td>
+        <td>{% if w.selected_plan_id %}
+              {{ plan_label or '—' }}
+              <br><span class="muted">{{ w.selected_plan_id }}</span>
+            {% else %}<span class="muted">profile default</span>{% endif %}</td></tr>
+    <tr><td><strong>command fingerprint</strong></td>
+        <td>{% if w.command_fingerprint %}<code>{{ w.command_fingerprint }}</code>
+            <br><span class="muted">the preview, run.sh, llama-swap entry and
+              worker all share this identity</span>
+            {% else %}<span class="muted">—</span>{% endif %}</td></tr>
+    <tr><td><strong>measured result</strong></td>
+        <td>
+          {% if measured %}
+            {% if measured.get('generation_tps') %}generation {{ measured.generation_tps | round(1) }} t/s{% endif %}
+            {% if measured.get('prompt_tps') %} · prompt {{ measured.prompt_tps | round(1) }} t/s{% endif %}
+            {% if measured.get('load_seconds') %} · load {{ measured.load_seconds | round(1) }}s{% endif %}
+            {% if measured.get('cache_state') %}
+              <br><span class="muted">{{ measured.cache_state }} cache</span>{% endif %}
+          {% else %}
+            <span class="muted">not measured — this plan is an estimate</span>
+          {% endif %}
+        </td></tr>
   </table>
 </div>
+
+{% if w.step_outcomes %}
+<details class="card">
+  <summary>what happened at each step</summary>
+  <table>
+    <tr><th>step</th><th>result</th><th>detail</th></tr>
+    {% for step, o in w.step_outcomes.items() %}
+    <tr>
+      <td>{{ step }}</td>
+      <td class="{{ 'ok' if o.ok else 'err' }}">{{ o.status }}</td>
+      <td>
+        {% for m in o.messages %}{{ m }}<br>{% endfor %}
+        {% for wmsg in o.warnings %}<span class="warn">{{ wmsg }}</span><br>{% endfor %}
+        {% if o.error %}<span class="err">{{ o.error }}</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</details>
+{% endif %}
 
 <div class="actions">
   <a href="/runtime" class="btn btn-primary">View Runtime</a>

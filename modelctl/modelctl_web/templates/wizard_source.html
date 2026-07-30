@@ -4,6 +4,17 @@
 <h1>Add Model: Select Source</h1>
 <p class="muted">Step 1 of 7 · wizard {{ w.wizard_id }}</p>
 
+{% if w.errors %}
+<div class="card">
+  {% for e in w.errors %}<p class="err">{{ e.message }}</p>{% endfor %}
+</div>
+{% endif %}
+{% if w.source_verification and w.source_verification.warnings %}
+<div class="card">
+  {% for msg in w.source_verification.warnings %}<p class="warn">{{ msg }}</p>{% endfor %}
+</div>
+{% endif %}
+
 <form method="post" action="/add/{{ w.wizard_id }}/source" class="form-grid">
   <div class="field">
     <label>

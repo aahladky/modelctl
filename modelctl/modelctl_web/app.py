@@ -502,11 +502,29 @@ def create_app(token=None, store=None, runner=None):
         form = await request.form()
         source_type = form.get("source_type", "")
         state.source_type = source_type
+        state.clear_error()
         if source_type == "hf_repo":
             state.repo_id = form.get("repo_id", "")
             state.advance("inspect")
         elif source_type == "local_file":
             state.local_path = form.get("local_path", "")
+            # Verify the file BEFORE a profile exists (Task C2): GGUF
+            # magic, truncation, shard completeness, readability, duplicate
+            # identity. A bad path caught here is a form error; caught
+            # later it is a broken profile that fails at load time.
+            from modelctl_services import acquisition_service
+            check = acquisition_service.verify_local_gguf(state.local_path)
+            state.source_verification = {
+                "ok": check.ok,
+                "messages": list(check.messages),
+                "warnings": list(check.warnings),
+                "data": dict(check.data),
+            }
+            if not check.ok:
+                state.set_error(check.messages[0] if check.messages
+                                else "the selected file is not usable")
+                store_wiz.save(state)
+                return RedirectResponse(f"/add/{wizard_id}/source", status_code=303)
             state.advance("download")
         store_wiz.save(state)
         return RedirectResponse(f"/add/{wizard_id}/{state.step}", status_code=303)
@@ -535,6 +553,28 @@ def create_app(token=None, store=None, runner=None):
         store_wiz.save(state)
         return RedirectResponse(f"/add/{wizard_id}/download", status_code=303)
 
+    def _refresh_download_outcome(state):
+        """Fold the acquisition job's structured result into wizard state.
+
+        `download_complete` used to be set the moment the job was
+        *submitted*, so a failed or still-running download read as done and
+        the wizard walked on to a profile that did not exist.
+        """
+        from .wizard import outcome_from_job
+        if not state.download_job_id:
+            return
+        o = outcome_from_job(store, state.download_job_id)
+        if not o:
+            return
+        state.record_outcome(
+            "download", ok=o["ok"], job_id=state.download_job_id,
+            status=o["status"], warnings=o.get("warnings"),
+            error=o.get("error", ""))
+        state.download_complete = o["ok"]
+        data = o.get("data") or {}
+        if o["ok"] and data.get("profile") and not state.profile_name:
+            state.profile_name = data["profile"]
+
     @app.get("/add/{wizard_id}/download", response_class=HTMLResponse)
     def wizard_download(request: Request, wizard_id: str):
         from .wizard import WizardStore
@@ -542,23 +582,27 @@ def create_app(token=None, store=None, runner=None):
         state = store_wiz.load(wizard_id)
         if not state:
             return RedirectResponse("/add", status_code=303)
-        # For local files, skip download and go straight to analysis.
-        if state.source_type == "local_file" and state.local_path:
-            if not state.download_complete:
-                job_id = mutate.submit_import_local(runner, state.local_path)
-                state.download_job_id = job_id
-                state.download_complete = True
-                store_wiz.save(state)
-            return templates.TemplateResponse(request=request, name="wizard_download.html",
-                                              context=ctx(request, w=state, is_local=True))
-        # For HF repos, start the pull job.
-        if state.repo_id and not state.download_complete and not state.download_job_id:
-            job_id = mutate.submit_pull(runner, state.repo_id,
-                                        quant_label=state.selected_quant or None)
-            state.download_job_id = job_id
-            store_wiz.save(state)
-        return templates.TemplateResponse(request=request, name="wizard_download.html",
-                                          context=ctx(request, w=state, is_local=False))
+        is_local = state.source_type == "local_file" and bool(state.local_path)
+
+        # Submit only when nothing has been submitted yet. On a reload or a
+        # service restart the existing job is picked back up instead of a
+        # duplicate download being started.
+        if not state.download_job_id:
+            if is_local:
+                state.download_job_id = mutate.submit_import_local(
+                    runner, state.local_path)
+            elif state.repo_id:
+                state.download_job_id = mutate.submit_pull(
+                    runner, state.repo_id,
+                    quant_label=state.selected_quant or None)
+
+        _refresh_download_outcome(state)
+        store_wiz.save(state)
+        return templates.TemplateResponse(
+            request=request, name="wizard_download.html",
+            context=ctx(request, w=state, is_local=is_local,
+                        outcome=state.outcome("download"),
+                        blocked=state.blocking_reason("download")))
 
     @app.post("/add/{wizard_id}/download")
     def wizard_download_next(request: Request, wizard_id: str):
@@ -567,9 +611,38 @@ def create_app(token=None, store=None, runner=None):
         state = store_wiz.load(wizard_id)
         if not state:
             return RedirectResponse("/add", status_code=303)
+        _refresh_download_outcome(state)
+        # Refuse to advance over a running or failed acquisition.
+        if not state.can_advance("download"):
+            state.set_error(f"cannot continue: {state.blocking_reason('download')}")
+            store_wiz.save(state)
+            return RedirectResponse(f"/add/{wizard_id}/download", status_code=303)
+        state.clear_error()
         state.advance("analyze")
         store_wiz.save(state)
         return RedirectResponse(f"/add/{wizard_id}/analyze", status_code=303)
+
+    @app.post("/add/{wizard_id}/retry/{step}")
+    def wizard_retry(wizard_id: str, step: str):
+        """Retry one failed step without restarting the wizard (Task C2)."""
+        from .wizard import WizardStore, STEPS
+        store_wiz = WizardStore()
+        state = store_wiz.load(wizard_id)
+        if not state or step not in STEPS:
+            return RedirectResponse("/add", status_code=303)
+        state.clear_outcome(step)
+        state.clear_error()
+        if step == "download":
+            state.download_job_id = ""
+            state.download_complete = False
+        elif step == "test":
+            state.test_job_id = ""
+        elif step == "register":
+            state.registration_complete = False
+            state.registration_error = ""
+        state.advance(step)
+        store_wiz.save(state)
+        return RedirectResponse(f"/add/{wizard_id}/{step}", status_code=303)
 
     @app.get("/add/{wizard_id}/analyze", response_class=HTMLResponse)
     def wizard_analyze(request: Request, wizard_id: str):
@@ -713,19 +786,53 @@ def create_app(token=None, store=None, runner=None):
         state = store_wiz.load(wizard_id)
         if not state:
             return RedirectResponse("/add", status_code=303)
-        if state.profile_name:
-            # Apply the plan the user compared/tested so the profile
-            # actually launches with it, not whatever config import_local()
-            # or the pull wizard happened to default to.
-            if state.selected_plan_id:
-                result = plan_service.apply_plan(state.profile_name, state.selected_plan_id)
-                if not result.ok:
-                    state.set_error(result.messages[0] if result.messages
-                                    else "failed to apply selected plan")
-            # Warm-load through llama-swap to verify.
-            job_id = mutate.submit_load(runner, state.profile_name)
-            state.registration_complete = True
-            state.endpoint = f"/v1/models"
+        if not state.profile_name:
+            state.set_error("no profile to register")
+            store_wiz.save(state)
+            return RedirectResponse(f"/add/{wizard_id}/register", status_code=303)
+
+        # Apply the plan the user compared/tested so the profile actually
+        # launches with it, not whatever config import_local() or the pull
+        # wizard happened to default to.
+        if state.selected_plan_id:
+            result = plan_service.apply_plan(state.profile_name,
+                                             state.selected_plan_id)
+            if not result.ok:
+                # Registration failed, but the profile itself is still
+                # saved and valid -- say so, and stay on the register step
+                # with a retry rather than reporting success on the done
+                # page (Task C2). This previously set
+                # registration_complete=True regardless and walked on.
+                state.registration_error = (
+                    result.messages[0] if result.messages
+                    else "failed to apply the selected plan")
+                state.record_outcome("register", ok=False,
+                                     messages=result.messages,
+                                     error=state.registration_error)
+                state.set_error(state.registration_error)
+                state.registration_complete = False
+                store_wiz.save(state)
+                return RedirectResponse(f"/add/{wizard_id}/register",
+                                        status_code=303)
+
+        # Record what was actually registered, so the done page can show
+        # the command identity rather than just a name.
+        try:
+            profile = modelctl.load_profile(state.profile_name)
+            cmd, _ok, _msgs = modelctl.canonical_launch_command(profile)
+            state.command_fingerprint = cmd.command_fingerprint
+        except Exception:
+            state.command_fingerprint = ""
+
+        # Warm-load through llama-swap to verify.
+        job_id = mutate.submit_load(runner, state.profile_name)
+        state.registration_complete = True
+        state.registration_error = ""
+        state.record_outcome("register", ok=True, job_id=job_id,
+                             messages=[f"registered '{state.profile_name}'"])
+        base = modelctl.LLAMA_SWAP_BASE_URL.rstrip("/")
+        state.endpoint = f"{base}/chat/completions"
+        state.clear_error()
         state.advance("done")
         store_wiz.save(state)
         return RedirectResponse(f"/add/{wizard_id}/done", status_code=303)
@@ -737,8 +844,27 @@ def create_app(token=None, store=None, runner=None):
         state = store_wiz.load(wizard_id)
         if not state:
             return RedirectResponse("/add", status_code=303)
+        # The done page answers "what did I actually get?": endpoint,
+        # selected plan, command fingerprint, and the measured result the
+        # choice was based on (Task C2).
+        plan_label = ""
+        try:
+            if state.selected_plan_id and state.profile_name:
+                import modelctl_plans
+                profile = modelctl.load_profile(state.profile_name)
+                for pl in modelctl_plans.compile_launch_plans(profile):
+                    if pl.id == state.selected_plan_id:
+                        plan_label = pl.label
+                        break
+        except Exception:
+            pass
+        measured = state.measured or (
+            state.test_observations.get(state.selected_plan_id, {})
+            if state.selected_plan_id else {})
         return templates.TemplateResponse(request=request, name="wizard_done.html",
-                                          context=ctx(request, w=state))
+                                          context=ctx(request, w=state,
+                                                      plan_label=plan_label,
+                                                      measured=measured))
 
     # ---- jobs -----------------------------------------------------------
     @app.get("/jobs", response_class=HTMLResponse)

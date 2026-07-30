@@ -71,6 +71,26 @@ class WizardState:
     profile_name: str = ""
     registration_complete: bool = False
     endpoint: str = ""
+    # Set when registration failed. The profile is left valid and saved;
+    # this is what the register page shows alongside its retry action.
+    registration_error: str = ""
+
+    # Verification of the chosen source, recorded before any profile is
+    # created (GGUF magic, shard completeness, duplicates, free space).
+    source_verification: dict = field(default_factory=dict)
+    # Hugging Face metadata / checksums for the selected files, when the
+    # source published any.
+    source_metadata: dict = field(default_factory=dict)
+
+    # Provenance of what was actually registered.
+    command_fingerprint: str = ""
+    measured: dict = field(default_factory=dict)
+
+    # Structured per-step outcomes, keyed by step name:
+    #   {ok, job_id, status, messages, warnings, error, at}
+    # Recorded from the job store's structured result rather than scraped
+    # out of a log, so a retry can tell "never ran" from "ran and failed".
+    step_outcomes: dict = field(default_factory=dict)
 
     # Errors
     errors: list = field(default_factory=list)
@@ -90,6 +110,58 @@ class WizardState:
         self.errors = []
         self.updated_at = time.time()
 
+    # --- structured step outcomes ---------------------------------------
+
+    def record_outcome(self, step: str, ok: bool, job_id: str = "",
+                       status: str = "", messages=None, warnings=None,
+                       error: str = ""):
+        """Record what happened on a step."""
+        self.step_outcomes[step] = {
+            "ok": bool(ok),
+            "job_id": job_id or "",
+            "status": status or ("done" if ok else "failed"),
+            "messages": list(messages or []),
+            "warnings": list(warnings or []),
+            "error": error or "",
+            "at": time.time(),
+        }
+        self.updated_at = time.time()
+        return self.step_outcomes[step]
+
+    def outcome(self, step: str) -> dict:
+        return self.step_outcomes.get(step) or {}
+
+    def clear_outcome(self, step: str):
+        """Forget a step's result so it can be retried from scratch."""
+        self.step_outcomes.pop(step, None)
+        self.updated_at = time.time()
+
+    def step_failed(self, step: str) -> bool:
+        o = self.outcome(step)
+        return bool(o) and not o.get("ok") and o.get("status") != "running"
+
+    def step_running(self, step: str) -> bool:
+        return self.outcome(step).get("status") in ("queued", "running")
+
+    def blocking_reason(self, step: str) -> str:
+        """Why the wizard must not move past `step` yet, or "".
+
+        Advancing over a running job produces a wizard that looks finished
+        while its download is still going; advancing over a failed one
+        produces a profile built on a step that never succeeded.
+        """
+        if self.step_running(step):
+            return f"the {step} step is still running"
+        if self.step_failed(step):
+            o = self.outcome(step)
+            detail = o.get("error") or "; ".join(o.get("messages") or [])
+            return f"the {step} step failed{': ' + detail if detail else ''}"
+        return ""
+
+    def can_advance(self, step: str) -> bool:
+        return not self.blocking_reason(step)
+
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -98,6 +170,38 @@ class WizardState:
         # Filter to known fields.
         known = {f.name for f in cls.__dataclass_fields__.values()}
         return cls(**{k: v for k, v in d.items() if k in known})
+
+
+def outcome_from_job(store, job_id: str) -> dict:
+    """Read a job's structured result out of the job store.
+
+    The wizard used to infer success by looking at the log text. Jobs
+    already persist a structured outcome, a status and an error; using
+    them means a retry can distinguish "never started", "still running",
+    "failed", and "succeeded with warnings".
+    """
+    if not job_id:
+        return {}
+    job = store.get(job_id)
+    if not job:
+        return {"ok": False, "status": "missing", "job_id": job_id,
+                "error": "job record is gone"}
+    status = job.get("status", "")
+    data = {}
+    raw = job.get("outcome")
+    if raw:
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        except (ValueError, TypeError):
+            data = {}
+    return {
+        "ok": status == "done",
+        "status": status,
+        "job_id": job_id,
+        "data": data,
+        "warnings": list(data.get("warnings") or []),
+        "error": job.get("error", "") or "",
+    }
 
 
 class WizardStore:
