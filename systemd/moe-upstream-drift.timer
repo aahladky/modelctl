@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly llama.cpp upstream drift report (Task 0.10)
+
+[Timer]
+OnCalendar=Mon *-*-* 09:15:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target
