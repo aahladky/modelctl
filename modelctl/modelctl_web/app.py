@@ -982,15 +982,42 @@ def create_app(token=None, store=None, runner=None):
     def plans_page(request: Request, name: str):
         import modelctl_plans
         import modelctl_hardware
+        import modelctl_runtime
+        import modelctl_evidence
+        import modelctl_launch
         p = modelctl.load_profile(name)
         snap = modelctl_hardware.capture_hardware_snapshot()
         plans = modelctl_plans.compile_launch_plans(p, snap)
-        import modelctl_runtime
-        observations = modelctl_runtime.RuntimeDB().observations_for_profile(
-            name, snap.fingerprint,
-            snap.backend_fingerprints.get(p.get("backend", "llama-cpp"), ""))
+        rdb = modelctl_runtime.RuntimeDB()
+        backend_fp = snap.backend_fingerprints.get(p.get("backend", "llama-cpp"), "")
+        observations = rdb.observations_for_profile(name, snap.fingerprint, backend_fp)
+        failures = rdb.failures_for_profile(name)
+
+        # Resolving the backend here is what lets a plan card name the build
+        # its claims and cache eligibility belong to. Without it the page
+        # shows the same estimate for a stock binary and the fork, which is
+        # exactly the confusion Task C3 exists to remove.
+        try:
+            backend = modelctl_launch.resolve_backend(p)
+        except Exception:
+            backend = None
+
+        try:
+            ranked = modelctl_plans.rank_plans(
+                plans, modelctl_plans.policy_for_profile(p),
+                observations, failures)
+            ranked_ids = [pl.id for pl, _score in ranked]
+        except Exception:
+            ranked_ids = []
+
+        evidence = modelctl_evidence.build_plan_evidence(
+            p, plans, observations, failures, backend=backend,
+            ranked_ids=ranked_ids)
         return templates.TemplateResponse(request=request, name="plans.html", context=ctx(
-            request, p=p, plans=plans, profile_name=name, observations=observations))
+            request, p=p, plans=plans, profile_name=name,
+            observations=observations,
+            groups=modelctl_evidence.group_evidence(evidence),
+            evidence=evidence, backend=backend))
 
     @app.get("/api/profiles/{name}/plans")
     def api_plans(name: str):

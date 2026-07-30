@@ -795,6 +795,27 @@ def plan_status(plan, observations=None):
     return "untested"
 
 
+def policy_for_profile(profile):
+    """The RuntimePolicy a profile's saved runtime section implies.
+
+    One definition, so the plans page, the plan service, and the managed
+    worker cannot disagree about which policy is in force while showing
+    the user a ranking.
+    """
+    rt = profile.get("runtime") or {}
+    if not rt:
+        return DEFAULT_POLICY
+    return RuntimePolicy(
+        objective=rt.get("objective", "balanced"),
+        pinned_plan_id=rt.get("pinned_plan_id"),
+        allow_fallback=rt.get("allow_fallback", True),
+        allow_untested=rt.get("allow_untested", False),
+        minimum_context=rt.get("minimum_context"),
+        maximum_cpu_bytes=rt.get("maximum_cpu_bytes"),
+        maximum_storage_tier=rt.get("maximum_storage_tier", 3),
+    )
+
+
 def rank_plans(plans, policy=None, observations=None, failures=None):
     """Filter and rank plans by policy constraints.
 

@@ -84,19 +84,7 @@ def rank_plans(profile_name: str, policy=None) -> PlanResult:
     plans = modelctl_plans.compile_launch_plans(profile, snap)
 
     if policy is None:
-        rt = profile.get("runtime", {})
-        if rt:
-            policy = modelctl_plans.RuntimePolicy(
-                objective=rt.get("objective", "balanced"),
-                pinned_plan_id=rt.get("pinned_plan_id"),
-                allow_fallback=rt.get("allow_fallback", True),
-                allow_untested=rt.get("allow_untested", False),
-                minimum_context=rt.get("minimum_context"),
-                maximum_cpu_bytes=rt.get("maximum_cpu_bytes"),
-                maximum_storage_tier=rt.get("maximum_storage_tier", 3),
-            )
-        else:
-            policy = modelctl_plans.DEFAULT_POLICY
+        policy = modelctl_plans.policy_for_profile(profile)
 
     rdb = modelctl_runtime.RuntimeDB()
     observations = rdb.observations_for_profile(
