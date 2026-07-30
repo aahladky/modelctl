@@ -465,6 +465,11 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
         # LD_LIBRARY_PATH resolve_backend() built -- re-apply after merging
         # so the profile's env can add to it but never drop it.
         modelctl.ensure_binary_ld_library_path(child_env, launch.backend.binary)
+        # The per-profile directory is created by generate_artifacts(), but a
+        # plan test must not require artifacts to have been generated first:
+        # testing a plan before registering anything is the normal wizard
+        # order, and this crashed with FileNotFoundError instead of running.
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         logf = open(log_path, "w")
         preexec = os.setpgrp if hasattr(os, "setpgrp") else None
         proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,

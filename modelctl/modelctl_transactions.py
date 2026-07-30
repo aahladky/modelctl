@@ -41,6 +41,8 @@ class Transaction:
         self._staged_configs: list[tuple[Path, str]] = []
         self._backup_dir: Path | None = None
         self._committed = False
+        # (target_path, backup_path_or_None) for every file commit() wrote.
+        self._written: list = []
 
     def __enter__(self):
         self._backup_dir = Path(modelctl.STATE_DIR) / ".tx_backups" / f"{self.name}_{int(time.time())}"
@@ -76,17 +78,27 @@ class Transaction:
         2. Write all staged content.
         3. Validate JSON/YAML.
         """
-        # Backup existing files.
+        # Backup existing files. Every write is recorded as
+        # (target, backup_or_None) so _rollback can restore what existed
+        # and remove what did not -- backups keyed by basename alone
+        # collided whenever two profiles staged their own run.sh.
+        self._written = []
+
         for name in self._staged_profiles:
             src = modelctl.PROFILES_DIR / f"{name}.json"
+            backup = None
             if src.exists():
-                dst = self._backup_dir / f"profile_{name}.json"
-                shutil.copy2(src, dst)
+                backup = self._backup_dir / f"profile_{name}.json"
+                shutil.copy2(src, backup)
+            self._written.append((src, backup))
 
-        for path, _ in self._staged_artifacts + self._staged_configs:
+        for index, (path, _) in enumerate(
+                self._staged_artifacts + self._staged_configs):
+            backup = None
             if path.exists():
-                dst = self._backup_dir / path.name
-                shutil.copy2(path, dst)
+                backup = self._backup_dir / f"{index:04d}_{path.name}"
+                shutil.copy2(path, backup)
+            self._written.append((path, backup))
 
         # Write profiles.
         modelctl.PROFILES_DIR.mkdir(parents=True, exist_ok=True)
@@ -113,14 +125,28 @@ class Transaction:
         self._committed = True
 
     def _rollback(self):
-        """Restore all backed-up files."""
+        """Restore every file this transaction wrote.
+
+        Previously this restored profiles only and left a comment saying
+        artifacts and configs were preserved in the backup directory "for
+        manual recovery" -- but __exit__ deletes that directory, so a
+        failed multi-file mutation left artifacts and the llama-swap config
+        modified with no way back. Restoring by recorded target path fixes
+        that, and files that did not exist before the transaction are
+        removed rather than left behind.
+        """
         if not self._backup_dir or not self._backup_dir.exists():
             return
 
-        for backup in self._backup_dir.iterdir():
-            if backup.name.startswith("profile_"):
-                name = backup.name.removeprefix("profile_")
-                dst = modelctl.PROFILES_DIR / name
-                shutil.copy2(backup, dst)
-            # For artifacts/configs, we'd need to track the original path.
-            # For now, the backup dir preserves the data for manual recovery.
+        for target, backup in getattr(self, "_written", []):
+            try:
+                if backup is not None and backup.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(backup, target)
+                elif target.exists():
+                    # Created by this transaction; undoing means removing it.
+                    target.unlink()
+            except OSError:
+                # One unrestorable file must not abort the rest of the
+                # rollback -- partial recovery beats none.
+                continue
