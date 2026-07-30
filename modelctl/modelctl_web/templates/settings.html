@@ -3,6 +3,7 @@
 {% block content %}
 <h1>settings</h1>
 {% if saved %}<p class="ok">settings saved</p>{% endif %}
+{% if rejected %}<p class="warn">some values were not saved: {{ rejected }}</p>{% endif %}
 
 <h2>paths</h2>
 <div class="card">

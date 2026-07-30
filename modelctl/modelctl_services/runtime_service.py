@@ -15,16 +15,16 @@ propagate uncaught.
 """
 from dataclasses import dataclass, field
 
+from .result import ServiceResult
+
 
 @dataclass
-class RuntimeResult:
+class RuntimeResult(ServiceResult):
     """Result of a runtime operation."""
-    ok: bool
     loaded: bool = False
     response_ok: bool = False
     elapsed_s: float = 0.0
     models: list = field(default_factory=list)
-    messages: list = field(default_factory=list)
 
 
 def _swap_client():

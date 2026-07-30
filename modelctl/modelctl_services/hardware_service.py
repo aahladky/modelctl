@@ -9,14 +9,14 @@ from dataclasses import dataclass, field
 import modelctl
 import modelctl_hardware
 
+from .result import ServiceResult
+
 
 @dataclass
-class HardwareResult:
+class HardwareResult(ServiceResult):
     """Result of a hardware operation."""
-    ok: bool
     snapshot: object = None
     settings: dict = field(default_factory=dict)
-    messages: list = field(default_factory=list)
 
 
 def capture_snapshot() -> HardwareResult:

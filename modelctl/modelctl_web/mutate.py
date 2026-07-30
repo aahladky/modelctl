@@ -132,16 +132,25 @@ def submit_pull(runner, repo_id, quant_label=None, want_mtp=True):
 
 
 def submit_import_local(runner, file_path, name=None, copy=False):
-    """Import a local GGUF file as a profile."""
+    """Import a local GGUF file as a profile.
+
+    Verification (GGUF magic, shard completeness, readability, duplicate
+    identity, destination space) happens in acquisition_service before a
+    profile is created, so the CLI import path gets the same checks.
+    """
+    from modelctl_services import acquisition_service
+
     def fn(ctx):
-        ctx.log(f"importing {file_path}")
-        ctx.raise_if_cancelled()
-        profile = modelctl.import_local(file_path, name=name, copy=copy,
-                                        resync=True)
-        if profile is None:
-            raise RuntimeError(f"import of {file_path} failed -- see job log")
-        ctx.log(f"profile '{profile['name']}' saved and synced")
-        return {"profile": profile["name"], "config": profile["config"]}
+        result = acquisition_service.import_local(
+            file_path, name=name, copy=copy, resync=True, ctx=ctx)
+        for m in result.messages:
+            ctx.log(m)
+        for w in result.warnings:
+            ctx.log(f"warning: {w}")
+        if not result.ok:
+            raise RuntimeError("; ".join(result.messages)
+                               or f"import of {file_path} failed")
+        return dict(result.data, warnings=result.warnings)
     return runner.submit("import", f"import {file_path}", fn,
                          payload={"file_path": file_path, "name": name},
                          lane="mutation")
@@ -314,50 +323,22 @@ def submit_calibrate_storage(runner):
 
 
 def submit_matrix_apply(runner):
+    """Apply the managed routing matrix.
+
+    The backup/write/restart/health-check/rollback sequence lives in
+    routing_service (Task C5); this only submits it and translates the
+    result into the job outcome. The rollback_status is preserved in the
+    payload, because "the apply failed" and "the apply failed and the old
+    config could not be restored" need different responses.
+    """
+    from modelctl_services import routing_service
+
     def fn(ctx):
-        import shutil
-        import modelctl_matrix
-        cfg_path = modelctl.LLAMA_SWAP_CONFIG_PATH
-        config = modelctl.yaml.safe_load(cfg_path.read_text()) or {}
-        generated = modelctl_matrix.generate_matrix()
-        merged = modelctl_matrix.merge_matrix(config.get("matrix"), generated)
-
-        backup = cfg_path.with_suffix(f".yaml.bak-matrix-{int(time.time())}")
-        shutil.copy2(cfg_path, backup)
-        ctx.log(f"backup: {backup}")
-
-        new_config = dict(config)
-        new_config["matrix"] = merged
-        tmp = cfg_path.with_suffix(".yaml.tmp")
-        tmp.write_text(modelctl.yaml.safe_dump(new_config, sort_keys=False))
-        import os as _os
-        with open(tmp) as f:
-            _os.fsync(f.fileno())
-        tmp.replace(cfg_path)
-        ctx.log("config.yaml written, restarting llama-swap")
-
-        import subprocess
-        proc = subprocess.run(["systemctl", "--user", "restart", "llama-swap.service"],
-                              capture_output=True, text=True, timeout=60)
-        ctx.log(proc.stdout + proc.stderr)
-        if proc.returncode != 0:
-            shutil.copy2(backup, cfg_path)
-            subprocess.run(["systemctl", "--user", "restart", "llama-swap.service"],
-                           capture_output=True, timeout=60)
-            raise RuntimeError("restart failed -- rolled back to backup")
-
-        from .swap import LlamaSwapClient, ModelctlSwapError
-        for _ in range(15):
-            try:
-                LlamaSwapClient().health()
-                ctx.log("llama-swap healthy after apply")
-                return {"sets": len(merged["sets"]), "backup": str(backup)}
-            except ModelctlSwapError:
-                time.sleep(2)
-        shutil.copy2(backup, cfg_path)
-        subprocess.run(["systemctl", "--user", "restart", "llama-swap.service"],
-                       capture_output=True, timeout=60)
-        raise RuntimeError("llama-swap unhealthy after apply -- rolled back")
+        result = routing_service.apply_matrix(ctx=ctx)
+        if not result.ok:
+            raise RuntimeError("; ".join(result.messages)
+                               or "matrix apply failed")
+        return {**result.data, "rollback_status": result.rollback_status}
     return runner.submit("mutation", "apply managed matrix", fn)
 
 

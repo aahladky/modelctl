@@ -948,7 +948,7 @@ def create_app(token=None, store=None, runner=None):
 
     # ---- settings --------------------------------------------------------
     @app.get("/settings", response_class=HTMLResponse)
-    def settings_page(request: Request, saved: str = ""):
+    def settings_page(request: Request, saved: str = "", rejected: str = ""):
         import modelctl_diagnostics
         import modelctl_hardware
         defaults = modelctl.load_defaults()
@@ -957,7 +957,7 @@ def create_app(token=None, store=None, runner=None):
         except Exception:
             storage = ()
         return templates.TemplateResponse(request=request, name="settings.html", context=ctx(
-            request, defaults=defaults, saved=saved,
+            request, defaults=defaults, saved=saved, rejected=rejected,
             models_dir=str(modelctl.DEFAULT_MODELS_DIR),
             profiles_dir=str(modelctl.PROFILES_DIR),
             llama_server=modelctl.LLAMA_SERVER_BIN,
@@ -1002,19 +1002,19 @@ def create_app(token=None, store=None, runner=None):
 
     @app.post("/settings/save")
     async def settings_save(request: Request):
+        # Validation and coercion live in settings_service (Task C5). The
+        # route used to swallow a bad integer with `except ValueError:
+        # pass`, so a mistyped context length silently kept the old value
+        # with no indication anything had been rejected.
+        from modelctl_services import settings_service
         form = await request.form()
-        defaults = modelctl.load_defaults()
-        for key in ("device", "split_mode", "tensor_split", "cache_type_k",
-                     "cache_type_v", "flash_attn", "mtp", "primary_gpu"):
-            if key in form:
-                defaults[key] = str(form[key])
-        for key in ("ctx", "ttl", "vram_limit_pct"):
-            if key in form:
-                try:
-                    defaults[key] = int(form[key])
-                except ValueError:
-                    pass
-        modelctl.save_defaults(defaults)
+        result = settings_service.update_defaults(
+            {k: str(v) for k, v in form.items()})
+        if result.warnings:
+            from urllib.parse import quote
+            return RedirectResponse(
+                f"/settings?saved=1&rejected={quote('; '.join(result.warnings))}",
+                status_code=303)
         return RedirectResponse("/settings?saved=1", status_code=303)
 
     # ---- launch plans ----------------------------------------------------

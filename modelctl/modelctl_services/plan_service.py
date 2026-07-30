@@ -10,14 +10,14 @@ import modelctl_hardware
 import modelctl_plans
 import modelctl_runtime
 
+from .result import ServiceResult
+
 
 @dataclass
-class PlanResult:
+class PlanResult(ServiceResult):
     """Result of a plan operation."""
-    ok: bool
     plans: list = field(default_factory=list)
     selected_plan: dict | None = None
-    messages: list = field(default_factory=list)
     observations: dict = field(default_factory=dict)
 
 

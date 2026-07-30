@@ -10,13 +10,18 @@ import modelctl
 import modelctl_profiles
 from modelctl_errors import ValidationMessage
 
+from .result import ServiceResult
+
 
 @dataclass
-class ProfileResult:
-    """Result of a profile operation."""
-    ok: bool
+class ProfileResult(ServiceResult):
+    """Result of a profile operation.
+
+    The ServiceResult envelope (warnings, data, changed_resources, job_id,
+    rollback_status) applies to every service; `profile` and `validation`
+    are this domain's payload.
+    """
     profile: dict | None = None
-    messages: list = field(default_factory=list)
     validation: list = field(default_factory=list)
 
 
