@@ -91,7 +91,8 @@ class TestReleaseACommandIdentity(unittest.TestCase):
             with mock.patch("modelctl_launch.modelctl.find_env_script_candidates",
                            return_value=[]):
                 backend = modelctl_launch.resolve_backend(
-                    {"backend": "llama-cpp", "binary": str(script)})
+                    {"backend": "llama-cpp", "binary": str(script),
+                     "model_path": str(Path(d) / "model.gguf")})
             self.assertEqual(backend.capabilities["_probe_status"], "unsupported")
 
 

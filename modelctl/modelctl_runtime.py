@@ -91,6 +91,16 @@ _MIGRATIONS = [
     # state ("cold"/"warm"/"" for legacy rows) and ranking never compares
     # across states.
     ("cache_state", "TEXT NOT NULL DEFAULT ''", ""),
+    # Process I/O and page-fault sampling (Task 3.3): distinguishes compute
+    # speed from active storage reads. read_bytes_warmup/_generation split
+    # /proc/<pid>/io's read_bytes at the warmup/measured-run boundary;
+    # read_bytes is the run total. NULL for rows recorded before this
+    # migration (the sampler didn't track it yet).
+    ("read_bytes", "INTEGER", None),
+    ("read_bytes_warmup", "INTEGER", None),
+    ("read_bytes_generation", "INTEGER", None),
+    ("major_faults", "INTEGER", None),
+    ("minor_faults", "INTEGER", None),
 ]
 
 
@@ -294,8 +304,9 @@ class RuntimeDB:
                 "command_fingerprint, command_argv_json, binary_path, binary_fingerprint, "
                 "environment_fingerprint, capability_schema, capability_digest, "
                 "claim_json, decision_json, parent_job_id, fallback_ordinal, "
-                "cache_state) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "cache_state, read_bytes, read_bytes_warmup, read_bytes_generation, "
+                "major_faults, minor_faults) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (run["profile_name"], run["plan_id"],
                  run.get("hardware_fingerprint", ""), run.get("backend_fingerprint", ""),
                  run.get("started_at", time.time()), run.get("finished_at"),
@@ -317,7 +328,12 @@ class RuntimeDB:
                  json.dumps(run.get("decision", {})),
                  run.get("parent_job_id"),
                  run.get("fallback_ordinal"),
-                 run.get("cache_state", "")))
+                 run.get("cache_state", ""),
+                 run.get("read_bytes"),
+                 run.get("read_bytes_warmup"),
+                 run.get("read_bytes_generation"),
+                 run.get("major_faults"),
+                 run.get("minor_faults")))
             return c.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     def plan_runs_for(self, profile_name, plan_id=None, limit=50):

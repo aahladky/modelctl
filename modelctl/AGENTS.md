@@ -20,8 +20,13 @@ System Python is externally managed (PEP 668). Always use the `.venv`.
 
 ```bash
 cd ~/workspace/modelctl
-.venv/bin/python -m unittest test_modelctl test_modelctl_vram test_modelctl_tui test_modelctl_web test_modelctl_capabilities test_modelctl_tiers -v
+.venv/bin/python -m unittest discover -p "test_*.py"
 ```
+
+`discover` picks up every `test_*.py` file automatically -- don't hand-list
+modules here, that list has gone stale in the past (new test files added
+without updating this command, so `python -m unittest test_a test_b ...`
+silently skipped most of the suite).
 
 Or run a single test file:
 ```bash

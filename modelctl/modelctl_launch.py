@@ -90,7 +90,24 @@ def resolve_backend(profile: dict, binary_override: str | None = None) -> Resolv
     call this instead of doing their own resolution.
     """
     backend_name = profile.get("backend", "llama-cpp")
-    binary = binary_override or profile.get("binary") or modelctl.LLAMA_SERVER_BIN
+    if binary_override:
+        binary = binary_override
+    elif backend_name == "llama-cpp":
+        # modelctl.preflight() is the real binary-resolution logic: it
+        # honors a pinned profile["binary"], and otherwise auto-fix
+        # searches known build locations for an alternative that actually
+        # supports this profile's device when the configured default
+        # (MODELCTL_LLAMA_SERVER, or "llama-server" on PATH) doesn't exist
+        # or doesn't support it. Using LLAMA_SERVER_BIN directly here
+        # skipped that search entirely, so build_launch_command() built
+        # every real command around a binary name/path that frequently
+        # doesn't exist or doesn't support the device -- the "AUTO-FIXED"
+        # binary preflight() finds separately (for its messages) was
+        # never actually the one used to launch anything.
+        _, effective_bin, _, _ = modelctl.preflight(profile, auto_fix=True)
+        binary = effective_bin or modelctl.LLAMA_SERVER_BIN
+    else:
+        binary = profile.get("binary") or modelctl.LLAMA_SERVER_BIN
 
     # Resolve oneAPI environment for SYCL builds.
     env = dict(os.environ)
@@ -170,16 +187,22 @@ def build_launch_command(
             profile, capabilities=backend.capabilities)
         validation.extend(from_preflight_tuples(cache_msgs))
 
-        # Convert legacy preflight messages.
-        for severity, summary in preflight_msgs:
-            if severity == "warning":
-                warnings.append(summary)
-            elif severity == "error":
+        # modelctl.preflight() returns plain message strings with the
+        # severity as a text prefix ("ERROR: ..."/"WARNING: ...", or no
+        # prefix at all for informational auto-fix notes) -- NOT
+        # (severity, summary) tuples like preflight_moe_cache() above.
+        # Every test mocking preflight() passes an empty message list, so
+        # unpacking these as tuples here crashed on every real profile
+        # that has anything to report (which is nearly all of them).
+        for msg in preflight_msgs:
+            if msg.startswith("ERROR:"):
                 validation.append(ValidationMessage(
                     code="backend_feature_missing",
                     severity="error",
-                    summary=summary,
+                    summary=msg[len("ERROR:"):].strip(),
                 ))
+            elif msg.startswith("WARNING:"):
+                warnings.append(msg[len("WARNING:"):].strip())
 
     # Build the command argv.
     from modelctl_backends import get_backend

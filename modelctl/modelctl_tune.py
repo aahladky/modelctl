@@ -65,12 +65,18 @@ def _post_stream(url, body, timeout):
 
 
 class _Sampler:
-    """1 Hz peak sampler: per-device VRAM free, child RSS, system RAM available."""
+    """1 Hz peak sampler: per-device VRAM free, child RSS, system RAM
+    available, and cumulative storage read bytes / page faults across the
+    launched process group (Task 3.3) -- distinguishes compute speed from
+    active storage reads."""
 
     def __init__(self, pid):
         self.pid = pid
         self.peak_vram = {}
         self.peak_ram = 0
+        self.read_bytes = 0
+        self.minor_faults = 0
+        self.major_faults = 0
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -81,6 +87,13 @@ class _Sampler:
     def __exit__(self, *a):
         self._stop.set()
         self._thread.join(timeout=3)
+
+    def io_snapshot(self):
+        """Current cumulative (read_bytes, minor_faults, major_faults) --
+        callers diff two snapshots to get a phase's contribution (e.g.
+        warmup vs. measured generation)."""
+        return {"read_bytes": self.read_bytes, "minor_faults": self.minor_faults,
+                "major_faults": self.major_faults}
 
     def _run(self):
         baseline = {}
@@ -98,6 +111,10 @@ class _Sampler:
                         self.peak_vram.get(d["device"], 0), used)
                 rss = self._child_rss()
                 self.peak_ram = max(self.peak_ram, rss)
+                read_bytes, minor, major = self._child_io()
+                self.read_bytes = read_bytes
+                self.minor_faults = minor
+                self.major_faults = major
             except Exception:
                 pass
             self._stop.wait(1.0)
@@ -121,6 +138,38 @@ class _Sampler:
         except OSError:
             pass
         return total
+
+    def _child_io(self):
+        """Cumulative read_bytes (/proc/<pid>/io, bytes actually fetched
+        from the storage layer -- not rchar, which includes page-cache
+        hits) and minflt/majflt (/proc/<pid>/stat), summed across every
+        process in the launched process group (same pgrp-match as
+        _child_rss -- catches draft-model/worker subprocesses too)."""
+        read_bytes = minor = major = 0
+        try:
+            for f in os.listdir("/proc"):
+                if not f.isdigit():
+                    continue
+                try:
+                    with open(f"/proc/{f}/stat") as fh:
+                        parts = fh.read().rsplit(")", 1)[-1].split()
+                    if int(parts[2]) != self.pid:
+                        continue
+                    minor += int(parts[7])   # minflt
+                    major += int(parts[9])   # majflt
+                except (OSError, ValueError, IndexError):
+                    continue
+                try:
+                    with open(f"/proc/{f}/io") as fh:
+                        for line in fh:
+                            if line.startswith("read_bytes:"):
+                                read_bytes += int(line.split()[1])
+                                break
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        return read_bytes, minor, major
 
 
 def _wait_ready(port, proc, timeout=900):
@@ -237,6 +286,7 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
 
             # Warmup phase: fill expert cache and OS page cache before
             # measuring.  When warmup_tokens is 0, the run is "cold".
+            io_at_ready = sampler.io_snapshot()
             run["cache_state"] = "cold"
             run["warmup_generation_tps"] = None
             if warmup_tokens and warmup_tokens > 0:
@@ -251,6 +301,9 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
                     run["warmup_generation_tps"] = round(wt["predicted_per_second"], 2)
                     log(f"warmup gen {run['warmup_generation_tps']} tok/s")
                 run["cache_state"] = "warm"
+
+            io_after_warmup = sampler.io_snapshot()
+            run["read_bytes_warmup"] = io_after_warmup["read_bytes"] - io_at_ready["read_bytes"]
 
             # Keep the warmup measurement separate from the measured TPS but
             # not lost: persist it in details alongside the cache_state column.
@@ -289,6 +342,11 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
 
         run["peak_vram_bytes"] = sampler.peak_vram
         run["peak_ram_bytes"] = sampler.peak_ram
+        io_at_end = sampler.io_snapshot()
+        run["read_bytes"] = io_at_end["read_bytes"]
+        run["read_bytes_generation"] = io_at_end["read_bytes"] - io_after_warmup["read_bytes"]
+        run["major_faults"] = io_at_end["major_faults"]
+        run["minor_faults"] = io_at_end["minor_faults"]
         return run
     except Exception as e:
         run["failure_class"] = run.get("failure_class") or "unknown"

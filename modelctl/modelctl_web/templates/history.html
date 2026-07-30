@@ -2,7 +2,7 @@
 {% block content %}
 <h1>measurements: {{ name }}</h1>
 <table>
-  <thead><tr><th>when</th><th>plan</th><th>result</th><th>load</th><th>prompt</th><th>gen</th><th>peak VRAM</th><th>peak RAM</th></tr></thead>
+  <thead><tr><th>when</th><th>plan</th><th>result</th><th>load</th><th>prompt</th><th>gen</th><th>peak VRAM</th><th>peak RAM</th><th>storage reads</th></tr></thead>
   <tbody>
   {% for r in runs %}
   <tr>
@@ -16,6 +16,15 @@
       {% for dev, b in (r.peak_vram_json | fromjson).items() %}{{ dev }}: {{ (b / 1073741824) | round(1) }}G {% endfor %}
     </td>
     <td class="muted">{{ ((r.peak_ram_bytes or 0) / 1073741824) | round(1) }}G</td>
+    <td class="muted">
+      {% if r.read_bytes is not none %}
+        {{ (r.read_bytes / 1048576) | round(1) }}MiB total
+        {% if r.read_bytes_generation is not none %}
+          ({{ (r.read_bytes_generation / 1048576) | round(1) }}MiB during generation)
+        {% endif %}
+        {% if r.major_faults %} · {{ r.major_faults }} major faults{% endif %}
+      {% else %}—{% endif %}
+    </td>
   </tr>
   {% endfor %}
   </tbody>
