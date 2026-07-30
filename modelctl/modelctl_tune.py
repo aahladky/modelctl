@@ -395,7 +395,7 @@ def _wait_ready(port, proc, timeout=900):
 def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
                      max_tokens=128, runs=2, binary=None,
                      proc_register=None, cancel_check=None,
-                     warmup_tokens=0):
+                     warmup_tokens=0, profile_override=None):
     """Measure one launch plan and persist the resulting PlanRun dict.
 
     When warmup_tokens > 0, a warmup generation runs first to fill the
@@ -403,8 +403,13 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
     warm-cache performance.  The run dict includes:
       cache_state: "cold" (no warmup) or "warm" (after warmup)
       warmup_generation_tps: speed during the warmup phase (if any)
+
+    profile_override supplies the profile dict directly instead of loading
+    it by name. The Release A hardware matrix (Task E3) varies config per
+    cell over one fixture model, and saving a dozen throwaway profiles to
+    do that would pollute the user's profile store.
     """
-    profile = modelctl.load_profile(profile_name)
+    profile = profile_override or modelctl.load_profile(profile_name)
     snap = modelctl_hardware.capture_hardware_snapshot()
     plans = modelctl_plans.compile_launch_plans(profile, snap)
     plan = next((p for p in plans if p.id == plan_id), None)
