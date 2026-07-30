@@ -243,6 +243,35 @@ Available devices:
                                side_effect=OSError()):
             self.assertEqual(modelctl_vram.llama_list_devices("llama-server"), [])
 
+    def test_binary_own_dir_always_in_ld_library_path(self):
+        # Some builds bake an absolute RUNPATH to their own bin/ directory,
+        # which breaks the moment the build tree moves -- the probe must
+        # not depend on that being correct, with or without a passed env.
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["env"] = kwargs.get("env")
+            return mock.Mock(stdout=self.OUTPUT, stderr="", returncode=0)
+
+        with mock.patch.object(modelctl_vram.subprocess, "run", side_effect=fake_run):
+            modelctl_vram.llama_list_devices("/opt/llama/build-sycl/bin/llama-server")
+        self.assertTrue(captured["env"]["LD_LIBRARY_PATH"]
+                        .startswith("/opt/llama/build-sycl/bin"))
+
+    def test_binary_own_dir_prepended_ahead_of_passed_env(self):
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["env"] = kwargs.get("env")
+            return mock.Mock(stdout=self.OUTPUT, stderr="", returncode=0)
+
+        with mock.patch.object(modelctl_vram.subprocess, "run", side_effect=fake_run):
+            modelctl_vram.llama_list_devices(
+                "/opt/llama/build-sycl/bin/llama-server",
+                env={"LD_LIBRARY_PATH": "/opt/intel/oneapi/lib"})
+        self.assertEqual(captured["env"]["LD_LIBRARY_PATH"],
+                         "/opt/llama/build-sycl/bin:/opt/intel/oneapi/lib")
+
 
 class TestMatchDevices(unittest.TestCase):
     XPU = [

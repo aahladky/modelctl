@@ -265,9 +265,20 @@ def llama_list_devices(binary, timeout=30, env=None):
     current process environment for the probe."""
     try:
         import os as _os
+        full_env = {**_os.environ, **env} if env else dict(_os.environ)
+        # The binary's own directory holds its co-built shared libraries;
+        # some builds bake an absolute RUNPATH to that directory which
+        # breaks the moment the build tree moves. This module has zero
+        # imports from modelctl.py by design (copyable standalone), so this
+        # duplicates modelctl.ensure_binary_ld_library_path() rather than
+        # calling it -- same fix, self-contained.
+        bin_dir = _os.path.dirname(_os.path.realpath(binary))
+        existing = full_env.get("LD_LIBRARY_PATH", "")
+        parts = [bin_dir] + [p for p in existing.split(":") if p and p != bin_dir]
+        full_env["LD_LIBRARY_PATH"] = ":".join(parts)
         result = subprocess.run([binary, "--list-devices"],
                                 capture_output=True, text=True, timeout=timeout,
-                                env={**_os.environ, **env} if env else None)
+                                env=full_env)
     except (OSError, subprocess.TimeoutExpired):
         return []
     devices = []

@@ -297,6 +297,38 @@ class TestSyncHermesCustomProvidersOvms(unittest.TestCase):
         self.assertNotIn("ovms-qwen3-6-27b-int4-ov", cfg["providers"])
 
 
+class TestEnsureBinaryLdLibraryPath(unittest.TestCase):
+    """The RUNPATH-robustness fix shared by preflight(), resolve_backend(),
+    the capability prober's retry path, and both real launch sites
+    (test_launch_plan, the managed worker) -- extracted here after being
+    hand-duplicated in all of them."""
+
+    def test_prepends_bin_dir_with_no_existing_path(self):
+        env = {}
+        modelctl.ensure_binary_ld_library_path(env, "/opt/llama/bin/llama-server")
+        self.assertEqual(env["LD_LIBRARY_PATH"], "/opt/llama/bin")
+
+    def test_prepends_bin_dir_keeping_existing_path(self):
+        env = {"LD_LIBRARY_PATH": "/opt/intel/oneapi/lib"}
+        modelctl.ensure_binary_ld_library_path(env, "/opt/llama/bin/llama-server")
+        self.assertEqual(env["LD_LIBRARY_PATH"], "/opt/llama/bin:/opt/intel/oneapi/lib")
+
+    def test_does_not_duplicate_bin_dir_already_present(self):
+        env = {"LD_LIBRARY_PATH": "/opt/llama/bin:/opt/intel/oneapi/lib"}
+        modelctl.ensure_binary_ld_library_path(env, "/opt/llama/bin/llama-server")
+        self.assertEqual(env["LD_LIBRARY_PATH"], "/opt/llama/bin:/opt/intel/oneapi/lib")
+
+    def test_noop_without_a_binary(self):
+        env = {"LD_LIBRARY_PATH": "/opt/intel/oneapi/lib"}
+        modelctl.ensure_binary_ld_library_path(env, "")
+        self.assertEqual(env["LD_LIBRARY_PATH"], "/opt/intel/oneapi/lib")
+
+    def test_mutates_in_place_and_returns_env(self):
+        env = {}
+        result = modelctl.ensure_binary_ld_library_path(env, "/opt/llama/bin/llama-server")
+        self.assertIs(result, env)
+
+
 class TestPreflightOvms(unittest.TestCase):
     def _profile(self, **overrides):
         p = {"name": "big-qwen", "repo_id": "OpenVINO/Qwen3.6-27B-int4-ov",

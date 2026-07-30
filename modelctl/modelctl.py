@@ -765,6 +765,31 @@ def source_env_script(script_path: str, timeout=30):
     return {k: out[k] for k in PASSTHROUGH_VARS if k in out and out[k] != ""}
 
 
+def ensure_binary_ld_library_path(env: dict, binary: str) -> dict:
+    """Prepend binary's own directory to env["LD_LIBRARY_PATH"], in place.
+
+    The directory holds the binary's co-built shared libraries
+    (libggml*.so, libllama*.so, ...). Some builds bake an absolute RUNPATH
+    to that directory at link time, which silently breaks the moment the
+    build tree is moved (readelf -d showed exactly this after relocating
+    to ~/workspace/moe-serving/). Always including it here makes every
+    launch and capability probe robust to that regardless of what RUNPATH
+    the binary was built with, and regardless of merge order against
+    other env sources (a profile's own saved env passthrough must be able
+    to ADD to LD_LIBRARY_PATH, never silently drop this).
+
+    Returns env for convenient chaining; mutates it too since callers
+    generally already hold a reference they keep using.
+    """
+    if not binary:
+        return env
+    bin_dir = os.path.dirname(os.path.realpath(binary))
+    existing = env.get("LD_LIBRARY_PATH", "")
+    parts = [bin_dir] + [p for p in existing.split(":") if p and p != bin_dir]
+    env["LD_LIBRARY_PATH"] = ":".join(parts)
+    return env
+
+
 def preflight(profile, auto_fix=True):
     """Single source of truth for 'is this profile actually runnable right
     now'. Checks everything a launch needs, auto-fixes what it safely can
@@ -874,18 +899,7 @@ def preflight(profile, auto_fix=True):
         else:
             messages.append(f"WARNING: this profile targets {device} but has no LD_LIBRARY_PATH saved.")
 
-    # The binary's own directory holds its co-built shared libraries
-    # (libggml*.so, libllama*.so, ...). Some builds bake an absolute RUNPATH
-    # to that directory at link time, which silently breaks the moment the
-    # build tree is moved (readelf -d showed exactly this after relocating
-    # to ~/workspace/moe-serving/). Always including it in LD_LIBRARY_PATH
-    # makes the launch robust to that regardless of what RUNPATH the binary
-    # was built with.
-    if effective_bin:
-        bin_dir = str(Path(effective_bin).resolve().parent)
-        existing = effective_env.get("LD_LIBRARY_PATH", "")
-        parts = [bin_dir] + [p for p in existing.split(":") if p and p != bin_dir]
-        effective_env["LD_LIBRARY_PATH"] = ":".join(parts)
+    ensure_binary_ld_library_path(effective_env, effective_bin)
 
     return ok, effective_bin, effective_env, messages
 

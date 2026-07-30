@@ -257,6 +257,10 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
         run["log_path"] = str(log_path)
         child_env = dict(launch.environment)
         child_env.update(plan.env or {})
+        # plan.env (the profile's own saved env passthrough) can clobber the
+        # LD_LIBRARY_PATH resolve_backend() built -- re-apply after merging
+        # so the profile's env can add to it but never drop it.
+        modelctl.ensure_binary_ld_library_path(child_env, launch.backend.binary)
         logf = open(log_path, "w")
         preexec = os.setpgrp if hasattr(os, "setpgrp") else None
         proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,

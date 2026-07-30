@@ -262,6 +262,10 @@ def worker_main(profile_name, port):
             preexec = os.setpgrp if hasattr(os, "setpgrp") else None
             child_env = dict(launch.environment)
             child_env.update(plan.env or {})
+            # plan.env (the profile's own saved env passthrough) can clobber
+            # the LD_LIBRARY_PATH resolve_backend() built -- re-apply after
+            # merging (same fix as modelctl_tune.test_launch_plan()).
+            modelctl.ensure_binary_ld_library_path(child_env, launch.backend.binary)
             proc = subprocess.Popen(
                 cmd,
                 stdout=sys.stdout,
