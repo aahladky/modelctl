@@ -3,4 +3,4 @@ Description=Weekly llama.cpp upstream drift report (Task 0.10)
 
 [Service]
 Type=oneshot
-ExecStart=/home/aaron/workspace/moe-serving/scripts/upstream-drift-report.sh
+ExecStart=/home/aaron/workspace/moe-serving/systemd/upstream-drift-report.sh
