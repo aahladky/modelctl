@@ -54,7 +54,7 @@
 <p class="muted">{{ plans | length }} candidate(s) generated · <a href="/profiles/{{ profile_name }}/history">measurement history</a></p>
 <table>
   <thead><tr>
-    <th>plan</th><th>source</th><th>placement</th><th>ctx</th><th>VRAM</th><th>RAM</th><th>status</th><th>last speed</th><th>warnings</th><th>actions</th>
+    <th>plan</th><th>source</th><th>placement</th><th>ctx</th><th>VRAM</th><th>RAM</th><th>storage</th><th>status</th><th>last speed</th><th>warnings</th><th>actions</th>
   </tr></thead>
   <tbody>
   {% for pl in plans %}
@@ -73,6 +73,9 @@
     <td>{{ pl.claim.expected_context or '—' }}</td>
     <td>{{ (pl.estimated.total_vram / 1073741824) | round(1) }}G</td>
     <td>{{ (pl.claim.ram_bytes / 1073741824) | round(1) }}G</td>
+    <td class="muted">{{ pl.claim.storage_mode or '—' }}
+      {% if pl.claim.cache_bytes %}<br>cache: {{ (pl.claim.cache_bytes / 1073741824) | round(1) }}G{% endif %}
+    </td>
     <td>
       {% set obs = observations.get(pl.id) %}
       {% if obs and obs.stale %}<span class="warn">stale</span>
