@@ -17,6 +17,18 @@ git clone --recursive git@gitea:moe-serving/modelctl.git
 `--recursive` materializes the llama.cpp fork at the exact commit
 modelctl expects. Already cloned without it? `git submodule update --init`.
 
+## Start here
+
+```
+cd modelctl && modelctl web install
+```
+
+Installs and starts the web console as a systemd user service and prints
+its URL and token. The console is the primary interface; its `/setup`
+page reports whether this machine has a model directory, a runnable
+llama.cpp build, GPUs, and llama-swap. The CLI stays available for
+bootstrap, automation, diagnostics, and recovery.
+
 ## How they fit together
 
 - modelctl probes the fork's capabilities via

@@ -163,9 +163,26 @@ def create_app(token=None, store=None, runner=None):
         return base + (f" +{','.join(extras)}" if extras else "")
 
     def ctx(request, **kw):
-        d = {"request": request}
+        d = {"request": request, "setup_blocking": _setup_banner()}
         d.update(kw)
         return d
+
+    # Readiness for the nav banner, on every page. Cached briefly because
+    # it runs on every render and the underlying state (a directory
+    # appearing, llama-swap coming up) does not change per request.
+    _setup_cache = {"at": 0.0, "blocking": ()}
+
+    def _setup_banner():
+        now = time.time()
+        if now - _setup_cache["at"] > 30:
+            try:
+                import modelctl_setup
+                # probe_backend=False: no subprocess on a page render.
+                _setup_cache["blocking"] = modelctl_setup.probe_setup().blocking
+            except Exception:
+                _setup_cache["blocking"] = ()
+            _setup_cache["at"] = now
+        return _setup_cache["blocking"]
 
     # ---- template filters ------------------------------------------------
     def _fmt_elapsed(start_ts):
@@ -223,8 +240,38 @@ def create_app(token=None, store=None, runner=None):
         return resp
 
     # ---- dashboard ------------------------------------------------------
+    # ---- first run / setup ----------------------------------------------
+    @app.get("/setup", response_class=HTMLResponse)
+    def setup_page(request: Request):
+        import modelctl_setup
+        # The setup page is the one place a live capability probe is worth
+        # a subprocess: it is what makes "runtime found" mean "runtime that
+        # answers for its own features" rather than "a file exists".
+        status = modelctl_setup.probe_setup(probe_backend=True)
+        bind = os.environ.get("MODELCTL_WEB_BIND", "0.0.0.0:9293")
+        _host, _, port = bind.rpartition(":")
+        return templates.TemplateResponse(request=request, name="setup.html", context=ctx(
+            request, status=status,
+            console_url=f"http://{request.url.hostname}:{port or 9293}/",
+            token_path=str(TOKEN_PATH),
+            service_name="modelctl-web.service"))
+
+    @app.get("/api/setup")
+    def api_setup():
+        import modelctl_setup
+        status = modelctl_setup.probe_setup(probe_backend=True)
+        return {"ready": status.ready, "first_run": status.first_run,
+                "checks": [asdict(c) for c in status.checks]}
+
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request):
+        # A machine nobody has configured has nothing to show on a
+        # dashboard -- send them where the work actually starts. Only on a
+        # genuine first run: an established install with llama-swap down
+        # keeps its dashboard.
+        import modelctl_setup
+        if modelctl_setup.probe_setup().first_run:
+            return RedirectResponse("/setup", status_code=307)
         loaded, registered = live_state()
         runtime = _runtime_state()
         inventory = modelctl.get_gpu_inventory()

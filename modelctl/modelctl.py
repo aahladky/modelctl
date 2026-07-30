@@ -3700,6 +3700,59 @@ def cmd_test(args):
               f"or content was empty -- inspect manually before trusting this profile.")
 
 
+WEB_SERVICE_NAME = "modelctl-web.service"
+WEB_UNIT_PATH = (Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+                 / "systemd" / "user" / WEB_SERVICE_NAME)
+
+WEB_UNIT_TEMPLATE = """\
+[Unit]
+Description=modelctl web console (profiles, tiers, pulls, benchmarks)
+After=network.target {swap_service}
+
+[Service]
+ExecStart={python} -m modelctl_web
+WorkingDirectory={workdir}
+Environment=MODELCTL_WEB_BIND={bind}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def web_console_url(bind=None):
+    """The URL a user should actually open, given a bind address.
+
+    0.0.0.0 is not a URL anyone can click; resolve it to this host's
+    primary address so `web install` prints something usable from another
+    machine on the LAN.
+    """
+    bind = bind or os.environ.get("MODELCTL_WEB_BIND", "0.0.0.0:9293")
+    host, _, port = bind.rpartition(":")
+    port = port or "9293"
+    if host in ("", "0.0.0.0", "::", "[::]"):
+        host = "127.0.0.1"
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                # No packet is sent; this just asks the routing table which
+                # local address would be used to reach the outside.
+                s.connect(("192.0.2.1", 80))
+                host = s.getsockname()[0]
+            finally:
+                s.close()
+        except OSError:
+            pass
+    return f"http://{host}:{port}/"
+
+
+def web_token():
+    """The console's bearer token, creating one if this is a first run."""
+    from modelctl_web.app import load_or_create_token
+    return load_or_create_token()
+
+
 def cmd_web(args):
     """Run the web console in the foreground (the systemd unit runs it the
     same way). Bind/token via MODELCTL_WEB_BIND / MODELCTL_WEB_TOKEN."""
@@ -3707,10 +3760,60 @@ def cmd_web(args):
     from modelctl_web.app import app
     bind = os.environ.get("MODELCTL_WEB_BIND", "0.0.0.0:9293")
     host, _, port = bind.rpartition(":")
-    print(f"modelctl-web on http://{host}:{port} "
-          f"(token: ~/.local/share/modelctl/web_token)")
+    print(f"modelctl-web on {web_console_url(bind)}")
+    print(f"token: {web_token()}")
     uvicorn.run(app, host=host or "0.0.0.0", port=int(port or 9293),
                 log_level="info")
+
+
+def cmd_web_url(args):
+    """Print where the console is and how to authenticate to it."""
+    print(web_console_url())
+    print(f"token: {web_token()}")
+    return 0
+
+
+def cmd_web_install(args):
+    """Install and start the console as a systemd user service, then print
+    the URL and token.
+
+    This is the single command Task C1 asks for: the browser is the
+    product entry point, so getting to a working browser must not require
+    reading a docs page about unit files.
+    """
+    bind = args.bind or os.environ.get("MODELCTL_WEB_BIND", "0.0.0.0:9293")
+    unit = WEB_UNIT_TEMPLATE.format(
+        swap_service=LLAMA_SWAP_SERVICE_NAME,
+        # sys.executable is the venv interpreter modelctl is running under,
+        # which is the one that has the dependencies installed.
+        python=sys.executable,
+        workdir=Path(__file__).resolve().parent,
+        bind=bind)
+
+    WEB_UNIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    existing = WEB_UNIT_PATH.read_text() if WEB_UNIT_PATH.exists() else ""
+    if existing != unit:
+        WEB_UNIT_PATH.write_text(unit)
+        print(f"wrote {WEB_UNIT_PATH}")
+    else:
+        print(f"{WEB_UNIT_PATH} already up to date")
+
+    for cmd in (["systemctl", "--user", "daemon-reload"],
+                ["systemctl", "--user", "enable", "--now", WEB_SERVICE_NAME],
+                ["systemctl", "--user", "restart", WEB_SERVICE_NAME]):
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"ERROR: {' '.join(cmd)} failed: "
+                  f"{(result.stderr or result.stdout).strip()}", file=sys.stderr)
+            return 1
+
+    print()
+    print(f"modelctl web console: {web_console_url(bind)}")
+    print(f"token: {web_token()}")
+    print()
+    print(f"  status: systemctl --user status {WEB_SERVICE_NAME}")
+    print(f"  logs:   journalctl --user -u {WEB_SERVICE_NAME} -f")
+    return 0
 
 
 def vram_footer_lines(inventory) -> list:
@@ -4011,8 +4114,23 @@ def build_arg_parser():
                           help="don't restart llama-swap after regenerating its config")
     p_place.set_defaults(func=cmd_place)
 
-    p_web = sub.add_parser("web", help="run the web console in the foreground")
+    # `modelctl web` keeps running the console in the foreground (no
+    # subcommand) so existing invocations and the systemd unit are
+    # unaffected; `modelctl web install` is the one-command setup path.
+    p_web = sub.add_parser("web", help="run the web console (the primary interface)")
+    web_sub = p_web.add_subparsers(dest="web_command")
     p_web.set_defaults(func=cmd_web)
+
+    p_web_install = web_sub.add_parser(
+        "install", help="install + start the console as a user service, and "
+                        "print its URL and token")
+    p_web_install.add_argument("--bind", default=None,
+                               help="address:port to bind (default 0.0.0.0:9293)")
+    p_web_install.set_defaults(func=cmd_web_install)
+
+    p_web_url = web_sub.add_parser(
+        "url", help="print the console URL and token")
+    p_web_url.set_defaults(func=cmd_web_url)
 
     p_disable = sub.add_parser("disable", help="exclude a saved profile from router/Hermes sync without deleting it")
     p_disable.add_argument("name")

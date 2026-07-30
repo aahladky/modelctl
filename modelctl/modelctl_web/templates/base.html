@@ -18,11 +18,19 @@
   <a href="/import">import</a>
   <a href="/tiers">tiers</a>
   <a href="/settings">settings</a>
+  <a href="/setup">setup</a>
   <a href="/jobs">jobs</a>
   <span class="spacer"></span>
   <a href="/logout">logout</a>
 </nav>
 <main>
+{% if setup_blocking %}
+<div class="card">
+  <p class="err"><strong>Setup incomplete —
+    {{ setup_blocking | map(attribute='title') | join(', ') }}.</strong>
+    <a href="/setup">fix it &rarr;</a></p>
+</div>
+{% endif %}
 {% block content %}{% endblock %}
 </main>
 </body>

@@ -1,6 +1,11 @@
 # Agent Guide — modelctl
 
-Python CLI + optional TUI/web console for managing local GGUF models on multi-GPU Intel SYCL workstations.
+Web console (FastAPI + HTMX) backed by a Python CLI, for managing local
+GGUF models on multi-GPU Intel SYCL workstations. **The browser is the
+product entry point** (roadmap Task C1): `modelctl web install` starts it
+and prints URL + token; `/setup` reports first-run readiness. The CLI is
+for bootstrap, automation, diagnostics, and recovery — it is fully
+supported, but new user-facing capability belongs in the console first.
 
 ## Active Roadmap
 
@@ -52,6 +57,7 @@ Tests are pure unittest (no fixtures, no services). Web tests use FastAPI's `Tes
 | `modelctl_profiles.py` | Profile schema, migration, and validation |
 | `modelctl_runtime.py` | Runtime database: reservations and runtime events |
 | `modelctl_services/` | Application services (cache, hardware, plan, profile, runtime) shared by CLI and web |
+| `modelctl_setup.py` | First-run readiness checks behind the console's `/setup` page |
 | `modelctl_storage.py` | Storage topology probing |
 | `modelctl_tiers.py` | Tier planner for `place --tiers` |
 | `modelctl_transactions.py` | Atomic multi-file mutation transactions |

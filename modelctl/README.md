@@ -1,10 +1,26 @@
 # modelctl
 
-A CLI (and optional TUI) for managing local GGUF models served by
-`llama-server`, on a workstation with multiple Intel SYCL GPUs.
-`modelctl` handles the whole lifecycle: search Hugging Face, pull a
-quant, configure runtime settings, size it against available VRAM,
-and push it into a router-mode `llama-server` so it loads on demand.
+A **web console** (with a CLI behind it) for managing local GGUF models
+served by `llama-server`, on a workstation with multiple Intel SYCL GPUs.
+`modelctl` handles the whole lifecycle: find or import a model, inspect
+it, compare placement plans against your actual hardware, test them, and
+register the winner with `llama-swap` so it loads on demand.
+
+## Start here
+
+```
+modelctl web install
+```
+
+Installs and starts the console as a systemd user service, then prints
+its URL and token. Open that URL — everything below is reachable from
+it, and the console's `/setup` page tells you what (if anything) this
+machine is still missing.
+
+The CLI remains fully supported, and is the right tool for bootstrap,
+automation, diagnostics, and recovery — but the browser is the primary
+workflow, because placement decisions are comparisons and comparisons
+want a screen.
 
 ## Why this exists
 
@@ -24,8 +40,12 @@ before you ever start the server.
 | [modelctl_vram.py](modelctl_vram.py) | Pure-stdlib VRAM math: GGUF header + tensor-table parsing, KV-cache/weights/overhead estimation, GPU probing (`xpu-smi`, with `llama-server --list-devices` fallback), and the placement rule. No `modelctl` import — also works as a **standalone calculator** (see below). |
 | [modelctl_tiers.py](modelctl_tiers.py) | Pure tier planner for `place --tiers`: tier 1–4 decisions, MoE expert-layer assignment (bandwidth-ordered), dense `-ngl` math, llama-server flag emission. |
 | [modelctl_tui.py](modelctl_tui.py) | Textual wizard for `modelctl pull --tui`. Pure interaction layer; every screen calls an existing function from `modelctl.py` rather than duplicating logic. |
+| [modelctl_web/](modelctl_web/) | FastAPI + HTMX console (`modelctl web`) — the primary interface. Reads run concurrently; writes go through a single JobRunner. |
+| [modelctl_setup.py](modelctl_setup.py) | First-run readiness checks behind the console's `/setup` page. |
 
-Tests: `test_modelctl.py`, `test_modelctl_vram.py`, `test_modelctl_tui.py` (`python3 -m unittest test_modelctl test_modelctl_vram test_modelctl_tui`).
+Tests: run the whole suite with
+`.venv/bin/python -m unittest discover -p "test_*.py"` — `discover` picks
+up every `test_*.py`, which a hand-listed set has failed to do before.
 
 ## Installation
 
