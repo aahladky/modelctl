@@ -84,7 +84,12 @@ def rank_plans(profile_name: str, policy=None) -> PlanResult:
 
 
 def select_plan(profile_name: str, plan_id: str) -> PlanResult:
-    """Pin a plan as the preferred choice for a managed profile."""
+    """Pin a plan as the preferred choice for a managed profile.
+
+    Clears the plan from disabled_plan_ids if it's there -- pinning a
+    previously-disabled plan should un-disable it, not leave it pinned
+    and disabled at once (rank_plans would then never actually select it).
+    """
     try:
         profile = modelctl.load_profile(profile_name)
     except (SystemExit, Exception) as e:
@@ -95,22 +100,32 @@ def select_plan(profile_name: str, plan_id: str) -> PlanResult:
         "allow_fallback": True, "allow_untested": False,
     })
     rt["pinned_plan_id"] = plan_id
+    rt["mode"] = "managed"
+    disabled = [p for p in rt.get("disabled_plan_ids", []) if p != plan_id]
+    rt["disabled_plan_ids"] = disabled
     modelctl.update_runtime_policy(profile_name, rt)
     return PlanResult(ok=True, selected_plan={"id": plan_id},
                       messages=[f"pinned plan {plan_id}"])
 
 
 def disable_plan(profile_name: str, plan_id: str) -> PlanResult:
-    """Disable a plan so it's never selected."""
+    """Disable a plan so it's never selected.
+
+    Clears pinned_plan_id if this was the pinned plan -- "disabled" must
+    mean never selected, not "disabled but still pinned."
+    """
     try:
         profile = modelctl.load_profile(profile_name)
     except (SystemExit, Exception) as e:
         return PlanResult(ok=False, messages=[f"failed to load profile: {e}"])
 
     rt = dict(profile.get("runtime") or {"mode": "managed"})
+    rt["mode"] = "managed"
     disabled = set(rt.get("disabled_plan_ids", []))
     disabled.add(plan_id)
     rt["disabled_plan_ids"] = sorted(disabled)
+    if rt.get("pinned_plan_id") == plan_id:
+        rt["pinned_plan_id"] = None
     modelctl.update_runtime_policy(profile_name, rt)
     return PlanResult(ok=True, messages=[f"disabled plan {plan_id}"])
 

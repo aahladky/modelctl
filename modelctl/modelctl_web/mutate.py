@@ -243,41 +243,28 @@ def submit_unload_all(runner):
 
 
 def submit_runtime_policy(runner, name, runtime):
-    def fn(store, job_id):
-        store.append_result_line(job_id, f"runtime policy for '{name}': "
-                                 + json.dumps(runtime))
+    def fn(ctx):
+        ctx.log(f"runtime policy for '{name}': " + json.dumps(runtime))
         modelctl.update_runtime_policy(name, runtime)
-        store.append_result_line(job_id, "profile saved, artifacts regenerated, synced")
+        ctx.log("profile saved, artifacts regenerated, synced")
         return {"name": name, "runtime": runtime}
     return runner.submit("mutation", f"runtime policy {name}", fn,
                          payload={"name": name, "runtime": runtime})
 
 
 def submit_plan_select(runner, name, plan_id, disable=False):
-    def fn(store, job_id):
+    from modelctl_services import plan_service
+
+    def fn(ctx):
+        result = (plan_service.disable_plan(name, plan_id) if disable
+                  else plan_service.select_plan(name, plan_id))
+        if not result.ok:
+            raise RuntimeError(result.messages[0] if result.messages
+                              else f"plan {'disable' if disable else 'select'} failed for '{name}'")
+        for m in result.messages:
+            ctx.log(m)
         profile = modelctl.load_profile(name)
-        rt = dict(profile.get("runtime") or {"mode": "managed",
-                                             "objective": "balanced",
-                                             "allow_fallback": True,
-                                             "allow_untested": False,
-                                             "minimum_context": 8192,
-                                             "maximum_cpu_bytes": None,
-                                             "maximum_storage_tier": 3,
-                                             "disabled_plan_ids": []})
-        disabled = list(rt.get("disabled_plan_ids", []))
-        if disable:
-            if plan_id not in disabled:
-                disabled.append(plan_id)
-            store.append_result_line(job_id, f"disabled plan {plan_id}")
-        else:
-            rt["pinned_plan_id"] = plan_id
-            if plan_id in disabled:
-                disabled.remove(plan_id)
-            store.append_result_line(job_id, f"pinned plan {plan_id}")
-        rt["disabled_plan_ids"] = disabled
-        rt["mode"] = "managed"
-        modelctl.update_runtime_policy(name, rt)
-        return {"name": name, "runtime": rt}
+        return {"name": name, "runtime": profile.get("runtime", {})}
     label = "disable" if disable else "select"
     return runner.submit("mutation", f"{label} plan {plan_id} on {name}", fn,
                          payload={"name": name, "plan_id": plan_id,
@@ -310,7 +297,7 @@ def submit_autotune(runner, name, objective="balanced", candidate_ids=None):
 
 
 def submit_matrix_apply(runner):
-    def fn(store, job_id):
+    def fn(ctx):
         import shutil
         import modelctl_matrix
         cfg_path = modelctl.LLAMA_SWAP_CONFIG_PATH
@@ -320,7 +307,7 @@ def submit_matrix_apply(runner):
 
         backup = cfg_path.with_suffix(f".yaml.bak-matrix-{int(time.time())}")
         shutil.copy2(cfg_path, backup)
-        store.append_result_line(job_id, f"backup: {backup}")
+        ctx.log(f"backup: {backup}")
 
         new_config = dict(config)
         new_config["matrix"] = merged
@@ -330,12 +317,12 @@ def submit_matrix_apply(runner):
         with open(tmp) as f:
             _os.fsync(f.fileno())
         tmp.replace(cfg_path)
-        store.append_result_line(job_id, "config.yaml written, restarting llama-swap")
+        ctx.log("config.yaml written, restarting llama-swap")
 
         import subprocess
         proc = subprocess.run(["systemctl", "--user", "restart", "llama-swap.service"],
                               capture_output=True, text=True, timeout=60)
-        store.append_result_line(job_id, proc.stdout + proc.stderr)
+        ctx.log(proc.stdout + proc.stderr)
         if proc.returncode != 0:
             shutil.copy2(backup, cfg_path)
             subprocess.run(["systemctl", "--user", "restart", "llama-swap.service"],
@@ -346,7 +333,7 @@ def submit_matrix_apply(runner):
         for _ in range(15):
             try:
                 LlamaSwapClient().health()
-                store.append_result_line(job_id, "llama-swap healthy after apply")
+                ctx.log("llama-swap healthy after apply")
                 return {"sets": len(merged["sets"]), "backup": str(backup)}
             except ModelctlSwapError:
                 time.sleep(2)

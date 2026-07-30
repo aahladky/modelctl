@@ -116,6 +116,49 @@ class TestPlanService(unittest.TestCase):
         self.assertTrue(result.plans)
 
 
+class TestPlanServiceSelection(unittest.TestCase):
+    """select_plan/disable_plan must never leave a plan both pinned and
+    disabled -- rank_plans would then never actually select it."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._orig_profiles = modelctl.PROFILES_DIR
+        modelctl.PROFILES_DIR = Path(self.tmp.name) / "profiles"
+        self.addCleanup(setattr, modelctl, "PROFILES_DIR", self._orig_profiles)
+        modelctl.save_profile({"name": "m1", "config": {"ctx": 4096}})
+
+    def test_selecting_a_disabled_plan_undisables_it(self):
+        with mock.patch("modelctl.generate_artifacts"), \
+             mock.patch("modelctl.sync_all_backends"):
+            plan_service.disable_plan("m1", "plan-a")
+            result = plan_service.select_plan("m1", "plan-a")
+        self.assertTrue(result.ok)
+        profile = modelctl.load_profile("m1")
+        self.assertEqual(profile["runtime"]["pinned_plan_id"], "plan-a")
+        self.assertNotIn("plan-a", profile["runtime"]["disabled_plan_ids"])
+
+    def test_disabling_the_pinned_plan_unpins_it(self):
+        with mock.patch("modelctl.generate_artifacts"), \
+             mock.patch("modelctl.sync_all_backends"):
+            plan_service.select_plan("m1", "plan-a")
+            result = plan_service.disable_plan("m1", "plan-a")
+        self.assertTrue(result.ok)
+        profile = modelctl.load_profile("m1")
+        self.assertIsNone(profile["runtime"]["pinned_plan_id"])
+        self.assertIn("plan-a", profile["runtime"]["disabled_plan_ids"])
+
+    def test_disabling_a_different_plan_leaves_pin_intact(self):
+        with mock.patch("modelctl.generate_artifacts"), \
+             mock.patch("modelctl.sync_all_backends"):
+            plan_service.select_plan("m1", "plan-a")
+            result = plan_service.disable_plan("m1", "plan-b")
+        self.assertTrue(result.ok)
+        profile = modelctl.load_profile("m1")
+        self.assertEqual(profile["runtime"]["pinned_plan_id"], "plan-a")
+        self.assertIn("plan-b", profile["runtime"]["disabled_plan_ids"])
+
+
 class TestHardwareService(unittest.TestCase):
     def test_load_settings_returns_dict(self):
         settings = hardware_service.load_settings()
