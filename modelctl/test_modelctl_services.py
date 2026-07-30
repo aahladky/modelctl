@@ -158,6 +158,25 @@ class TestPlanServiceSelection(unittest.TestCase):
         self.assertEqual(profile["runtime"]["pinned_plan_id"], "plan-a")
         self.assertIn("plan-b", profile["runtime"]["disabled_plan_ids"])
 
+    def test_enable_on_profile_with_no_runtime_policy_is_a_noop(self):
+        # No prior managed runtime policy -- enabling a plan that was
+        # never disabled must not fabricate a fresh managed section.
+        with mock.patch("modelctl.generate_artifacts"), \
+             mock.patch("modelctl.sync_all_backends"):
+            result = plan_service.enable_plan("m1", "plan-a")
+        self.assertTrue(result.ok)
+        profile = modelctl.load_profile("m1")
+        self.assertNotIn("runtime", profile)
+
+    def test_enable_clears_a_disabled_plan(self):
+        with mock.patch("modelctl.generate_artifacts"), \
+             mock.patch("modelctl.sync_all_backends"):
+            plan_service.disable_plan("m1", "plan-a")
+            result = plan_service.enable_plan("m1", "plan-a")
+        self.assertTrue(result.ok)
+        profile = modelctl.load_profile("m1")
+        self.assertNotIn("plan-a", profile["runtime"]["disabled_plan_ids"])
+
 
 class TestHardwareService(unittest.TestCase):
     def test_load_settings_returns_dict(self):

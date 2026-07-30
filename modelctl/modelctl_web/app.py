@@ -327,7 +327,7 @@ def create_app(token=None, store=None, runner=None):
 
     @app.post("/profiles/{name}/delete")
     def profile_delete(name: str):
-        def fn(store, job_id):
+        def fn(ctx):
             modelctl.cmd_remove(type("A", (), {"name": name, "no_hermes": True,
                                                "no_router_restart": False})())
             return {"removed": name}
@@ -979,13 +979,14 @@ def create_app(token=None, store=None, runner=None):
 
     @app.post("/profiles/{name}/plans/{plan_id}/enable")
     def plan_enable(name: str, plan_id: str):
-        def fn(store, job_id):
-            profile = modelctl.load_profile(name)
-            rt = profile.get("runtime") or {}
-            disabled = [d for d in rt.get("disabled_plan_ids", []) if d != plan_id]
-            rt["disabled_plan_ids"] = disabled
-            modelctl.update_runtime_policy(name, rt if rt.get("mode") == "managed" else None)
-            store.append_result_line(job_id, f"re-enabled plan {plan_id}")
+        from modelctl_services import plan_service
+
+        def fn(ctx):
+            result = plan_service.enable_plan(name, plan_id)
+            if not result.ok:
+                raise RuntimeError(result.messages[0] if result.messages
+                                  else f"enable failed for plan {plan_id}")
+            ctx.log(f"re-enabled plan {plan_id}")
             return {"enabled": plan_id}
         job_id = runner.submit("mutation", f"enable plan {plan_id}", fn,
                                payload={"name": name, "plan_id": plan_id})
@@ -1042,13 +1043,13 @@ def create_app(token=None, store=None, runner=None):
 
     @app.post("/runtime/routing/rollback")
     def routing_rollback():
-        def fn(store, job_id):
+        def fn(ctx):
             import glob, shutil
             backups = sorted(glob.glob(str(modelctl.LLAMA_SWAP_CONFIG_PATH) + ".bak-matrix-*"))
             if not backups:
                 raise RuntimeError("no matrix backup found")
             shutil.copy2(backups[-1], modelctl.LLAMA_SWAP_CONFIG_PATH)
-            store.append_result_line(job_id, f"restored {backups[-1]}")
+            ctx.log(f"restored {backups[-1]}")
             import subprocess
             subprocess.run(["systemctl", "--user", "restart", "llama-swap.service"],
                            capture_output=True, timeout=60)

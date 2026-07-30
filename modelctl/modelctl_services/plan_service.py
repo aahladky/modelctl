@@ -131,17 +131,23 @@ def disable_plan(profile_name: str, plan_id: str) -> PlanResult:
 
 
 def enable_plan(profile_name: str, plan_id: str) -> PlanResult:
-    """Re-enable a previously disabled plan."""
+    """Re-enable a previously disabled plan.
+
+    Unlike select/disable, this never forces a profile into managed mode --
+    a profile with no runtime policy at all has nothing to enable, so it's
+    a no-op rather than fabricating a fresh managed section.
+    """
     try:
         profile = modelctl.load_profile(profile_name)
     except (SystemExit, Exception) as e:
         return PlanResult(ok=False, messages=[f"failed to load profile: {e}"])
 
-    rt = dict(profile.get("runtime") or {"mode": "managed"})
+    rt = dict(profile.get("runtime") or {})
     disabled = set(rt.get("disabled_plan_ids", []))
     disabled.discard(plan_id)
     rt["disabled_plan_ids"] = sorted(disabled)
-    modelctl.update_runtime_policy(profile_name, rt)
+    modelctl.update_runtime_policy(
+        profile_name, rt if rt.get("mode") == "managed" else None)
     return PlanResult(ok=True, messages=[f"enabled plan {plan_id}"])
 
 
