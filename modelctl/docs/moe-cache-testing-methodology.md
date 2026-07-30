@@ -1,0 +1,121 @@
+# How to actually test the MoE expert cache
+
+Written 2026-07-30 after three rounds of measuring the cache, two of
+which produced misleading numbers for avoidable reasons. Read this before
+running another cache benchmark.
+
+The recurring failure is the same each time: **the benchmark ran, produced
+plausible numbers, and measured something other than what was intended.**
+None of these were detected by the numbers looking wrong. They were caught
+by checking what the machine was actually doing.
+
+## 1. Confirm the cache is running at all
+
+The cache attaches to a scheduler hook that only fires for cross-backend
+weight copies, gated on `get_op_batch_size(op) >= op_offload_min_batch_size`
+(default **32**). Decode is batch 1, so **on default settings the cache
+never activates during generation** — it is configured, logged as enabled,
+and completely inert.
+
+Phase E concluded `cache-enabled ≈ cache-disabled` and attributed it to
+the model fitting in VRAM. The real reason was that no cache existed.
+
+Before trusting any comparison:
+
+```bash
+grep "moe_cache: initialized" server.log      # must be present
+curl localhost:$PORT/metrics | grep moe_cache # must be non-empty
+```
+
+`MoE expert cache enabled: ...` in the log means the *config* was
+accepted. It does **not** mean a cache was created. Only
+`moe_cache: initialized on device N` means that.
+
+To reach the cache at batch 1, set `GGML_OP_OFFLOAD_MIN_BATCH=1` — and
+see §3, because doing so is not free.
+
+## 2. Derive placement for the model under test; never inherit it
+
+`--tensor-split 4,1` was copied from the `qwen3-5-122b-a10b-ud` profile
+into a Q4_K_M run. That value was tuned for IQ1_M (31.9 GiB). Q4_K_M is
+71.3 GiB — 2.2× larger — and on 31.9 + 11.9 GiB of VRAM the 80/20 split
+pinned SYCL0 at 98% while **~10 GiB of SYCL1 sat unused**, forcing far
+more onto storage than the hardware required.
+
+The GPUs here are a **2.7:1** capacity ratio, so a capacity-proportional
+split is roughly `8,3`, not `4,1`.
+
+This matters beyond wasted VRAM: an unnecessarily storage-bound baseline
+**flatters whatever is being tested**, because it leaves more for the
+optimisation to recover. A cache measured against a handicap you
+introduced will look better than it is.
+
+Check mid-run, not just at the end:
+
+```bash
+modelctl doctor            # or read free VRAM per device
+```
+
+If one GPU is saturated and the other has room, the placement is wrong
+and the numbers are not about the cache.
+
+## 3. Measure the cost of reaching the cache, not just its benefit
+
+`op_offload_min_batch_size` is **global**. Lowering it to 1 forces every
+small-batch op through a cross-backend copy, not only the MoE ones. On
+the models tested this cost 41–52% before the cache did anything.
+
+So a two-condition test (cache on vs off, both at min-batch 1) answers
+the wrong question. Always run **three**:
+
+| | min-batch | cache | what it tells you |
+|---|---|---|---|
+| A | 32 (default) | on | the real-world baseline; cache will be inert |
+| B | 1 | off | what lowering the threshold costs on its own |
+| C | 1 | on | what the cache recovers |
+
+`C vs B` is the cache's benefit. **`C vs A` is whether any of it was
+worth doing.** Reporting only `C vs B` overstates the case badly.
+
+## 4. Test the quant you actually serve
+
+The answer changes with the model, and not slightly:
+
+| model | threshold cost (A→B) | cache gain (B→C) | net (A→C) | hit ratio |
+|---|---|---|---|---|
+| 35B-A3B, IQ4_XS (16.3 GiB) | -52% | +21% | **-42%** | 71.6% |
+| 122B-A10B, IQ1_M (31.9 GiB) | -41% | +48% | **-12%** | 85.3% |
+| 122B-A10B, Q4_K_M (71.3 GiB) | **+28%** | *not measured* | — | — |
+
+A conclusion drawn from the first row ("the cache cannot serve
+interactive decode") did not survive the second, and the third inverted
+the sign of the threshold cost. Active expert bytes per token is the
+variable that matters — A3B activates ~3B parameters, A10B ~10B — and
+whether the model is VRAM-, RAM-, or storage-bound changes it again.
+
+Do not generalise from one quant. State which one was measured.
+
+## 5. Keep the harness from lying to you
+
+- **`llama-sycl-env.sh` terminates a script that sources it.** Source it
+  in the caller, then invoke the script.
+- **`pkill -f` does not reliably kill `llama-server`.** Kill by PID, then
+  verify with `pgrep` *and* by watching VRAM come back.
+- **Verify VRAM is released between conditions.** A 30 GiB model that has
+  not finished unloading changes the next run's placement silently.
+- **Watch for orphaned wait loops.** An `until grep -q DONE ...; sleep`
+  loop polling a file that never gets its sentinel spins until the
+  session ends.
+
+## 6. Prefer the harness over ad-hoc scripts
+
+`modelctl_acceptance.run_matrix()` (Task E3) already handles placement,
+preconditions, per-cell cache state, and honest skip reasons, and records
+every measurement through `test_launch_plan` with D2's counters attached
+— RSS, PSS, page faults, read bytes, storage-activity classification and
+bottleneck attribution.
+
+Ad-hoc scripts were used here to control `GGML_OP_OFFLOAD_MIN_BATCH`,
+which the harness cannot yet vary. **Teaching the harness that variable is
+the right next step** — every lesson above is something the harness
+already gets right, or could.

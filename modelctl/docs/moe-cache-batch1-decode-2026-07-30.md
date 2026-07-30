@@ -145,3 +145,53 @@ Generate, then `curl localhost:45913/metrics | grep moe_cache`. Drop the
 `--moe-cache-*` flags for the off case; drop the env var for the default.
 Confirm `moe_cache: initialized` appears in the server log — without it
 the cache is not running and the comparison is meaningless.
+
+---
+
+## Addendum: Q4_K_M (71.3 GiB) — partial, and why it was abandoned
+
+The two runs above used quants that fit in VRAM or close to it. Q4_K_M is
+the quant actually served for quality work: 71.3 GiB across 3 shards,
+larger than VRAM (42.1) and RAM (26.9) **combined**, so a large slice of
+the experts is reachable only through mmap from NVMe.
+
+Two of three conditions completed before the run was stopped:
+
+| | min-batch | cache | decode | cache active |
+|---|---|---|---|---|
+| **A** | 32 (default) | on | 4.56 t/s | no |
+| **B** | 1 | off | **5.82 t/s** | no |
+| **C** | 1 | on | *not measured* | — |
+
+**B is faster than A — the sign is inverted.** On both smaller quants,
+lowering the offload threshold cost 41–52%. Here it *gained* 28%. That is
+consistent with a storage-bound regime: when weights are arriving from
+NVMe, moving more work onto the GPU is not the expensive part, so the
+blanket cost that dominated the earlier runs does not apply. It also
+means the "lowering the threshold is a 41% hole" framing above is
+specific to models that are not storage-bound.
+
+### Why this run is not trustworthy
+
+`--tensor-split 4,1` was copied from the `qwen3-5-122b-a10b-ud` profile,
+where it was tuned for IQ1_M at 31.9 GiB. On Q4_K_M it pinned SYCL0 at
+31.2/31.9 GiB while leaving **~10 GiB of SYCL1 unused**, pushing far more
+onto storage than the hardware requires. The GPUs are a 2.7:1 capacity
+ratio; the split should be about `8,3`.
+
+The A/B comparison above is internally consistent — both conditions share
+the placement — but the absolute numbers understate the hardware, and an
+over-storage-bound baseline would have flattered C. Rather than publish a
+cache result measured against a self-inflicted handicap, the run was
+stopped.
+
+### To redo it properly
+
+Re-run all three conditions with `--tensor-split 8,3`, confirm both GPUs
+are meaningfully used before trusting anything, and follow
+`moe-cache-testing-methodology.md`. The open question this would answer
+is the interesting one: **in a genuinely storage-bound regime, where a
+cache miss can cost a disk read rather than a PCIe copy, does the cache
+finally pay for itself outright?** Neither smaller quant could answer
+that, and the inverted sign in row B suggests the economics there are
+different enough that it might.
