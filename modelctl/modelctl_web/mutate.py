@@ -11,12 +11,14 @@ import modelctl
 
 def submit_edit(runner, name, updates):
     """Apply config/profile field updates, regenerate, sync."""
+    from modelctl_services import profile_service
+
     def fn(ctx):
-        ctx.log(f"applying updates to '{name}': {', '.join(sorted(updates))}")
-        profile, messages = modelctl.update_profile_config(name, updates)
-        for m in messages:
-            ctx.log(m)
-        return {"name": name, "messages": messages}
+        result = profile_service.update_config(name, updates, ctx=ctx)
+        if not result.ok:
+            raise RuntimeError(result.messages[0] if result.messages
+                              else f"edit failed for '{name}'")
+        return {"name": name, "messages": result.messages}
     return runner.submit("edit", f"edit {name}", fn, payload={"name": name, "updates": updates},
                          lane="mutation")
 

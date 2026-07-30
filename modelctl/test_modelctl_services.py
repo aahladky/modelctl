@@ -53,6 +53,21 @@ class TestProfileService(unittest.TestCase):
             result = profile_service.update_config("test-model", {"ctx": "8192"})
         self.assertTrue(result.ok)
 
+    def test_update_config_logs_through_ctx(self):
+        profile = modelctl.normalize_profile({
+            "name": "test-model",
+            "model_path": "/tmp/test.gguf",
+            "config": {"ctx": 4096},
+        })
+        modelctl.save_profile(profile)
+        ctx = _FakeCtx()
+
+        with mock.patch("modelctl.generate_artifacts"), \
+             mock.patch("modelctl.sync_all_backends"):
+            result = profile_service.update_config("test-model", {"ctx": "8192"}, ctx=ctx)
+        self.assertTrue(result.ok)
+        self.assertTrue(any("applying updates" in line for line in ctx.lines))
+
     def test_list_profiles_empty(self):
         profiles = profile_service.list_profiles()
         self.assertEqual(profiles, [])

@@ -60,19 +60,32 @@ def remove_profile(name: str, resync: bool = True) -> ProfileResult:
 
 
 def update_config(name: str, updates: dict,
-                  resync: bool = True) -> ProfileResult:
+                  resync: bool = True, ctx=None) -> ProfileResult:
     """Apply field-level updates to a profile.
 
-    The canonical non-interactive edit path for both CLI and web.
+    The canonical non-interactive edit path for both CLI and web
+    (modelctl_web/mutate.py's submit_edit). `ctx`, if given, is a
+    modelctl_web.jobs.JobContext -- update_profile_config's own preflight
+    messages get logged through it as they're produced, same as
+    submit_edit did before delegating here.
     """
+    if ctx:
+        ctx.log(f"applying updates to '{name}': {', '.join(sorted(updates))}")
     try:
         profile, messages = modelctl.update_profile_config(
             name, updates, resync=resync)
     except (SystemExit, Exception) as e:
         return ProfileResult(ok=False, messages=[str(e)])
+    if ctx:
+        for m in messages:
+            ctx.log(m)
 
     validation = modelctl_profiles.validate_profile(
         modelctl_profiles.normalize_profile(profile))
+    if ctx:
+        for v in validation:
+            if v.severity != "info":
+                ctx.log(f"{v.severity}: {v.summary}")
     return ProfileResult(
         ok=True, profile=profile, messages=messages, validation=validation)
 
