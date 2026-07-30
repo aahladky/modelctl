@@ -83,5 +83,27 @@
 <h2>env</h2>
 <div class="card"><code>{{ p.get('env', []) | join('\n') }}</code></div>
 <h2>rendered command</h2>
-<div class="card"><pre>{{ run_sh }}</pre></div>
+{% if validation %}
+<div class="card">
+  {% for v in validation %}
+    {% if v.severity == 'error' %}
+  <p class="err"><strong>blocked — {{ v.code }}:</strong> {{ v.summary }}
+    {% if v.recovery %}<br><span class="muted">{{ v.recovery }}</span>{% endif %}</p>
+    {% elif v.severity == 'warning' %}
+  <p class="warn"><strong>{{ v.code }}:</strong> {{ v.summary }}</p>
+    {% endif %}
+  {% endfor %}
+  {% for w in warnings %}
+  <p class="warn">{{ w }}</p>
+  {% endfor %}
+</div>
+{% endif %}
+<div class="card">
+  <pre>{{ run_sh }}</pre>
+  {% if command_fingerprint %}
+  <p class="muted">command fingerprint: <code>{{ command_fingerprint }}</code> —
+    the preview, generated run.sh, llama-swap entry, plan test, and managed
+    worker all share this identity.</p>
+  {% endif %}
+</div>
 {% endblock %}

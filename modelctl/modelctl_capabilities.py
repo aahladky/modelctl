@@ -32,6 +32,7 @@ Public API:
     backend_features(caps) -> dict
     backend_constraints(caps) -> dict
     backend_cli(caps) -> dict
+    capability_fingerprint(caps) -> str
 """
 import hashlib
 import json
@@ -467,3 +468,23 @@ def backend_cli(caps: dict) -> dict:
 def backend_build(caps: dict) -> dict:
     """Return the build info dict."""
     return caps.get("build", {})
+
+
+def capability_fingerprint(caps: dict) -> str:
+    """Stable digest of a capability response.
+
+    Observations record this so a runtime whose *reported* capabilities
+    changed -- a rebuilt fork that gained or lost a feature, or a backend
+    loaded with different devices visible -- invalidates measurements taken
+    under the old contract, even when the binary path is unchanged.
+
+    Internal bookkeeping keys (probe cache metadata, the raw
+    pre-normalization copy) are excluded so re-probing an unchanged binary
+    yields an unchanged digest.  _probe_status is kept: "unsupported" and
+    "ok" are genuinely different contracts.
+    """
+    material = {k: v for k, v in (caps or {}).items()
+                if not k.startswith("_") or k == "_probe_status"}
+    text = json.dumps(material, sort_keys=True, separators=(",", ":"),
+                      default=str)
+    return hashlib.sha256(text.encode()).hexdigest()[:16]

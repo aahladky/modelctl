@@ -2190,6 +2190,33 @@ def _capabilities_for_profile(profile, binary=None, probe=False):
         return None
 
 
+def canonical_launch_command(profile, port=None):
+    """The one authoritative command for a fixed profile, as (cmd, ok, messages).
+
+    Every surface that renders or launches "this profile as saved" -- the
+    llama-swap entry, the generated run.sh, the smoke test, and the
+    browser preview -- goes through here.  Each of them used to call
+    preflight() and build_server_args() itself, which is four independent
+    reconstructions of the command *after* validation and four chances to
+    disagree with what the managed worker actually launches (roadmap Task
+    B1).  cmd.argv[0] is the resolved binary; cmd.backend carries the
+    capabilities the argv was compiled against and the environment
+    overrides artifacts should export.
+
+    port=None leaves --port out entirely so renderers can substitute
+    their own ${PORT} placeholder.
+
+    messages keeps the legacy string shape ("ERROR: ...", "moe_cache
+    warning: ...") the CLI and job logs already print.
+    """
+    import modelctl_launch
+    cmd = modelctl_launch.launch_command_for_profile(profile, port=port)
+    cache_msgs = preflight_moe_cache(profile, capabilities=cmd.backend.capabilities)
+    messages = list(cmd.backend.preflight_messages) + [
+        f"moe_cache {lvl}: {m}" for lvl, m in cache_msgs if lvl != "ok"]
+    return cmd, cmd.backend.preflight_ok, messages
+
+
 def build_server_args(profile, capabilities=None):
     """Return a flat list of llama-server CLI tokens. Values with spaces are
     kept as single tokens so callers don't have to re-tokenize with shlex.
@@ -2494,12 +2521,13 @@ def render_llama_swap_entry(profile):
         ok, _bin, effective_env, messages = preflight(profile, auto_fix=True)
         return _render_worker_entry(profile, ok, effective_env, messages)
 
-    ok, effective_bin, effective_env, messages = preflight(profile, auto_fix=True)
-    caps = _capabilities_for_profile(profile, effective_bin, probe=True)
-    cache_msgs = preflight_moe_cache(profile, capabilities=caps)
-    messages = list(messages) + [f"moe_cache {lvl}: {m}" for lvl, m in cache_msgs
-                                 if lvl != "ok"]
-    args = build_server_args(profile, capabilities=caps)
+    cmd, ok, messages = canonical_launch_command(profile)
+    # A command validation rejected must not be published to the router as
+    # if it were runnable (roadmap Task B2). `ok=False` is the existing
+    # "unresolved" signal sync_all_backends() already reports on.
+    ok = ok and cmd.is_valid
+    effective_bin, args = cmd.argv[0], cmd.argv[1:]
+    effective_env = cmd.backend.environment_overrides
     # The cmd: block scalar is a *shell* command line, so quote for the
     # shell (shlex), not YAML -- json.dumps-style double quotes would leave
     # `$` and backticks live inside the string.
@@ -2627,21 +2655,19 @@ def generate_artifacts(profile):
     if profile.get("backend") == "ovms":
         return generate_ovms_artifacts(profile, out_dir)
 
-    ok, effective_bin, effective_env, messages = preflight(profile, auto_fix=True)
+    # One canonical command for the whole profile: the binary, environment,
+    # and argv written into run.sh are byte-for-byte what the llama-swap
+    # entry below and the managed worker use.  Cache settings are validated
+    # against the real binary (probe is cached); unprobed/incapable
+    # backends fail closed -- no experimental flags in the artifacts.
+    cmd, ok, messages = canonical_launch_command(profile)
+    ok = ok and cmd.is_valid
     if messages:
         print(f"Resolving runtime for '{name}':")
         for m in messages:
             print(f"  {m}")
-
-    # Validate cache settings against the real binary (probe is cached);
-    # unprobed/incapable backends fail closed -- no experimental flags in
-    # the generated artifacts.
-    caps = _capabilities_for_profile(profile, effective_bin, probe=True)
-    cache_msgs = preflight_moe_cache(profile, capabilities=caps)
-    for level, msg in cache_msgs:
-        if level != "ok":
-            print(f"  moe_cache {level}: {msg}")
-    args = build_server_args(profile, capabilities=caps)
+    effective_bin, args = cmd.argv[0], cmd.argv[1:]
+    effective_env = cmd.backend.environment_overrides
     # Map shlex.quote over each token individually -- joining an already-
     # joined string would iterate its characters and split every argument
     # one letter per line in the generated run.sh.
@@ -3544,26 +3570,20 @@ def smoke_test_profile(name, timeout=600, prompt=None, proc_register=None):
     result = {"ok": False, "stage": "preflight", "messages": [],
               "tok_per_s": None, "content": None, "finish_reason": None,
               "log_path": None}
-    ok, effective_bin, effective_env, messages = preflight(profile, auto_fix=True)
+    port = find_free_port()
+    launch, ok, messages = canonical_launch_command(profile, port=port)
     result["messages"].extend(messages)
     if not ok:
         return result
 
-    # Block the launch when cache validation fails (manual mode against an
-    # incapable/unprobed backend) rather than firing an untruthful command.
-    caps = _capabilities_for_profile(profile, effective_bin, probe=True)
-    cache_msgs = preflight_moe_cache(profile, capabilities=caps)
-    cache_errors = [m for lvl, m in cache_msgs if lvl == "error"]
-    result["messages"].extend(f"moe_cache {lvl}: {m}" for lvl, m in cache_msgs
-                              if lvl != "ok")
-    if cache_errors:
+    # Fail closed on any blocking validation (manual cache mode against an
+    # incapable/unprobed backend, a missing mmproj, ...) rather than firing
+    # an untruthful command.
+    if not launch.is_valid:
         return result
 
-    port = find_free_port()
-    cmd = [effective_bin, "--port", str(port)] + build_server_args(
-        profile, capabilities=caps)
-    env = dict(os.environ)
-    env.update(effective_env)
+    cmd = list(launch.argv)
+    env = launch.environment
 
     log_path = PROFILES_DIR / profile["name"] / "test.log"
     result["log_path"] = str(log_path)

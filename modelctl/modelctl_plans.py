@@ -368,6 +368,23 @@ def _make_plan(profile, config, source, hardware, extra_warnings=(), decision=No
     )
 
 
+def current_profile_plan(profile, hardware=None, capabilities=None):
+    """The single LaunchPlan meaning "this profile exactly as saved".
+
+    Preview, artifact, llama-swap, and smoke-test paths need that one plan
+    without compiling the whole candidate set (which probes hardware and
+    the GGUF layout for every variant).  Built through the same
+    _make_plan() as every other candidate, so its argv and plan ID are
+    identical to the "current profile" candidate compile_launch_plans()
+    produces for the same profile.
+
+    hardware is optional: it only refines the resource claim and the
+    plan's display label, neither of which a command preview needs.
+    """
+    return _make_plan(profile, {}, "current-profile", hardware,
+                      capabilities=capabilities)
+
+
 def _compile_ovms_plans(profile, hardware):
     """OVMS plan candidates: one per enabled GPU (target_device), plus a
     reduced-cache fallback per GPU. Claims come from the local IR directory

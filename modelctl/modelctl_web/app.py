@@ -260,21 +260,17 @@ def create_app(token=None, store=None, runner=None):
     @app.get("/profiles/{name}", response_class=HTMLResponse)
     def profile_edit(request: Request, name: str, saved: str = ""):
         p = modelctl.load_profile(name)
-        caps = None
-        binary = p.get("binary") or modelctl.LLAMA_SERVER_BIN
-        if binary:
-            try:
-                from modelctl_capabilities import get_cached_capabilities
-                caps = get_cached_capabilities(binary)
-            except Exception:
-                pass
-        args = modelctl.build_server_args(p, capabilities=caps)
-        messages = [f"{lvl}: {msg}" for lvl, msg in
-                    modelctl.preflight_moe_cache(p, capabilities=caps)
-                    if lvl != "ok"]
+        # The preview is the canonical command, not a re-derivation of it:
+        # this page used to probe whatever binary the profile *named*, which
+        # is frequently not the one preflight's auto-fix search resolves and
+        # actually launches (roadmap Task B1).
+        cmd, _ok, messages = modelctl.canonical_launch_command(p)
+        caps = cmd.backend.capabilities
         return templates.TemplateResponse(request=request, name="profile_edit.html", context=ctx(
             request, p=p, fields=EDIT_FIELDS, saved=saved,
-            run_sh=" \\\n  ".join(args), messages=messages,
+            run_sh=" \\\n  ".join(cmd.argv), messages=messages,
+            command_fingerprint=cmd.command_fingerprint,
+            validation=cmd.validation, warnings=cmd.warnings,
             capabilities=caps))
 
     @app.post("/profiles/{name}")
@@ -337,7 +333,11 @@ def create_app(token=None, store=None, runner=None):
     @app.get("/profiles/{name}/run.sh", response_class=PlainTextResponse)
     def profile_runsh(name: str):
         p = modelctl.load_profile(name)
-        return " \\\n  ".join(modelctl.build_server_args(p))
+        # Was the one preview that passed no capabilities at all and omitted
+        # the resolved binary, so it could show a command the profile's own
+        # generated run.sh contradicted.
+        cmd, _ok, _messages = modelctl.canonical_launch_command(p)
+        return " \\\n  ".join(cmd.argv)
 
     # ---- tier planner ---------------------------------------------------
     def _plan_for(name):

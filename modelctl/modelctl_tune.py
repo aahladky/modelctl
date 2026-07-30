@@ -237,13 +237,11 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
         resolved = modelctl_launch.resolve_backend(profile, binary_override=binary)
         launch = modelctl_launch.build_launch_command(profile, plan,
                                                       backend=resolved, port=port)
-        validation_errors = [v for v in launch.validation
-                             if getattr(v, "severity", "") == "error"]
-        if validation_errors:
+        if not launch.is_valid:
             run["failure_class"] = "preflight_failed"
-            run["details"] = {"validation": [v.summary for v in validation_errors]}
+            run["details"] = {"validation": [v.summary for v in launch.errors]}
             log("launch validation failed: "
-                + "; ".join(v.summary for v in validation_errors))
+                + "; ".join(v.summary for v in launch.errors))
             return run
         cmd = list(launch.argv)
         run["command_argv"] = cmd
@@ -252,6 +250,7 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
         run["binary_fingerprint"] = launch.backend.binary_fingerprint
         run["environment_fingerprint"] = launch.backend.environment_fingerprint
         run["capability_schema"] = launch.backend.capabilities.get("schema", 0)
+        run["capability_digest"] = launch.backend.capability_fingerprint
         log(f"launching: {' '.join(cmd[:6])} ...")
         log_path = modelctl.PROFILES_DIR / profile_name / f"plan-test-{plan_id[:8]}.log"
         run["log_path"] = str(log_path)

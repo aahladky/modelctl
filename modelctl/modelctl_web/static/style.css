@@ -13,6 +13,7 @@ a { color:#8fb4e8; }
 .muted { color:#8b95a3; }
 .ok { color:#6fce85; }
 .warn { color:#e8b25f; }
+.err { color:#e07a7a; }
 .active { color:#5ba8e8; }
 .stopped { color:#8b95a3; }
 .danger { background:#5a2b2b; }

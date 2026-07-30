@@ -169,59 +169,59 @@ class TestBuildLaunchCommandValidation(unittest.TestCase):
                           "decode": {"miss_execution": "cpu"}},
         }
 
-    def _backend(self, features):
+    def _backend(self, features, preflight_messages=()):
         return modelctl_launch.ResolvedBackend(
             name="llama-cpp", binary="/bin/llama-server",
             binary_fingerprint="abc", environment={},
             environment_fingerprint="def",
-            capabilities={"schema": 2, "features": features, "cli": {}})
+            capabilities={"schema": 2, "features": features, "cli": {}},
+            preflight_messages=tuple(preflight_messages))
 
     class _Plan:
         id = "plan1"
         env = {}
 
     def test_manual_cache_on_incapable_backend_is_error(self):
-        import modelctl
         backend = self._backend({"moe_weight_transfer_cache": False,
                                  "moe_hybrid_cpu_miss": False})
-        with mock.patch.object(modelctl, "preflight",
-                               return_value=(True, "/bin/llama-server", {}, [])), \
-             mock.patch("modelctl_backends.get_backend") as gb:
+        with mock.patch("modelctl_backends.get_backend") as gb:
             gb.return_value.build_command.return_value = ["/bin/llama-server"]
             cmd = modelctl_launch.build_launch_command(
                 self._profile("manual"), self._Plan(), backend=backend, port=8080)
         errors = [v for v in cmd.validation if v.severity == "error"]
         self.assertTrue(errors, "manual cache on incapable backend not blocked")
+        self.assertFalse(cmd.is_valid)
+        with self.assertRaises(modelctl_launch.LaunchValidationError):
+            cmd.raise_for_errors()
 
     def test_auto_cache_on_incapable_backend_is_warning(self):
-        import modelctl
         backend = self._backend({"moe_weight_transfer_cache": False,
                                  "moe_hybrid_cpu_miss": False})
-        with mock.patch.object(modelctl, "preflight",
-                               return_value=(True, "/bin/llama-server", {}, [])), \
-             mock.patch("modelctl_backends.get_backend") as gb:
+        with mock.patch("modelctl_backends.get_backend") as gb:
             gb.return_value.build_command.return_value = ["/bin/llama-server"]
             cmd = modelctl_launch.build_launch_command(
                 self._profile("auto"), self._Plan(), backend=backend, port=8080)
         self.assertFalse([v for v in cmd.validation if v.severity == "error"])
         self.assertTrue([v for v in cmd.validation if v.severity == "warning"])
+        self.assertTrue(cmd.is_valid)
+        cmd.raise_for_errors()
 
     def test_real_preflight_message_strings_do_not_crash(self):
         # modelctl.preflight() returns plain message strings (severity as
         # a text prefix), not (severity, summary) tuples -- every other
-        # test here mocks it with an empty list, which never exercises
+        # test here uses an empty message list, which never exercises
         # this. Real profiles almost always produce at least one message
         # (an auto-fix note, a pinned-binary note, a warning), so this
-        # reproduces the actual crash a real launch hit.
-        import modelctl
-        backend = self._backend({"moe_weight_transfer_cache": True,
-                                 "moe_hybrid_cpu_miss": False})
-        with mock.patch.object(modelctl, "preflight", return_value=(
-                True, "/bin/llama-server", {},
-                ["using pinned binary: /bin/llama-server",
-                 "WARNING: configured llama-server doesn't appear to support 'SYCL0'",
-                 "ERROR: mmproj file not found on disk: /x.mmproj"])), \
-             mock.patch("modelctl_backends.get_backend") as gb:
+        # reproduces the actual crash a real launch hit. resolve_backend()
+        # now records those strings on the ResolvedBackend rather than
+        # build_launch_command() re-running preflight for them.
+        backend = self._backend(
+            {"moe_weight_transfer_cache": True, "moe_hybrid_cpu_miss": False},
+            preflight_messages=[
+                "using pinned binary: /bin/llama-server",
+                "WARNING: configured llama-server doesn't appear to support 'SYCL0'",
+                "ERROR: mmproj file not found on disk: /x.mmproj"])
+        with mock.patch("modelctl_backends.get_backend") as gb:
             gb.return_value.build_command.return_value = ["/bin/llama-server"]
             cmd = modelctl_launch.build_launch_command(
                 self._profile("off"), self._Plan(), backend=backend, port=8080)
@@ -229,6 +229,7 @@ class TestBuildLaunchCommandValidation(unittest.TestCase):
                       cmd.warnings)
         errors = [v.summary for v in cmd.validation if v.severity == "error"]
         self.assertIn("mmproj file not found on disk: /x.mmproj", errors)
+        self.assertFalse(cmd.is_valid)
 
     def test_environment_fingerprint_ignores_process_env(self):
         # Only profile-declared env feeds the fingerprint: unrelated shell

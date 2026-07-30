@@ -58,13 +58,19 @@ def _build_command(profile, plan, port, binary=None):
     """Build the backend command: resolved binary + plan argv, with the
     assigned port injected. plan.argv comes from build_server_args, which
     deliberately starts at --model (no binary -- that's preflight's job).
-    `binary` skips preflight (tests, or a caller that already resolved it)."""
+    `binary` skips preflight (tests, or a caller that already resolved it).
+
+    port=None means "don't bind a port at all": rendering paths (run.sh,
+    the llama-swap entry, the browser preview) substitute their own
+    ``${PORT}`` placeholder and must not get a literal "--port None"."""
     if binary is None:
         ok, effective_bin, _env, messages = modelctl.preflight(profile)
         if not ok:
             raise RuntimeError(f"preflight failed: {'; '.join(messages)}")
         binary = effective_bin
     argv = [binary] + list(plan.argv)
+    if port is None:
+        return argv
     # Replace or add --port
     new_argv = []
     skip_next = False
@@ -233,13 +239,9 @@ def worker_main(profile_name, port):
             # through to the fallback loop.
             import modelctl_launch
             launch = modelctl_launch.build_launch_command(profile, plan, port=port)
-            validation_errors = [v for v in launch.validation
-                                 if getattr(v, "severity", "") == "error"]
-            if validation_errors:
+            if not launch.is_valid:
                 run["failure_class"] = "preflight_failed"
-                raise RuntimeError(
-                    "launch validation failed: "
-                    + "; ".join(v.summary for v in validation_errors))
+                launch.raise_for_errors()
             cmd = list(launch.argv)
 
             # Provenance from the canonical object: the recorded command,
@@ -250,6 +252,7 @@ def worker_main(profile_name, port):
             run["binary_fingerprint"] = launch.backend.binary_fingerprint
             run["environment_fingerprint"] = launch.backend.environment_fingerprint
             run["capability_schema"] = launch.backend.capabilities.get("schema", 0)
+            run["capability_digest"] = launch.backend.capability_fingerprint
             run["claim"] = {"vram_bytes": dict(plan.claim.vram_bytes),
                             "ram_bytes": plan.claim.ram_bytes,
                             "storage_mode": plan.claim.storage_mode}
