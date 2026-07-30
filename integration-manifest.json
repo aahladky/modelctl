@@ -1,0 +1,23 @@
+{
+  "generated_at": "2026-07-30T11:35:00-04:00",
+  "modelctl_commit": "93fab71",
+  "llama_cpp_commit": "2dbf9480 15d3476ce94e3fe0c3b38b941a32a685",
+  "llama_cpp_upstream_base": "9b2a08881",
+  "llama_cpp_pre_sync_tag": "moe-cache-pre-upstream-2026-07-30",
+  "llama_cpp_pre_sync_commit": "e7af6cf1996cb3d850963213b043d876ffe959ea",
+  "capability_schema": 2,
+  "profile_schema": "unversioned",
+  "supported_runtime_features": [
+    "moe_weight_transfer_cache",
+    "moe_cache_metrics",
+    "moe_cache_prefill_policy",
+    "moe_cache_reset"
+  ],
+  "unsupported_runtime_features": [
+    "moe_hybrid_cpu_miss",
+    "moe_cache_prefetch"
+  ],
+  "release_channel": "experimental",
+  "acceptance_report": "docs/upstream-sync/2026-07-30-acceptance-report.md",
+  "notes": "This manifest reflects the Phase 0 upstream-sync promotion. capability_schema/profile_schema describe the wire format modelctl and the runtime agree on today, not a claim that either is versioned/enforced yet -- see Task A2 for that follow-up work. Warn if the working llama.cpp submodule commit does not match llama_cpp_commit."
+}
