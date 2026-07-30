@@ -853,6 +853,7 @@ def create_app(token=None, store=None, runner=None):
             "ram_total_bytes": snap.ram_total_bytes,
             "ram_available_bytes": snap.ram_available_bytes,
             "ram_reserve_bytes": snap.ram_reserve_bytes,
+            "storage": [asdict(s) for s in snap.storage],
             "backend_fingerprints": snap.backend_fingerprints,
         }
 

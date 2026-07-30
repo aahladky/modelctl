@@ -28,6 +28,31 @@
   </div>
 </div>
 
+{% if snap.storage %}
+<h2>storage</h2>
+<div class="gauges">
+{% for s in snap.storage %}
+  <div class="gauge card">
+    <div><strong>{{ s.mount_point or s.path }}</strong>
+      {% if s.transport and s.transport != "unknown" %} · {{ s.transport }}{% endif %}
+      {% if s.rotational %} (hdd){% elif s.rotational == false %} (ssd){% endif %}
+      {% if s.raid_level %} · {{ s.raid_level }}{% endif %}
+    </div>
+    {% if s.total_bytes %}
+    <div class="bar"><div class="fill" style="width: {{ (((s.total_bytes - s.free_bytes) / s.total_bytes) * 100) | round(1) }}%"></div></div>
+    <div>{{ ((s.total_bytes - s.free_bytes) / 1073741824) | round(1) }} / {{ (s.total_bytes / 1073741824) | round(1) }} GiB used</div>
+    {% endif %}
+    <div class="muted">
+      {{ s.filesystem }}
+      {% if s.block_devices %} · {{ s.block_devices | join(', ') }}{% endif %}
+      {% if not s.allow_mmap %} · mmap unsafe{% endif %}
+      {% if s.measured_sequential_read_bps %} · measured {{ (s.measured_sequential_read_bps / 1048576) | round(0) }} MiB/s seq{% else %} · not calibrated{% endif %}
+    </div>
+  </div>
+{% endfor %}
+</div>
+{% endif %}
+
 {% if snap.backend_fingerprints %}
 <h2>backend fingerprints</h2>
 <div class="card">

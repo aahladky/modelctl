@@ -581,6 +581,34 @@ class TestHardware(WebTestBase):
         self.assertEqual(resp.json()["fingerprint"], "abc123")
         self.assertEqual(len(resp.json()["gpus"]), 1)
 
+    def test_hardware_page_shows_storage(self):
+        import modelctl_hardware
+        storage = (modelctl_hardware.StorageSnapshot(
+            path="/home/x/models", kind="ext4", allow_mmap=True,
+            mount_point="/home", filesystem="ext4",
+            block_devices=("/dev/nvme0n1p2",), transport="nvme",
+            rotational=False, raid_level=None,
+            total_bytes=1 << 40, free_bytes=(1 << 40) // 2),)
+        fake_snap = modelctl_hardware.HardwareSnapshot(
+            captured_at=time.time(), fingerprint="abc123",
+            gpus=(), ram_total_bytes=64 << 30, ram_available_bytes=50 << 30,
+            ram_reserve_bytes=0, storage=storage, backend_fingerprints={})
+        with mock.patch("modelctl_hardware.capture_hardware_snapshot",
+                        return_value=fake_snap), \
+             mock.patch("modelctl_hardware.load_settings",
+                        return_value={"version": 1, "devices": {}, "ram": {}, "storage": {}}):
+            resp = self.client.get("/hardware", headers=self.auth)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("/home", resp.text)
+        self.assertIn("nvme", resp.text)
+        self.assertIn("not calibrated", resp.text)
+
+        with mock.patch("modelctl_hardware.capture_hardware_snapshot",
+                        return_value=fake_snap):
+            resp = self.client.get("/api/hardware", headers=self.auth)
+        self.assertEqual(len(resp.json()["storage"]), 1)
+        self.assertEqual(resp.json()["storage"][0]["transport"], "nvme")
+
 
 class TestPlans(WebTestBase):
     def _mock_hardware(self, gpus=None):
