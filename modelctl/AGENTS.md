@@ -9,7 +9,7 @@ The current implementation plan is `docs/modelctl-task-by-task-roadmap-2026-07-2
 ## Setup
 
 ```bash
-cd ~/workspace/modelctl
+cd ~/workspace/moe-serving/modelctl
 uv venv .venv --python python3
 uv pip install --python .venv/bin/python -r requirements.txt
 ```
@@ -19,7 +19,7 @@ System Python is externally managed (PEP 668). Always use the `.venv`.
 ## Running Tests
 
 ```bash
-cd ~/workspace/modelctl
+cd ~/workspace/moe-serving/modelctl
 .venv/bin/python -m unittest discover -p "test_*.py"
 ```
 

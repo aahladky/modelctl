@@ -33,7 +33,7 @@ This checkout keeps its Python dependencies in a project-local virtualenv;
 system Python on this host is externally managed and does not provide them.
 
 ```
-cd ~/workspace/modelctl
+cd ~/workspace/moe-serving/modelctl
 uv venv .venv --python python3
 uv pip install --python .venv/bin/python -r requirements.txt
 ln -sfn "$PWD/modelctl" ~/.local/bin/modelctl

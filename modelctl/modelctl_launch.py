@@ -132,6 +132,18 @@ def resolve_backend(profile: dict, binary_override: str | None = None) -> Resolv
         except (ImportError, AttributeError):
             pass
 
+    # The binary's own directory holds its co-built shared libraries.
+    # Some builds bake an absolute RUNPATH to that directory at link time,
+    # which silently breaks the moment the build tree is moved -- always
+    # including it in LD_LIBRARY_PATH makes launch robust to that
+    # regardless of what RUNPATH the binary was built with (same fix as
+    # modelctl.preflight()).
+    if backend_name == "llama-cpp" and binary and os.path.exists(binary):
+        bin_dir = os.path.dirname(os.path.realpath(binary))
+        existing = env.get("LD_LIBRARY_PATH", "")
+        parts = [bin_dir] + [p for p in existing.split(":") if p and p != bin_dir]
+        env["LD_LIBRARY_PATH"] = ":".join(parts)
+
     binary_fp = modelctl_vram.file_fingerprint(binary)
     # Fingerprint only the profile-declared environment, not the whole
     # process env: unrelated shell changes (SSH vars, locale) must not

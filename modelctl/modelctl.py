@@ -695,7 +695,7 @@ def capture_env_passthrough():
 
 
 COMMON_LLAMA_SERVER_GLOBS = [
-    "~/workspace/llama.cpp/build*/bin/llama-server",
+    "~/workspace/moe-serving/llama.cpp/build*/bin/llama-server",
     "~/llama.cpp/build*/bin/llama-server",
     "~/.local/bin/llama-server",
     "/opt/llama.cpp/build*/bin/llama-server",
@@ -703,8 +703,8 @@ COMMON_LLAMA_SERVER_GLOBS = [
 ]
 
 COMMON_ENV_SCRIPT_GLOBS = [
-    "~/workspace/llama.cpp/*sycl*env*.sh",
-    "~/workspace/llama.cpp/*env*.sh",
+    "~/workspace/moe-serving/llama.cpp/*sycl*env*.sh",
+    "~/workspace/moe-serving/llama.cpp/*env*.sh",
     "~/llama.cpp/*sycl*env*.sh",
     "/opt/intel/oneapi/setvars.sh",
 ]
@@ -831,7 +831,7 @@ def preflight(profile, auto_fix=True):
                 ok = False
             else:
                 messages.append("ERROR: 'llama-server' isn't on PATH, and no build was found in "
-                                 "the usual locations (~/workspace/llama.cpp/build*/bin/, etc).")
+                                 "the usual locations (~/workspace/moe-serving/llama.cpp/build*/bin/, etc).")
                 messages.append("  Fix: export MODELCTL_LLAMA_SERVER=/full/path/to/llama-server")
                 ok = False
         else:
@@ -873,6 +873,19 @@ def preflight(profile, auto_fix=True):
                                  f"with a 'shared libraries' error, that's why.")
         else:
             messages.append(f"WARNING: this profile targets {device} but has no LD_LIBRARY_PATH saved.")
+
+    # The binary's own directory holds its co-built shared libraries
+    # (libggml*.so, libllama*.so, ...). Some builds bake an absolute RUNPATH
+    # to that directory at link time, which silently breaks the moment the
+    # build tree is moved (readelf -d showed exactly this after relocating
+    # to ~/workspace/moe-serving/). Always including it in LD_LIBRARY_PATH
+    # makes the launch robust to that regardless of what RUNPATH the binary
+    # was built with.
+    if effective_bin:
+        bin_dir = str(Path(effective_bin).resolve().parent)
+        existing = effective_env.get("LD_LIBRARY_PATH", "")
+        parts = [bin_dir] + [p for p in existing.split(":") if p and p != bin_dir]
+        effective_env["LD_LIBRARY_PATH"] = ":".join(parts)
 
     return ok, effective_bin, effective_env, messages
 

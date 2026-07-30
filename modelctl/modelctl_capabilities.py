@@ -101,9 +101,18 @@ def _probe_raw(binary_path: str) -> dict | None:
         return raw
     try:
         import modelctl
+        # The binary's own directory holds its co-built shared libraries
+        # (libggml*.so, libllama*.so, ...); some builds bake an absolute
+        # RUNPATH to that directory which breaks the moment the build tree
+        # moves. Always include it so the probe doesn't depend on RUNPATH
+        # being correct -- same fix as modelctl.preflight()'s launch env.
+        bin_dir = os.path.dirname(os.path.abspath(binary_path))
         for script in modelctl.find_env_script_candidates():
             env = modelctl.source_env_script(script)
             if env:
+                existing = env.get("LD_LIBRARY_PATH", "")
+                parts = [bin_dir] + [p for p in existing.split(":") if p and p != bin_dir]
+                env["LD_LIBRARY_PATH"] = ":".join(parts)
                 raw = _run_probe(binary_path, env)
                 if raw is not None:
                     return raw
