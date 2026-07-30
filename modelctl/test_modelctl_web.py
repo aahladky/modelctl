@@ -319,6 +319,14 @@ class TestSwapClient(unittest.TestCase):
             state = client.runtime_state()
         self.assertEqual(state, {})
 
+    def test_runtime_state_raises_when_requested(self):
+        from modelctl_web.swap import LlamaSwapClient, ModelctlSwapError
+        client = LlamaSwapClient()
+        with mock.patch.object(client, "registered_models",
+                               side_effect=ModelctlSwapError("LLAMA_SWAP_UNAVAILABLE", "down")):
+            with self.assertRaises(ModelctlSwapError):
+                client.runtime_state(raise_on_unavailable=True)
+
     def test_model_state_unavailable_when_swap_down(self):
         from modelctl_web.swap import LlamaSwapClient, ModelctlSwapError
         client = LlamaSwapClient()

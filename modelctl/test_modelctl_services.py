@@ -7,6 +7,7 @@ import modelctl
 import modelctl_services.profile_service as profile_service
 import modelctl_services.plan_service as plan_service
 import modelctl_services.hardware_service as hardware_service
+import modelctl_services.runtime_service as runtime_service
 
 
 class TestProfileService(unittest.TestCase):
@@ -104,3 +105,103 @@ class TestHardwareService(unittest.TestCase):
     def test_load_settings_returns_dict(self):
         settings = hardware_service.load_settings()
         self.assertIsInstance(settings, dict)
+
+
+class _FakeCtx:
+    """Minimal stand-in for modelctl_web.jobs.JobContext."""
+    def __init__(self, cancelled=False):
+        self.lines = []
+        self._cancelled = cancelled
+
+    def log(self, line):
+        self.lines.append(line)
+
+    def raise_if_cancelled(self):
+        if self._cancelled:
+            from modelctl_web.jobs import CancelledError
+            raise CancelledError("job cancelled")
+
+
+class TestRuntimeService(unittest.TestCase):
+    """The one implementation behind both `modelctl router load/unload`
+    (no ctx) and the web console's runtime page (modelctl_web/mutate.py,
+    ctx=a JobContext)."""
+
+    def test_load_model_success(self):
+        with mock.patch("modelctl_web.swap.LlamaSwapClient.warm_load",
+                        return_value={"loaded": True, "elapsed_s": 4.2, "response_ok": True}):
+            result = runtime_service.load_model("qwen")
+        self.assertTrue(result.ok)
+        self.assertTrue(result.loaded)
+        self.assertEqual(result.elapsed_s, 4.2)
+
+    def test_load_model_not_ready(self):
+        with mock.patch("modelctl_web.swap.LlamaSwapClient.warm_load",
+                        return_value={"loaded": False, "elapsed_s": 300.0, "response_ok": False}):
+            result = runtime_service.load_model("qwen")
+        self.assertFalse(result.ok)
+
+    def test_load_model_swap_error(self):
+        from modelctl_web.swap import ModelctlSwapError
+        with mock.patch("modelctl_web.swap.LlamaSwapClient.warm_load",
+                        side_effect=ModelctlSwapError("LLAMA_SWAP_UNAVAILABLE", "down")):
+            result = runtime_service.load_model("qwen")
+        self.assertFalse(result.ok)
+        self.assertIn("down", result.messages[0])
+
+    def test_load_model_logs_and_checks_cancellation_with_ctx(self):
+        ctx = _FakeCtx()
+        with mock.patch("modelctl_web.swap.LlamaSwapClient.warm_load",
+                        return_value={"loaded": True, "elapsed_s": 1.0, "response_ok": True}):
+            runtime_service.load_model("qwen", ctx=ctx)
+        self.assertTrue(any("warm-loading" in line for line in ctx.lines))
+        self.assertTrue(any("loaded=True" in line for line in ctx.lines))
+
+    def test_load_model_propagates_cancellation(self):
+        from modelctl_web.jobs import CancelledError
+        ctx = _FakeCtx(cancelled=True)
+        with self.assertRaises(CancelledError):
+            runtime_service.load_model("qwen", ctx=ctx)
+
+    def test_unload_model_success(self):
+        with mock.patch("modelctl_web.swap.LlamaSwapClient.unload",
+                        return_value={}) as mock_unload:
+            result = runtime_service.unload_model("qwen")
+        self.assertTrue(result.ok)
+        mock_unload.assert_called_once_with("qwen")
+
+    def test_unload_model_swap_error(self):
+        from modelctl_web.swap import ModelctlSwapError
+        with mock.patch("modelctl_web.swap.LlamaSwapClient.unload",
+                        side_effect=ModelctlSwapError("LLAMA_SWAP_UNAVAILABLE", "down")):
+            result = runtime_service.unload_model("qwen")
+        self.assertFalse(result.ok)
+
+    def test_restart_model_unloads_running_then_loads(self):
+        with mock.patch("modelctl_web.swap.LlamaSwapClient.running_model_ids",
+                        return_value={"qwen"}), \
+             mock.patch("modelctl_web.swap.LlamaSwapClient.unload") as mock_unload, \
+             mock.patch("modelctl_web.swap.LlamaSwapClient.warm_load",
+                        return_value={"loaded": True, "elapsed_s": 2.0, "response_ok": True}):
+            result = runtime_service.restart_model("qwen")
+        self.assertTrue(result.ok)
+        mock_unload.assert_called_once_with("qwen")
+
+    def test_restart_model_skips_unload_when_not_running(self):
+        with mock.patch("modelctl_web.swap.LlamaSwapClient.running_model_ids",
+                        return_value=set()), \
+             mock.patch("modelctl_web.swap.LlamaSwapClient.unload") as mock_unload, \
+             mock.patch("modelctl_web.swap.LlamaSwapClient.warm_load",
+                        return_value={"loaded": True, "elapsed_s": 2.0, "response_ok": True}):
+            result = runtime_service.restart_model("qwen")
+        self.assertTrue(result.ok)
+        mock_unload.assert_not_called()
+
+    def test_unload_all(self):
+        with mock.patch("modelctl_web.swap.LlamaSwapClient.running_model_ids",
+                        return_value={"a", "b"}), \
+             mock.patch("modelctl_web.swap.LlamaSwapClient.unload_all") as mock_unload_all:
+            result = runtime_service.unload_all()
+        self.assertTrue(result.ok)
+        self.assertEqual(result.models, ["a", "b"])
+        mock_unload_all.assert_called_once()

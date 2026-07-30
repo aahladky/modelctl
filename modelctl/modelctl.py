@@ -2,10 +2,10 @@
 """
 modelctl - search, pull, and configure local GGUF models from Hugging Face.
 
-Backend-agnostic: generates a run.sh (raw llama-server command), a
-router preset.ini, and an Ollama-style Modelfile from one
-saved profile. Profiles are plain JSON so they're easy to inspect,
-edit by hand, or regenerate later.
+Backend-agnostic: generates a run.sh (raw llama-server command) and an
+Ollama-style Modelfile from one saved profile, and syncs the profile
+into the live llama-swap config.yaml. Profiles are plain JSON so
+they're easy to inspect, edit by hand, or regenerate later.
 """
 import functools
 import hashlib
@@ -62,13 +62,6 @@ DEFAULT_MODELS_DIR = Path(os.environ.get("MODELCTL_MODELS_DIR", Path.home() / "m
 _resolved = os.environ.get("MODELCTL_LLAMA_SERVER") or shutil.which("llama-server")
 LLAMA_SERVER_BIN = _resolved or "llama-server"
 LLAMA_SERVER_RESOLVED = _resolved is not None
-# Not consumed by modelctl itself -- read by the operator when launching the router
-# process by hand, e.g. `llama-server --port $MODELCTL_ROUTER_PORT --models-preset ...`.
-ROUTER_PORT = os.environ.get("MODELCTL_ROUTER_PORT", "7071")
-# The systemd --user unit running the router-mode llama-server. sync_router_preset()
-# restarts this after writing a changed preset, since router mode has no
-# --watch-config hot-reload -- without a restart, an updated preset just sits there
-# unused until someone notices and restarts the process by hand.
 
 # The real llama-swap config.yaml that the llama-swap binary/service reads.
 # Distinct from PROFILES_DIR/<name>/llama-swap-entry.yaml, which is just the
@@ -150,8 +143,6 @@ OVMS_DEFAULT_RATIO = float(os.environ.get("MODELCTL_OVMS_RATIO", "1.0"))
 # in sync with saved profiles so pulled models show up in `hermes model`.
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
 HERMES_CONFIG = Path(os.environ.get("MODELCTL_HERMES_CONFIG", HERMES_HOME / "config.yaml"))
-# Base URL of the router / OpenAI-compatible endpoint Hermes should talk to.
-ROUTER_BASE_URL = os.environ.get("MODELCTL_ROUTER_BASE_URL")
 
 # Defaults tuned for serving local GGUF models to Hermes Agent. Hermes sends
 # long contexts and benefits from KV cache quantization for memory headroom.
@@ -321,47 +312,23 @@ def write_hermes_config(cfg: dict):
     path.write_text(yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False, indent=2).rstrip() + "\n")
 
 
-def get_router_base_url() -> str:
-    """Figure out the router-mode OpenAI-compatible base URL for Hermes.
-
-    Defaults to http://127.0.0.1:7071/v1 -- override with
-    MODELCTL_ROUTER_BASE_URL if router mode lives somewhere else entirely.
-    """
-    override = os.environ.get("MODELCTL_ROUTER_BASE_URL")
-    if override:
-        return override.rstrip("/") + "/"
-    return "http://127.0.0.1:7071/v1"
-
-
-def router_root_url() -> str:
-    """Router base URL without the /v1 suffix. get_router_base_url() returns
-    the OpenAI-compatible base (.../v1/) that Hermes and friends talk to, but
-    the router's own control endpoints (/v1/models is the exception -- /models/
-    load, /models/unload) live at the router's root, not under /v1."""
-    v1_url = get_router_base_url()
-    root = re.sub(r"v1/?$", "", v1_url)
-    if not root.endswith("/"):
-        root += "/"
-    return root
-
-
 def router_status() -> list:
-    """Query the router-mode llama-server's live /v1/models endpoint and
-    merge in each profile's static GPU placement (device, or split-mode +
-    tensor-split) so 'what's loaded, and on which GPU(s)' is one call. Pure
-    data, no printing -- same reasoning as search_models(): keep this usable
-    by a future TUI without dragging a CLI-shaped API along with it.
+    """Query llama-swap's live registered/running model state (via the same
+    LlamaSwapClient the web console uses) and merge in each profile's static
+    GPU placement (device, or split-mode + tensor-split) so 'what's loaded,
+    and on which GPU(s)' is one call. Pure data, no printing -- same
+    reasoning as search_models(): keep this usable by a future TUI without
+    dragging a CLI-shaped API along with it.
 
-    Raises RuntimeError if the router can't be reached at all (unlike the
+    Raises RuntimeError if llama-swap can't be reached at all (unlike the
     HF-lookup helpers, there's no sane empty-result fallback here -- "the
     router is down" is worth surfacing distinctly from "it's up with no
     models registered")."""
-    url = router_root_url().rstrip("/") + "/v1/models"
+    from modelctl_web.swap import LlamaSwapClient, ModelctlSwapError
     try:
-        with urllib.request.urlopen(url, timeout=10) as r:
-            data = json.loads(r.read())
-    except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
-        raise RuntimeError(f"couldn't reach router at {url}: {e}")
+        state = LlamaSwapClient().runtime_state(raise_on_unavailable=True)
+    except ModelctlSwapError as e:
+        raise RuntimeError(str(e))
 
     gpu_by_name = {}
     for p in sorted(PROFILES_DIR.glob("*.json")):
@@ -370,59 +337,50 @@ def router_status() -> list:
         if cfg.get("split_mode") and cfg.get("tensor_split") or cfg.get("device"):
             gpu_by_name[profile["name"]] = _format_placement(cfg)
 
+    # llama-swap's own state vocabulary (ready/stopped/loading/queued/
+    # unloading/failed/unknown) collapsed to the loaded/unloaded language
+    # the rest of modelctl (eviction, `router status`) already speaks.
+    status_by_state = {"ready": "loaded", "stopped": "unloaded",
+                        "unknown": "unloaded", "failed": "failed"}
+
     rows = []
-    for m in data.get("data", []):
-        status = m.get("status", {})
+    for name, info in sorted(state.items()):
+        raw = info["state"]
         rows.append({
-            "name": m["id"],
-            "status": status.get("value", "unknown"),
-            "failed": bool(status.get("failed")),
-            "exit_code": status.get("exit_code"),
-            "gpu": gpu_by_name.get(m["id"], "?"),
-            # "preset" = one of modelctl's own profiles; "cache" = something
-            # the router picked up on its own (e.g. a prior --hf-repo pull),
-            # not something modelctl manages.
-            "from_preset": m.get("source") == "preset",
+            "name": name,
+            "status": status_by_state.get(raw, raw),
+            "failed": raw == "failed",
+            "exit_code": None,
+            "gpu": gpu_by_name.get(name, "?"),
+            # A modelctl profile, vs. something llama-swap knows about that
+            # modelctl doesn't manage (a hand-authored config.yaml entry).
+            "from_preset": (PROFILES_DIR / f"{name}.json").exists(),
         })
     return rows
 
 
-def _router_models_action(action: str, name: str, timeout: int = 120):
-    """POST to the router's /models/load or /models/unload, per
-    tools/server/README.md's router-mode API. Returns (ok, message) instead
-    of raising, so cmd_router_load/unload can print and set an exit code
-    without a try/except of their own -- same pattern as preflight()."""
-    url = router_root_url().rstrip("/") + f"/models/{action}"
-    body = json.dumps({"model": name}).encode()
-    req = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}, method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            resp = json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode(errors="replace")
-        return False, f"router returned HTTP {e.code} for {action} '{name}': {detail}"
-    except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
-        return False, f"couldn't reach router at {url}: {e}"
-    except json.JSONDecodeError as e:
-        return False, f"router returned a non-JSON response for {action} '{name}': {e}"
-    if resp.get("success"):
-        return True, f"{action} requested for '{name}'."
-    return False, f"router responded without success for {action} '{name}': {resp}"
-
-
 def router_load(name: str, timeout: int = 300):
-    """Load a model now instead of waiting for the first request to trigger
-    it. Loading a large model can take a while, hence the generous default
-    timeout (vs. unload's, which should be near-instant)."""
-    return _router_models_action("load", name, timeout=timeout)
+    """Load a model now (through llama-swap) instead of waiting for the
+    first request to trigger it. Blocks until the load completes or
+    `timeout` elapses, hence the generous default (vs. unload's, which
+    should be near-instant). Same modelctl_services.runtime_service the
+    web console's load button uses (modelctl_web/mutate.py) -- one
+    implementation, two thin callers."""
+    from modelctl_services import runtime_service
+    result = runtime_service.load_model(name, timeout=timeout)
+    if result.ok:
+        return True, f"'{name}' loaded in {result.elapsed_s:.1f}s."
+    return False, (result.messages[0] if result.messages else f"load failed for '{name}'")
 
 
 def router_unload(name: str, timeout: int = 30):
     """Unload a model to free its GPU memory immediately, rather than
-    waiting for --models-max's LRU eviction to decide for you."""
-    return _router_models_action("unload", name, timeout=timeout)
+    waiting for llama-swap's own idle-TTL eviction to decide for you."""
+    from modelctl_services import runtime_service
+    result = runtime_service.unload_model(name)
+    if result.ok:
+        return True, (result.messages[0] if result.messages else f"unloaded '{name}'.")
+    return False, (result.messages[0] if result.messages else f"unload failed for '{name}'")
 
 
 def _wait_for_router_model(name, want, timeout=300, poll=2):
@@ -3740,7 +3698,8 @@ def cmd_router_status(args):
                     est_col = f"~{_format_size(est['total'])}"
             notes = ""
             if r["failed"]:
-                notes = f"FAILED (exit {r['exit_code']})"
+                notes = (f"FAILED (exit {r['exit_code']})" if r["exit_code"] is not None
+                          else "FAILED")
                 any_failed = True
             elif not r["from_preset"]:
                 notes = "(not a modelctl profile)"
@@ -3775,11 +3734,26 @@ def parse_prometheus_text(text: str) -> dict:
 
 
 def fetch_model_metrics(name: str, timeout: int = 10):
-    """GET the router's forwarded per-instance /metrics for one loaded
-    model. Returns a metrics dict, or None on any failure (the row renders
-    as '?' -- one broken instance shouldn't kill the whole table)."""
-    url = (router_root_url().rstrip("/") + "/metrics?model="
-           + urllib.parse.quote(name, safe=""))
+    """GET one loaded model's own /metrics directly from its upstream
+    llama-server port. llama-swap's front-door /metrics is process-wide
+    (CPU/GPU gauges only) and ignores a ?model= filter, so per-model
+    llamacpp:* counters have to come from the worker's own port -- same
+    approach as modelctl_web/app.py's _scrape_moe_cache_metrics(). Returns
+    a metrics dict, or None on any failure (the row renders as '?' -- one
+    broken instance shouldn't kill the whole table)."""
+    from modelctl_web.swap import LlamaSwapClient, ModelctlSwapError
+    client = LlamaSwapClient(timeout=timeout)
+    try:
+        running = client.running_models()
+    except ModelctlSwapError:
+        return None
+    worker = next((m for m in running if m.get("model") == name), None)
+    if not worker:
+        return None
+    port = LlamaSwapClient._worker_port(worker)
+    if not port:
+        return None
+    url = f"http://127.0.0.1:{port}/metrics"
     try:
         with urllib.request.urlopen(url, timeout=timeout) as r:
             return parse_prometheus_text(r.read().decode(errors="replace"))
@@ -3860,22 +3834,12 @@ def cmd_router_load(args):
         print(f"NOTE: no modelctl profile named '{args.name}' -- "
               f"skipping VRAM check.")
 
-    start = time.time()
+    # router_load() (LlamaSwapClient.warm_load) blocks until the model
+    # reports ready or the timeout elapses -- no separate poll needed.
     ok, msg = router_load(args.name)
     print(msg)
     if not ok:
         sys.exit(1)
-    outcome = _wait_for_router_model(args.name, "loaded", timeout=300)
-    elapsed = time.time() - start
-    if outcome == "loaded":
-        print(f"'{args.name}' loaded in {elapsed:.1f}s.")
-    elif outcome == "failed":
-        print(f"'{args.name}' FAILED to load after {elapsed:.1f}s -- "
-              f"check `modelctl router status` and the router logs.")
-        sys.exit(1)
-    else:
-        print(f"'{args.name}' still not loaded after {elapsed:.0f}s -- "
-              f"check `modelctl router status` later.")
 
 
 def cmd_router_unload(args):
@@ -3930,7 +3894,7 @@ def build_arg_parser():
                               "accept all defaults, no prompts")
     p_pull.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
     p_pull.add_argument("--no-router-restart", action="store_true",
-                         help="don't restart the router-mode service or reload the OpenArc service for OpenArc profiles")
+                         help="don't restart llama-swap after regenerating its config")
     p_pull.set_defaults(func=cmd_pull)
 
     p_ovms_add = sub.add_parser(
@@ -3966,14 +3930,14 @@ def build_arg_parser():
     p_edit.add_argument("name")
     p_edit.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
     p_edit.add_argument("--no-router-restart", action="store_true",
-                         help="don't restart the router-mode service or reload the OpenArc service for OpenArc profiles")
+                         help="don't restart llama-swap after regenerating its config")
     p_edit.set_defaults(func=cmd_edit)
 
     p_regen = sub.add_parser("regen", help="regenerate artifacts from a saved profile")
     p_regen.add_argument("name")
     p_regen.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
     p_regen.add_argument("--no-router-restart", action="store_true",
-                          help="don't restart the router-mode service or reload the OpenArc service for OpenArc profiles")
+                          help="don't restart llama-swap after regenerating its config")
     p_regen.set_defaults(func=cmd_regen)
 
     p_verify = sub.add_parser("verify", help="check saved profiles' model/mmproj/mtp files against "
@@ -3983,7 +3947,7 @@ def build_arg_parser():
                            help="re-download and repoint any mismatched or missing file")
     p_verify.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
     p_verify.add_argument("--no-router-restart", action="store_true",
-                           help="don't restart the router-mode service or reload the OpenArc service for OpenArc profiles")
+                           help="don't restart llama-swap after regenerating its config")
     p_verify.set_defaults(func=cmd_verify)
 
     p_place = sub.add_parser("place", help="recommend (or apply) VRAM-fit GPU placement for profiles")
@@ -3997,7 +3961,7 @@ def build_arg_parser():
                           help="rebuild the cached SYCL<->xpu-smi device mapping")
     p_place.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
     p_place.add_argument("--no-router-restart", action="store_true",
-                          help="don't restart the router-mode service or reload the OpenArc service for OpenArc profiles")
+                          help="don't restart llama-swap after regenerating its config")
     p_place.set_defaults(func=cmd_place)
 
     p_web = sub.add_parser("web", help="run the web console in the foreground")
@@ -4007,28 +3971,28 @@ def build_arg_parser():
     p_disable.add_argument("name")
     p_disable.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
     p_disable.add_argument("--no-router-restart", action="store_true",
-                            help="don't restart the router-mode service or reload the OpenArc service for OpenArc profiles")
+                            help="don't restart llama-swap after regenerating its config")
     p_disable.set_defaults(func=cmd_disable)
 
     p_enable = sub.add_parser("enable", help="re-include a previously disabled profile in router/Hermes sync")
     p_enable.add_argument("name")
     p_enable.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
     p_enable.add_argument("--no-router-restart", action="store_true",
-                           help="don't restart the router-mode service or reload the OpenArc service for OpenArc profiles")
+                           help="don't restart llama-swap after regenerating its config")
     p_enable.set_defaults(func=cmd_enable)
 
     p_remove = sub.add_parser("remove", aliases=["rm"], help="delete a saved profile and its generated artifacts")
     p_remove.add_argument("name")
     p_remove.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
     p_remove.add_argument("--no-router-restart", action="store_true",
-                           help="don't restart the router-mode service or reload the OpenArc service for OpenArc profiles")
+                           help="don't restart llama-swap after regenerating its config")
     p_remove.set_defaults(func=cmd_remove)
 
-    p_sync = sub.add_parser("sync", help="push all profiles into the live router preset.ini")
+    p_sync = sub.add_parser("sync", help="push all profiles into the live llama-swap config.yaml")
     p_sync.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
     p_sync.add_argument("--hermes-dry-run", action="store_true", help="show what Hermes config would change")
     p_sync.add_argument("--no-router-restart", action="store_true",
-                         help="don't restart the router-mode service or reload the OpenArc service for OpenArc profiles")
+                         help="don't restart llama-swap after regenerating its config")
     p_sync.set_defaults(func=cmd_sync)
 
     p_defaults = sub.add_parser("defaults", help="configure default runtime settings for new profiles")
@@ -4062,7 +4026,7 @@ def build_arg_parser():
              "model-generated code UNSANDBOXED on this host, no container/VM")
     p_test.set_defaults(func=cmd_test)
 
-    p_router = sub.add_parser("router", help="manage the router-mode llama-server (status, load/unload)")
+    p_router = sub.add_parser("router", help="manage models on the llama-swap front door (status, load/unload)")
     router_sub = p_router.add_subparsers(dest="router_command", required=True)
 
     p_router_status = router_sub.add_parser("status", help="show loaded/unloaded models and GPU placement")

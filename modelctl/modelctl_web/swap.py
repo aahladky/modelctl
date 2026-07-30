@@ -125,16 +125,20 @@ class LlamaSwapClient:
         except (TypeError, ValueError):
             return None
 
-    def runtime_state(self):
+    def runtime_state(self, raise_on_unavailable=False):
         """Aggregate state for all registered + running models.
 
         Returns dict keyed by model_id with state, worker info, and flags.
-        Degrades gracefully to empty dict when llama-swap is unreachable.
-        """
+        Degrades gracefully to empty dict when llama-swap is unreachable,
+        unless raise_on_unavailable=True (the CLI wants "swap is down" to
+        be distinguishable from "swap is up with nothing registered";
+        the web console would rather just render an empty runtime page)."""
         try:
             registered = self.registered_models()
             running = self.running_models()
         except ModelctlSwapError:
+            if raise_on_unavailable:
+                raise
             return {}
         reg_ids = {m.get("id") for m in registered}
         run_map = {}

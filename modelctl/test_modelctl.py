@@ -10,39 +10,11 @@ from unittest import mock
 import modelctl
 
 
-class TestGetRouterBaseUrl(unittest.TestCase):
-    def test_default_when_no_override(self):
-        # Empty string is falsy, so this masks any value set in the real shell.
-        with mock.patch.dict("os.environ", {"MODELCTL_ROUTER_BASE_URL": ""}):
-            self.assertEqual(
-                modelctl.get_router_base_url(),
-                "http://127.0.0.1:7071/v1",
-            )
-
-    def test_env_override_wins(self):
-        with mock.patch.dict("os.environ", {"MODELCTL_ROUTER_BASE_URL": "http://elsewhere:9000/v1"}):
-            self.assertEqual(
-                modelctl.get_router_base_url(),
-                "http://elsewhere:9000/v1/",
-            )
-
-
-class TestRouterRootUrl(unittest.TestCase):
-    def test_strips_v1_suffix_with_trailing_slash(self):
-        with mock.patch.object(modelctl, "get_router_base_url", return_value="http://host:7071/v1/"):
-            self.assertEqual(modelctl.router_root_url(), "http://host:7071/")
-
-    def test_strips_v1_suffix_without_trailing_slash(self):
-        with mock.patch.object(modelctl, "get_router_base_url", return_value="http://host:7071/v1"):
-            self.assertEqual(modelctl.router_root_url(), "http://host:7071/")
-
-    def test_leaves_non_v1_base_url_alone(self):
-        # A custom MODELCTL_ROUTER_BASE_URL override might not use /v1 at all.
-        with mock.patch.object(modelctl, "get_router_base_url", return_value="http://host:9000/"):
-            self.assertEqual(modelctl.router_root_url(), "http://host:9000/")
-
-
 class TestRouterStatus(unittest.TestCase):
+    """router_status() talks to llama-swap through LlamaSwapClient (same
+    client the web console uses) -- not the old, retired llama-router.service
+    API this used to hit at :7071."""
+
     def setUp(self):
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -57,84 +29,76 @@ class TestRouterStatus(unittest.TestCase):
             "config": {"device": "SYCL0"},
         }))
 
-    @staticmethod
-    def _fake_response(payload):
-        cm = mock.MagicMock()
-        cm.__enter__.return_value.read.return_value = json.dumps(payload).encode()
-        return cm
-
     def test_merges_live_status_with_profile_gpu_placement(self):
-        payload = {"data": [
-            {"id": "qwen", "status": {"value": "loaded"}, "source": "preset"},
-            {"id": "gemma", "status": {"value": "unloaded"}, "source": "preset"},
-            {"id": "unsloth/bge-small-en-v1.5-GGUF:F16", "status": {"value": "unloaded"}, "source": "cache"},
-        ]}
+        state = {
+            "qwen": {"model_id": "qwen", "state": "ready", "registered": True, "running": True},
+            "gemma": {"model_id": "gemma", "state": "stopped", "registered": True, "running": False},
+            "unsloth/bge-small-en-v1.5-GGUF:F16": {
+                "model_id": "unsloth/bge-small-en-v1.5-GGUF:F16", "state": "stopped",
+                "registered": True, "running": False},
+        }
         with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
-             mock.patch.object(modelctl, "router_root_url", return_value="http://host:7071/"), \
-             mock.patch("modelctl.urllib.request.urlopen", return_value=self._fake_response(payload)):
+             mock.patch("modelctl_web.swap.LlamaSwapClient.runtime_state", return_value=state):
             rows = modelctl.router_status()
         by_name = {r["name"]: r for r in rows}
         self.assertEqual(by_name["qwen"]["status"], "loaded")
         self.assertEqual(by_name["qwen"]["gpu"], "split 3.5,1 (layer)")
         self.assertEqual(by_name["gemma"]["gpu"], "SYCL0")
+        self.assertEqual(by_name["gemma"]["status"], "unloaded")
         self.assertFalse(by_name["unsloth/bge-small-en-v1.5-GGUF:F16"]["from_preset"])
 
     def test_flags_failed_models(self):
-        payload = {"data": [
-            {"id": "gemma", "status": {"value": "unloaded", "failed": True, "exit_code": 1}, "source": "preset"},
-        ]}
+        state = {"gemma": {"model_id": "gemma", "state": "failed", "registered": True, "running": False}}
         with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
-             mock.patch.object(modelctl, "router_root_url", return_value="http://host:7071/"), \
-             mock.patch("modelctl.urllib.request.urlopen", return_value=self._fake_response(payload)):
+             mock.patch("modelctl_web.swap.LlamaSwapClient.runtime_state", return_value=state):
             rows = modelctl.router_status()
         self.assertTrue(rows[0]["failed"])
-        self.assertEqual(rows[0]["exit_code"], 1)
 
     def test_raises_runtimeerror_when_router_unreachable(self):
+        from modelctl_web.swap import ModelctlSwapError
         with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
-             mock.patch.object(modelctl, "router_root_url", return_value="http://host:7071/"), \
-             mock.patch("modelctl.urllib.request.urlopen", side_effect=OSError("refused")):
+             mock.patch("modelctl_web.swap.LlamaSwapClient.runtime_state",
+                        side_effect=ModelctlSwapError("LLAMA_SWAP_UNAVAILABLE", "llama-swap unreachable: refused")):
             with self.assertRaises(RuntimeError):
                 modelctl.router_status()
 
 
 class TestRouterLoadUnload(unittest.TestCase):
-    @staticmethod
-    def _success_response():
-        cm = mock.MagicMock()
-        cm.__enter__.return_value.read.return_value = json.dumps({"success": True}).encode()
-        return cm
-
     def test_load_success(self):
-        with mock.patch.object(modelctl, "router_root_url", return_value="http://host:7071/"), \
-             mock.patch("modelctl.urllib.request.urlopen", return_value=self._success_response()) as mock_open:
+        with mock.patch("modelctl_web.swap.LlamaSwapClient.warm_load",
+                        return_value={"loaded": True, "elapsed_s": 4.2, "response_ok": True}) as mock_warm:
             ok, msg = modelctl.router_load("qwen")
         self.assertTrue(ok)
-        req = mock_open.call_args[0][0]
-        self.assertEqual(req.full_url, "http://host:7071/models/load")
+        self.assertIn("4.2s", msg)
+        mock_warm.assert_called_once()
+        self.assertEqual(mock_warm.call_args[0][0], "qwen")
+
+    def test_load_reports_not_ready(self):
+        with mock.patch("modelctl_web.swap.LlamaSwapClient.warm_load",
+                        return_value={"loaded": False, "elapsed_s": 300.0, "response_ok": False}):
+            ok, msg = modelctl.router_load("qwen", timeout=300)
+        self.assertFalse(ok)
+        self.assertIn("not appear", msg)
 
     def test_unload_success(self):
-        with mock.patch.object(modelctl, "router_root_url", return_value="http://host:7071/"), \
-             mock.patch("modelctl.urllib.request.urlopen", return_value=self._success_response()) as mock_open:
+        with mock.patch("modelctl_web.swap.LlamaSwapClient.unload",
+                        return_value={}) as mock_unload:
             ok, msg = modelctl.router_unload("qwen")
         self.assertTrue(ok)
-        req = mock_open.call_args[0][0]
-        self.assertEqual(req.full_url, "http://host:7071/models/unload")
+        mock_unload.assert_called_once_with("qwen")
 
-    def test_load_failure_http_error(self):
-        err = modelctl.urllib.error.HTTPError(
-            url="http://host:7071/models/load", code=400, msg="bad request", hdrs=None,
-            fp=io.BytesIO(b'{"error":"model not found"}'),
-        )
-        with mock.patch.object(modelctl, "router_root_url", return_value="http://host:7071/"), \
-             mock.patch("modelctl.urllib.request.urlopen", side_effect=err):
+    def test_load_failure_swap_error(self):
+        from modelctl_web.swap import ModelctlSwapError
+        with mock.patch("modelctl_web.swap.LlamaSwapClient.warm_load",
+                        side_effect=ModelctlSwapError("SWAP_HTTP_ERROR", "llama-swap POST /v1/chat/completions -> 400")):
             ok, msg = modelctl.router_load("nope")
         self.assertFalse(ok)
-        self.assertIn("model not found", msg)
+        self.assertIn("400", msg)
 
     def test_unload_failure_connection_error(self):
-        with mock.patch.object(modelctl, "router_root_url", return_value="http://host:7071/"), \
-             mock.patch("modelctl.urllib.request.urlopen", side_effect=OSError("refused")):
+        from modelctl_web.swap import ModelctlSwapError
+        with mock.patch("modelctl_web.swap.LlamaSwapClient.unload",
+                        side_effect=ModelctlSwapError("LLAMA_SWAP_UNAVAILABLE", "llama-swap unreachable: refused")):
             ok, msg = modelctl.router_unload("qwen")
         self.assertFalse(ok)
 

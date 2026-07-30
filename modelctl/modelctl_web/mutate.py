@@ -187,64 +187,55 @@ def submit_bench(runner, name, max_tokens=256, runs=3):
 
 
 def submit_load(runner, name):
-    from .swap import LlamaSwapClient, ModelctlSwapError
+    from modelctl_services import runtime_service
 
     def fn(ctx):
-        client = LlamaSwapClient()
-        ctx.log(f"warm-loading '{name}' through llama-swap ...")
-        ctx.raise_if_cancelled()
-        try:
-            res = client.warm_load(name)
-        except ModelctlSwapError as e:
-            raise RuntimeError(f"{e.code}: {e.message}")
-        ctx.log(f"loaded={res['loaded']} response_ok={res['response_ok']} in {res['elapsed_s']}s")
-        if not res["loaded"]:
-            raise RuntimeError("model did not appear in /running after warm load")
-        return res
+        result = runtime_service.load_model(name, ctx=ctx)
+        if not result.ok:
+            raise RuntimeError(result.messages[0] if result.messages
+                              else f"load failed for '{name}'")
+        return {"loaded": result.loaded, "response_ok": result.response_ok,
+                "elapsed_s": result.elapsed_s}
     return runner.submit("load", f"load {name}", fn,
                          payload={"name": name}, lane="runtime")
 
 
 def submit_unload(runner, name):
-    from .swap import LlamaSwapClient
+    from modelctl_services import runtime_service
 
     def fn(ctx):
-        client = LlamaSwapClient()
-        client.unload(name)
-        ctx.log(f"unloaded '{name}'")
+        result = runtime_service.unload_model(name, ctx=ctx)
+        if not result.ok:
+            raise RuntimeError(result.messages[0] if result.messages
+                              else f"unload failed for '{name}'")
         return {"unloaded": name}
     return runner.submit("unload", f"unload {name}", fn,
                          payload={"name": name}, lane="runtime")
 
 
 def submit_restart(runner, name):
-    from .swap import LlamaSwapClient
+    from modelctl_services import runtime_service
 
     def fn(ctx):
-        client = LlamaSwapClient()
-        if name in client.running_model_ids():
-            ctx.log(f"unloading '{name}' ...")
-            client.unload(name)
-        ctx.log(f"warm-loading '{name}' ...")
-        ctx.raise_if_cancelled()
-        res = client.warm_load(name)
-        ctx.log(f"loaded={res['loaded']} in {res['elapsed_s']}s")
-        if not res["loaded"]:
-            raise RuntimeError("model did not come back after restart")
-        return res
+        result = runtime_service.restart_model(name, ctx=ctx)
+        if not result.ok:
+            raise RuntimeError(result.messages[0] if result.messages
+                              else f"restart failed for '{name}'")
+        return {"loaded": result.loaded, "response_ok": result.response_ok,
+                "elapsed_s": result.elapsed_s}
     return runner.submit("restart", f"restart {name}", fn,
                          payload={"name": name}, lane="runtime")
 
 
 def submit_unload_all(runner):
-    from .swap import LlamaSwapClient
+    from modelctl_services import runtime_service
 
     def fn(ctx):
-        client = LlamaSwapClient()
-        running = client.running_model_ids()
-        client.unload_all()
-        ctx.log(f"unloaded all ({len(running)} model(s))")
-        return {"unloaded": sorted(running)}
+        result = runtime_service.unload_all(ctx=ctx)
+        if not result.ok:
+            raise RuntimeError(result.messages[0] if result.messages
+                              else "unload all failed")
+        return {"unloaded": result.models}
     return runner.submit("unload-all", "unload all models", fn,
                          lane="runtime")
 
