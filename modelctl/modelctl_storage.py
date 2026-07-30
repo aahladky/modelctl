@@ -27,6 +27,11 @@ class StorageInfo:
     total_bytes: int
     free_bytes: int
     allow_mmap: bool
+    # Mount options as /proc/mounts reports them. Task D4: `noatime`,
+    # `discard`, a `compress=` setting or a read-only mount all change what
+    # a storage measurement means, so calibration records them alongside
+    # the numbers.
+    mount_options: str = ""
 
 
 def _find_mount_point(path: str) -> str:
@@ -69,6 +74,19 @@ def _find_filesystem(mount_point: str) -> str:
     except OSError:
         pass
     return "unknown"
+
+
+def _find_mount_options(mount_point: str) -> str:
+    """Mount options for a mount point, as a comma-separated string."""
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 4 and parts[1] == mount_point:
+                    return parts[3]
+    except OSError:
+        pass
+    return ""
 
 
 def _find_block_devices(mount_point: str) -> tuple[str, ...]:
@@ -225,6 +243,7 @@ def probe_storage(path: str) -> StorageInfo:
         total_bytes=total,
         free_bytes=free,
         allow_mmap=allow_mmap,
+        mount_options=_find_mount_options(mount),
     )
 
 

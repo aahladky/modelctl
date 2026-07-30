@@ -99,17 +99,48 @@
 
   <table>
     <tr>
-      <th>claim</th>
+      <th>VRAM</th>
       <td>
-        {% for dev, b in pl.claim.vram_bytes.items() %}
-          <strong>{{ dev }}</strong> {{ b | fmt_size }}<br>
+        {% for dev in pl.claim.vram_bytes %}
+          {% set b = pl.claim.device_breakdown(dev) %}
+          <strong>{{ dev }}</strong> {{ b.total | fmt_size }}
+          <span class="muted">= weights {{ b.static | fmt_size }}
+            + KV {{ b.kv | fmt_size }}
+            + overhead {{ b.overhead | fmt_size }}</span>
+          {% if b.cache %}
+            <br><span class="warn">&nbsp;&nbsp;+ expert cache {{ b.cache | fmt_size }}
+              → peak {{ b.peak | fmt_size }}</span>
+          {% endif %}
+          <br>
         {% else %}<span class="muted">no GPU claim</span><br>{% endfor %}
-        RAM {{ pl.claim.ram_bytes | fmt_size }} ·
-        storage {{ pl.claim.storage_mode or '—' }} ·
-        context {{ pl.claim.expected_context or '—' }}
-        {% if e.cache_bytes %}<br>expert cache budget {{ e.cache_bytes | fmt_size }}{% endif %}
       </td>
     </tr>
+    <tr>
+      <th>RAM</th>
+      <td>
+        {% if pl.claim.ram_resident_bytes %}
+          resident {{ pl.claim.ram_resident_bytes | fmt_size }}
+        {% else %}
+          <span class="muted">nothing guaranteed resident</span>
+        {% endif %}
+        {% if pl.claim.mmap_bytes %}
+          <br>mmap-addressed {{ pl.claim.mmap_bytes | fmt_size }}
+          <span class="muted">— reachable through the page cache, not held
+            in RAM</span>
+          <br>expected hot set ~{{ pl.claim.page_cache_working_set_bytes | fmt_size }}
+        {% endif %}
+      </td>
+    </tr>
+    <tr>
+      <th>storage</th>
+      <td>
+        {{ pl.claim.storage_mode or '—' }}
+        {% if pl.claim.storage_device %} · <code>{{ pl.claim.storage_device }}</code>{% endif %}
+        {% if pl.claim.storage_path %}
+          <br><span class="muted">{{ pl.claim.storage_path }}</span>{% endif %}
+      </td>
+    </tr>
+    <tr><th>context</th><td>{{ pl.claim.expected_context or '—' }}</td></tr>
     <tr>
       <th>estimated</th>
       <td>

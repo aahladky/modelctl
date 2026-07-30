@@ -11,26 +11,31 @@ class TestSamplerIo(unittest.TestCase):
     process, no fake subprocess tree needed."""
 
     def test_child_io_reads_real_proc_data(self):
+        # Task D2 added the read-syscall count as a fourth counter, so
+        # "many small reads" and "few large ones" are distinguishable at
+        # the same byte total.
         sampler = modelctl_tune._Sampler(os.getpgrp())
-        read_bytes, minor, major = sampler._child_io()
+        read_bytes, minor, major, syscr = sampler._child_io()
         self.assertGreaterEqual(read_bytes, 0)
         self.assertGreaterEqual(minor, 0)
         self.assertGreaterEqual(major, 0)
+        self.assertGreaterEqual(syscr, 0)
 
     def test_child_io_ignores_other_pgrps(self):
         # A pgrp that (almost certainly) doesn't exist -- no processes
         # should match, so everything stays at zero.
         sampler = modelctl_tune._Sampler(999999)
-        read_bytes, minor, major = sampler._child_io()
-        self.assertEqual((read_bytes, minor, major), (0, 0, 0))
+        self.assertEqual(sampler._child_io(), (0, 0, 0, 0))
 
     def test_io_snapshot_reflects_sampler_state(self):
         sampler = modelctl_tune._Sampler(os.getpgrp())
         sampler.read_bytes = 12345
         sampler.minor_faults = 6
         sampler.major_faults = 1
+        sampler.read_syscalls = 9
         self.assertEqual(sampler.io_snapshot(),
-                         {"read_bytes": 12345, "minor_faults": 6, "major_faults": 1})
+                         {"read_bytes": 12345, "minor_faults": 6,
+                          "major_faults": 1, "read_syscalls": 9})
 
     def test_sampler_thread_populates_io_fields(self):
         # End-to-end: start the real polling thread against this process's

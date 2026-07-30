@@ -44,6 +44,82 @@ def validate_mode(mode, context=None) -> ServiceResult:
     return result
 
 
+def context_for_profile(profile_name, consent_storage_cold=False):
+    """Build the BenchmarkContext describing what this profile can achieve.
+
+    Whether a mode is achievable depends on the actual model files, the
+    filesystem they sit on, and the backend's capabilities -- so the
+    context is derived, never assumed.
+    """
+    import modelctl_benchmark
+    profile = modelctl.normalize_profile(modelctl.load_profile(profile_name))
+
+    has_metrics = False
+    try:
+        import modelctl_capabilities
+        import modelctl_launch
+        backend = modelctl_launch.resolve_backend(profile)
+        has_metrics = modelctl_capabilities.supports_metrics(backend.capabilities)
+    except Exception:
+        pass
+
+    storage_info = None
+    try:
+        import modelctl_storage
+        if profile.get("model_path"):
+            storage_info = modelctl_storage.probe_storage(profile["model_path"])
+    except Exception:
+        pass
+
+    companions = tuple(p for p in (profile.get("mmproj_path"),
+                                   profile.get("mtp_path")) if p)
+    return modelctl_benchmark.BenchmarkContext(
+        has_cache_metrics=has_metrics,
+        can_drop_caches=True,  # posix_fadvise is unprivileged and scoped
+        model_path=profile.get("model_path", ""),
+        storage_info=storage_info,
+        consent_storage_cold=consent_storage_cold,
+        companion_paths=companions,
+    )
+
+
+def prepare_mode(profile_name, mode, consent_storage_cold=False,
+                 ctx=None) -> ServiceResult:
+    """Put the machine into the state `mode` claims, and report the result.
+
+    A precondition that could not be met does not abort the run; it
+    changes the label the measurement is stored under, so a warm run can
+    never later be read as a cold one.
+    """
+    import modelctl_benchmark
+    if isinstance(mode, str):
+        try:
+            mode = modelctl_benchmark.BenchmarkMode(mode)
+        except ValueError:
+            return ServiceResult.failure(f"unknown benchmark mode: {mode}")
+
+    bench_ctx = context_for_profile(profile_name, consent_storage_cold)
+    problems = modelctl_benchmark.validate_mode(mode, bench_ctx)
+    prep = modelctl_benchmark.prepare_mode(mode, bench_ctx)
+
+    if ctx:
+        for m in prep.messages:
+            ctx.log(m)
+
+    result = ServiceResult(
+        ok=not prep.refused,
+        messages=list(prep.messages),
+        warnings=list(problems),
+        data={"mode": mode.value, "label": prep.label or mode.value,
+              "achieved": prep.achieved, "refused": prep.refused,
+              "evidence": prep.evidence})
+    if not prep.achieved and not prep.refused:
+        result.add_warning(
+            f"recorded as '{result.data['label']}': the {mode.value} "
+            f"precondition was not met")
+    return result
+
+
 def run_benchmark(profile_name, mode=None, max_tokens=256, runs=3,
                   ctx=None) -> ServiceResult:
     """Run a benchmark and return the measurement with its honest label.

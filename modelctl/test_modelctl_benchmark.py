@@ -35,8 +35,16 @@ class TestBenchmarkMode(unittest.TestCase):
         issues = validate_mode(BenchmarkMode.STORAGE_COLD, ctx)
         self.assertTrue(len(issues) > 0)
 
-    def test_storage_cold_with_privileges(self):
+    def test_storage_cold_needs_consent_as_well_as_privileges(self):
+        # Task D3 added the opt-in requirement: storage-cold evicts the
+        # model from the page cache, so the next real request pays a full
+        # reload. Being *able* to do that is not permission to.
         ctx = BenchmarkContext(can_drop_caches=True)
+        issues = validate_mode(BenchmarkMode.STORAGE_COLD, ctx)
+        self.assertTrue(any("opt-in" in i for i in issues))
+
+    def test_storage_cold_with_privileges_and_consent(self):
+        ctx = BenchmarkContext(can_drop_caches=True, consent_storage_cold=True)
         issues = validate_mode(BenchmarkMode.STORAGE_COLD, ctx)
         self.assertEqual(issues, [])
 

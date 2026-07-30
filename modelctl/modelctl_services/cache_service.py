@@ -6,6 +6,8 @@ Returns structured results, never prints or sys.exit.
 from dataclasses import dataclass, field
 import time
 
+import modelctl
+
 
 @dataclass
 class CacheMetrics:
@@ -106,23 +108,72 @@ def scrape_cache_metrics(port: int) -> CacheMetrics | None:
 
 @dataclass
 class CalibrationResult:
-    """Result of a storage calibration run."""
+    """Result of a storage calibration run (Task D4)."""
     ok: bool
     sequential_read_bps: int = 0
     random_read_bps: int = 0
+    random_read_iops: int = 0
+    random_read_latency_us_p50: float = 0.0
+    random_read_latency_us_p99: float = 0.0
     file_path: str = ""
     file_size_bytes: int = 0
     elapsed_seconds: float = 0.0
     method: str = ""
+    # Storage identity, so a calibration is attributable to a device.
+    filesystem: str = ""
+    mount_point: str = ""
+    mount_options: str = ""
+    block_devices: tuple = ()
+    transport: str = ""
+    rotational: object = None
+    raid_level: object = None
+    # When the measurement was taken, so the UI can age it out.
+    measured_at: float = 0.0
+    # True when the read was served from RAM rather than the device. A
+    # contaminated number is page-cache throughput wearing a disk's name,
+    # and it is typically an order of magnitude too fast.
+    page_cache_contaminated: bool = False
+    residency_before: float | None = None
     messages: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)
+
+
+# Read enough that readahead and any small cache cannot dominate the
+# result. 1 GiB takes a couple of seconds on NVMe and is still honest on
+# a spinning disk.
+_SEQUENTIAL_SAMPLE_BYTES = 1 << 30
+_RANDOM_READ_SAMPLES = 512
+_RANDOM_READ_SIZE = 4096
+
+# Above this, the sequential figure is RAM speed, not device speed.
+_CONTAMINATION_THRESHOLD = 0.5
+
+# Fastest plausible 4 KiB read from real storage. Optane is ~10us; NVMe is
+# 50-100us. Anything quicker came out of RAM.
+_MIN_PLAUSIBLE_DEVICE_LATENCY_US = 10.0
+
+
+def _storage_identity(path):
+    try:
+        import modelctl_storage
+        return modelctl_storage.probe_storage(str(path))
+    except Exception:
+        return None
 
 
 def calibrate_storage_sequential(file_path: str,
-                                 read_bytes: int = 100 * 1024 * 1024) -> CalibrationResult:
-    """Calibrate sequential read speed using a model file.
+                                 read_bytes: int = _SEQUENTIAL_SAMPLE_BYTES,
+                                 evict_first: bool = True) -> CalibrationResult:
+    """Measure real storage read performance from a model file.
 
-    Reads `read_bytes` (default 100 MiB) from the file and measures throughput.
-    Non-destructive: only reads, never writes.
+    Non-destructive: reads only, never writes.
+
+    The file's pages are evicted first (scoped to this file, unprivileged)
+    so the number describes the device rather than the page cache. When
+    eviction does not take -- the model is loaded, or the filesystem is
+    RAM-backed -- the result is still returned but flagged
+    `page_cache_contaminated`, because a calibration that silently
+    measures RAM makes every storage estimate built on it wrong.
     """
     import os
     from pathlib import Path
@@ -136,6 +187,35 @@ def calibrate_storage_sequential(file_path: str,
     if read_bytes <= 0:
         return CalibrationResult(ok=False, messages=["file is empty"])
 
+    result = CalibrationResult(ok=False, file_path=str(path),
+                               file_size_bytes=file_size,
+                               measured_at=time.time())
+
+    info = _storage_identity(path)
+    if info is not None:
+        result.filesystem = info.filesystem
+        result.mount_point = info.mount_point
+        result.mount_options = getattr(info, "mount_options", "")
+        result.block_devices = tuple(info.block_devices or ())
+        result.transport = info.transport
+        result.rotational = info.rotational
+        result.raid_level = info.raid_level
+
+    try:
+        import modelctl_benchmark
+        if evict_first:
+            modelctl_benchmark.evict_from_page_cache(path)
+        residency = modelctl_benchmark.page_cache_residency(path)
+        if residency is not None:
+            result.residency_before = round(residency.fraction, 4)
+    except Exception:
+        residency = None
+
+    if file_size < _SEQUENTIAL_SAMPLE_BYTES:
+        result.warnings.append(
+            f"file is only {modelctl._format_size(file_size)}; a sample this "
+            f"small can be dominated by readahead and cache effects")
+
     try:
         t0 = time.time()
         total = 0
@@ -146,15 +226,111 @@ def calibrate_storage_sequential(file_path: str,
                     break
                 total += len(chunk)
         elapsed = time.time() - t0
-        bps = int(total / elapsed) if elapsed > 0 else 0
-
-        return CalibrationResult(
-            ok=True,
-            sequential_read_bps=bps,
-            file_path=str(path),
-            file_size_bytes=file_size,
-            elapsed_seconds=round(elapsed, 3),
-            method=f"sequential-read-{total // (1024*1024)}MiB",
-        )
+        result.sequential_read_bps = int(total / elapsed) if elapsed > 0 else 0
+        result.elapsed_seconds = round(elapsed, 3)
+        result.method = f"sequential-read-{total // (1024 * 1024)}MiB"
     except OSError as e:
-        return CalibrationResult(ok=False, messages=[str(e)])
+        result.messages.append(str(e))
+        return result
+
+    if result.residency_before is not None and \
+            result.residency_before > _CONTAMINATION_THRESHOLD:
+        result.page_cache_contaminated = True
+        result.warnings.append(
+            f"{result.residency_before * 100:.0f}% of the file was still in "
+            f"the page cache when this ran — the throughput below reflects "
+            f"RAM, not "
+            f"{result.block_devices[0] if result.block_devices else 'the device'}")
+    if result.filesystem in ("tmpfs", "ramfs"):
+        result.page_cache_contaminated = True
+        result.warnings.append(
+            f"{result.filesystem} is RAM-backed; there is no storage device "
+            f"to calibrate")
+
+    random_stats = _measure_random_reads(path, file_size)
+    result.random_read_bps = random_stats.get("bps", 0)
+    result.random_read_iops = random_stats.get("iops", 0)
+    result.random_read_latency_us_p50 = random_stats.get("p50_us", 0.0)
+    result.random_read_latency_us_p99 = random_stats.get("p99_us", 0.0)
+
+    # No storage device answers a 4 KiB read in single-digit microseconds;
+    # that is a memory copy. Per-region eviction does not always take
+    # (compressed extents, delayed allocation), so the median has to be
+    # sanity-checked rather than trusted.
+    if 0 < result.random_read_latency_us_p50 < _MIN_PLAUSIBLE_DEVICE_LATENCY_US:
+        result.warnings.append(
+            f"random-read p50 of {result.random_read_latency_us_p50:.0f}us is "
+            f"faster than any storage device — those reads were served from "
+            f"RAM; treat the random figures as a floor, not the device's "
+            f"real latency (p99 {result.random_read_latency_us_p99:.0f}us is "
+            f"the more honest number)")
+
+    result.ok = True
+    result.messages.append(
+        f"sequential {modelctl._format_size(result.sequential_read_bps)}/s, "
+        f"random {result.random_read_iops} IOPS "
+        f"(p50 {result.random_read_latency_us_p50:.0f}us)")
+    return result
+
+
+def _measure_random_reads(path, file_size, samples=_RANDOM_READ_SAMPLES):
+    """Random-read latency and IOPS: what expert paging actually costs.
+
+    Sequential throughput says nothing about the cost of pulling one
+    expert from the middle of a 200 GiB file, which is the access pattern
+    an offloaded MoE actually has.
+    """
+    import os
+    import random
+
+    if file_size <= _RANDOM_READ_SIZE:
+        return {}
+    latencies = []
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return {}
+    try:
+        rng = random.Random(0xC0FFEE)  # deterministic offsets across runs
+        max_offset = file_size - _RANDOM_READ_SIZE
+        for _ in range(samples):
+            offset = rng.randrange(0, max_offset)
+            # Evicting each region first keeps this a device measurement;
+            # without it the second pass would read from RAM.
+            try:
+                os.posix_fadvise(fd, offset, _RANDOM_READ_SIZE,
+                                 os.POSIX_FADV_DONTNEED)
+            except (OSError, AttributeError):
+                pass
+            t0 = time.perf_counter()
+            os.pread(fd, _RANDOM_READ_SIZE, offset)
+            latencies.append((time.perf_counter() - t0) * 1e6)
+    except OSError:
+        return {}
+    finally:
+        os.close(fd)
+
+    if not latencies:
+        return {}
+    latencies.sort()
+    total_s = sum(latencies) / 1e6
+    return {
+        "p50_us": latencies[len(latencies) // 2],
+        "p99_us": latencies[min(len(latencies) - 1, int(len(latencies) * 0.99))],
+        "iops": int(len(latencies) / total_s) if total_s > 0 else 0,
+        "bps": int(len(latencies) * _RANDOM_READ_SIZE / total_s) if total_s > 0 else 0,
+    }
+
+
+# A calibration older than this is reported as stale: disks get replaced,
+# filesystems fill up, and a year-old number should not silently steer a
+# placement decision.
+CALIBRATION_STALE_SECONDS = 30 * 86400
+
+
+def calibration_age(measured_at):
+    """(age_seconds, is_stale) for a calibration timestamp."""
+    if not measured_at:
+        return (None, True)
+    age = max(0.0, time.time() - measured_at)
+    return (age, age > CALIBRATION_STALE_SECONDS)

@@ -31,21 +31,80 @@ import modelctl_vram
 
 @dataclass(frozen=True)
 class ResourceClaim:
-    vram_bytes: dict          # {device: bytes}
+    vram_bytes: dict          # {device: bytes} -- TOTAL reservation per device
+    # CPU-side model bytes. This is the reservation figure the worker and
+    # matrix use, and it is NOT a promise of residency: when storage_mode
+    # is "mmap" most of it is addressed rather than copied. Use
+    # ram_resident_bytes for "how much RAM will this actually hold".
     ram_bytes: int
     storage_mode: str         # "none", "mmap", "direct"
     expected_context: int | None
     breakdown: dict = field(default_factory=dict)
     storage_path: str = ""    # actual model file path
     model_bytes: int = 0      # total model weight bytes
-    expected_resident_bytes: int = 0  # expected RSS from model
     cache_bytes: int = 0      # dynamic cache budget separate from static VRAM
-    # breakdown is an optional per-device decomposition for UI/debug:
-    # {"vram": {"SYCL0": {"fixed": N, "kv": N, "static_experts": N,
-    #           "dynamic_expert_cache": N, "reserve": N}},
-    #  "ram": {"expert_backing": N, "staging": N}}
+
+    # --- per-device VRAM decomposition (Task D1) ---------------------
+    # Reported separately because "12 GiB on SYCL0" answers nothing about
+    # whether raising the context or the cache budget will still fit.
+    # static + kv + overhead sum to vram_bytes[device].
+    vram_static_bytes: dict = field(default_factory=dict)   # weights
+    vram_kv_bytes: dict = field(default_factory=dict)       # KV cache
+    vram_overhead_bytes: dict = field(default_factory=dict)  # compute reserve
+    # The dynamic expert-cache budget is ADDITIONAL to vram_bytes, matching
+    # cache_bytes: it is a separate allocation the tier planner reserves
+    # before placing static experts, not a slice of the static claim.
+    vram_cache_bytes: dict = field(default_factory=dict)
+
+    # --- RAM and storage (Task D1) -----------------------------------
+    # Bytes that really will be resident: the non-mmap portion. An mmap
+    # plan's model bytes are NOT counted here -- presenting mmap size as
+    # guaranteed resident RAM is the specific error this split exists to
+    # prevent.
+    ram_resident_bytes: int = 0
+    # Model bytes reachable through mmap. Resident only as far as the page
+    # cache decides, which is why this is separate from the above.
+    mmap_bytes: int = 0
+    # The subset of mmap_bytes expected to stay hot. For a sparse MoE this
+    # is far smaller than the model: only routed experts are touched.
+    page_cache_working_set_bytes: int = 0
+    # Temporary space an acquisition needs on top of the final file.
+    staging_bytes: int = 0
+    # Block device backing storage_path, so two plans on different disks
+    # are not compared as if their read costs were the same.
+    storage_device: str = ""
+
+    # Kept for compatibility; equals ram_resident_bytes. It never meant
+    # VRAM, though it used to be computed as if it did.
+    expected_resident_bytes: int = 0
+
+    # breakdown is the same decomposition in nested dict form, for UI and
+    # support bundles:
+    # {"vram": {"SYCL0": {"static": N, "kv": N, "overhead": N, "cache": N}},
+    #  "ram": {"resident": N, "mmap": N, "page_cache_working_set": N,
+    #          "staging": N}}
     # It does NOT affect vram_bytes, which remains the total reservation
     # used by the worker and matrix logic.
+
+    def vram_total(self) -> int:
+        return sum(self.vram_bytes.values())
+
+    def device_breakdown(self, device: str) -> dict:
+        """Per-component claim on one device.
+
+        `total` is the static reservation (static + kv + overhead).
+        `cache` is additional; `peak` is what the device actually needs
+        once the expert cache is allocated.
+        """
+        static = self.vram_static_bytes.get(device, 0)
+        kv = self.vram_kv_bytes.get(device, 0)
+        overhead = self.vram_overhead_bytes.get(device, 0)
+        cache = self.vram_cache_bytes.get(device, 0)
+        total = self.vram_bytes.get(device, 0)
+        return {
+            "static": static, "kv": kv, "overhead": overhead,
+            "cache": cache, "total": total, "peak": total + cache,
+        }
 
 
 @dataclass(frozen=True)
@@ -146,6 +205,32 @@ def _parse_ot_rules(extra):
         else:
             i += 1
     return rules
+
+
+# Fraction of CPU-side MoE expert weights expected to stay hot in the page
+# cache. Only the experts a request actually routes to are touched, so the
+# working set is far smaller than the offloaded bytes. A rough constant is
+# honest here in a way that "all of it" is not; D4's calibration and D2's
+# measured page faults are what refine it.
+_MOE_PAGE_CACHE_FRACTION = 0.25
+
+
+def _block_device_for(path):
+    """Block device backing `path`, or "" when it cannot be determined.
+
+    Two plans reading from different disks do not have the same read cost,
+    so the claim records which one it is rather than leaving the reader to
+    assume there is only ever one.
+    """
+    if not path:
+        return ""
+    try:
+        import modelctl_storage
+        info = modelctl_storage.probe_storage(path)
+        devices = getattr(info, "block_devices", ()) or ()
+        return devices[0] if devices else (info.mount_point or "")
+    except Exception:
+        return ""
 
 
 def _make_claim(profile, config, hardware):
@@ -256,17 +341,37 @@ def _make_claim(profile, config, hardware):
         # No layout available: keep the old whole-model estimate behavior.
         est = modelctl_vram.estimate_from_parts(weights, ctx, cache_k, cache_type_v=cache_v)
         gpu_total = est["total"]
-        shared_gpu = gpu_total + aux_gpu
         base_gpu = gpu_total
+        overhead = 0
+        shared_gpu = gpu_total + aux_gpu
+        # estimate_from_parts folds KV and overhead into one number; the
+        # split is not recoverable, so report it as static rather than
+        # inventing a decomposition.
+        shared_static, shared_kv, shared_overhead = shared_gpu, 0, 0
     else:
         # GPU-resident total: non-expert + unpinned experts + KV + overhead
         base_gpu = non_expert + default_gpu_experts
-        shared_gpu = base_gpu + kv + max(1 << 30, int(base_gpu * 0.10)) + aux_gpu
+        overhead = max(1 << 30, int(base_gpu * 0.10))
+        shared_gpu = base_gpu + kv + overhead + aux_gpu
+        shared_static, shared_kv, shared_overhead = base_gpu + aux_gpu, kv, overhead
 
     # ---- distribute shared GPU bytes across devices ---------------------
+    # Each component is distributed by the same rule as the total, so the
+    # parts always sum back to vram_bytes.
     device = config.get("device", "")
     split = config.get("tensor_split", "")
     vram_map = dict(assigned)
+    # Bytes pinned by -ot rules are static weights by definition.
+    static_map = dict(assigned)
+    kv_map = {}
+    overhead_map = {}
+
+    def _add(dev, total, static, kvb, over):
+        vram_map[dev] = vram_map.get(dev, 0) + total
+        static_map[dev] = static_map.get(dev, 0) + static
+        kv_map[dev] = kv_map.get(dev, 0) + kvb
+        overhead_map[dev] = overhead_map.get(dev, 0) + over
+
     if split and "," in split and hardware:
         import modelctl_hardware as _hw
         ratios = [float(x) for x in split.split(",")]
@@ -274,24 +379,51 @@ def _make_claim(profile, config, hardware):
         denom = sum(ratios) or 1
         for i, ratio in enumerate(ratios):
             if i < len(gpus):
-                dev = gpus[i].device
-                vram_map[dev] = vram_map.get(dev, 0) + int(shared_gpu * ratio / denom)
+                share = ratio / denom
+                _add(gpus[i].device,
+                     int(shared_gpu * share), int(shared_static * share),
+                     int(shared_kv * share), int(shared_overhead * share))
     elif device:
-        vram_map[device] = vram_map.get(device, 0) + shared_gpu
+        _add(device, shared_gpu, shared_static, shared_kv, shared_overhead)
     elif hardware:
         import modelctl_hardware as _hw
         _eg = _hw.enabled_gpus(hardware)
         dev = _eg[0].device if _eg else ""
-        vram_map[dev] = vram_map.get(dev, 0) + shared_gpu
+        _add(dev, shared_gpu, shared_static, shared_kv, shared_overhead)
 
-    storage = "mmap" if cpu_bytes and "--no-mmap" not in extra else "none"
+    uses_mmap = "--no-mmap" not in extra
+    storage = "mmap" if cpu_bytes and uses_mmap else "none"
 
-    # Dynamic cache budget (from moe_cache config).
+    # Dynamic cache budget (from moe_cache config), per device.
     cache_budget = 0
+    cache_map = {}
     mc = profile.get("moe_cache", {})
     if mc.get("mode", "off") != "off":
         budgets = mc.get("gpu", {}).get("budgets_bytes", {})
-        cache_budget = max((b for b in budgets.values() if b > 0), default=0)
+        cache_map = {d: b for d, b in budgets.items() if b > 0}
+        cache_budget = max(cache_map.values(), default=0)
+
+    # ---- RAM vs mmap (Task D1) -----------------------------------------
+    # CPU-side weights are only *resident* when mmap is off. With mmap on
+    # they are addressed, and residency is the page cache's decision --
+    # reporting them as RAM is what makes an oversized MoE look like it
+    # needs 200 GiB of RAM it does not need.
+    if cpu_bytes and uses_mmap:
+        mmap_bytes = cpu_bytes
+        ram_resident = 0
+        # Only routed experts get touched per token, so the hot set is a
+        # fraction of the CPU-side weights rather than all of them. For a
+        # dense model there is no such saving.
+        if layout and layout.get("is_moe"):
+            working_set = int(cpu_bytes * _MOE_PAGE_CACHE_FRACTION)
+        else:
+            working_set = cpu_bytes
+    else:
+        mmap_bytes = 0
+        ram_resident = cpu_bytes
+        working_set = 0
+
+    storage_device = _block_device_for(model_path)
 
     return ResourceClaim(
         vram_bytes=vram_map,
@@ -300,8 +432,29 @@ def _make_claim(profile, config, hardware):
         expected_context=ctx,
         storage_path=model_path,
         model_bytes=weights,
-        expected_resident_bytes=cpu_bytes + sum(vram_map.values()),
         cache_bytes=cache_budget,
+        vram_static_bytes=static_map,
+        vram_kv_bytes=kv_map,
+        vram_overhead_bytes=overhead_map,
+        vram_cache_bytes=cache_map,
+        ram_resident_bytes=ram_resident,
+        mmap_bytes=mmap_bytes,
+        page_cache_working_set_bytes=working_set,
+        staging_bytes=0,
+        storage_device=storage_device,
+        expected_resident_bytes=ram_resident,
+        breakdown={
+            "vram": {d: {"static": static_map.get(d, 0),
+                         "kv": kv_map.get(d, 0),
+                         "overhead": overhead_map.get(d, 0),
+                         "cache": cache_map.get(d, 0),
+                         "total": vram_map.get(d, 0)}
+                     for d in vram_map},
+            "ram": {"resident": ram_resident,
+                    "mmap": mmap_bytes,
+                    "page_cache_working_set": working_set,
+                    "staging": 0},
+        },
     )
 
 

@@ -1293,9 +1293,21 @@ def create_app(token=None, store=None, runner=None):
     @app.get("/profiles/{name}/history", response_class=HTMLResponse)
     def profile_history(request: Request, name: str):
         import modelctl_runtime
+        import modelctl_tune
         runs = modelctl_runtime.RuntimeDB().plan_runs_for(name)
+        # Task D5: the page has to answer "what limited this run?", which
+        # is a judgement over several counters. Making it here keeps the
+        # template free of the reasoning and gives one definition of the
+        # answer.
+        rows = []
+        for r in runs:
+            d = dict(r)
+            label, why = modelctl_tune.classify_bottleneck(d)
+            d["bottleneck"] = label
+            d["bottleneck_why"] = why
+            rows.append(d)
         return templates.TemplateResponse(request=request, name="history.html", context=ctx(
-            request, name=name, runs=runs))
+            request, name=name, runs=rows))
 
     @app.get("/api/profiles/{name}/history")
     def api_history(name: str):

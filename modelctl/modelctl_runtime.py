@@ -101,6 +101,28 @@ _MIGRATIONS = [
     ("read_bytes_generation", "INTEGER", None),
     ("major_faults", "INTEGER", None),
     ("minor_faults", "INTEGER", None),
+    # Task D2. PSS divides shared pages by their sharers, so a main model
+    # and a draft sharing mmap'd pages are not double-counted; it is not
+    # always readable, and NULL means unknown rather than zero.
+    ("peak_pss_bytes", "INTEGER", None),
+    # Read syscall count separates "many small reads" from "few large
+    # ones" at the same byte total.
+    ("read_syscalls", "INTEGER", None),
+    # Bytes read from the model's own block device over the run, and which
+    # device that was -- process counters alone cannot attribute reads to
+    # a disk.
+    ("disk_read_bytes", "INTEGER", None),
+    ("storage_device", "TEXT NOT NULL DEFAULT ''", ""),
+    # VRAM at process start and after exit, alongside the existing peak.
+    ("baseline_vram_json", "TEXT NOT NULL DEFAULT '{}'", "{}"),
+    ("final_vram_json", "TEXT NOT NULL DEFAULT '{}'", "{}"),
+    # What the storage actually did, derived from counters. Never inferred
+    # from mmap being enabled -- a fully page-cached mmap model reads
+    # nothing at all.
+    ("storage_activity", "TEXT NOT NULL DEFAULT ''", ""),
+    ("storage_activity_detail", "TEXT NOT NULL DEFAULT ''", ""),
+    # Derived rates, stored next to the raw counters they come from.
+    ("rates_json", "TEXT NOT NULL DEFAULT '{}'", "{}"),
 ]
 
 
@@ -305,8 +327,12 @@ class RuntimeDB:
                 "environment_fingerprint, capability_schema, capability_digest, "
                 "claim_json, decision_json, parent_job_id, fallback_ordinal, "
                 "cache_state, read_bytes, read_bytes_warmup, read_bytes_generation, "
-                "major_faults, minor_faults) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "major_faults, minor_faults, "
+                "peak_pss_bytes, read_syscalls, disk_read_bytes, storage_device, "
+                "baseline_vram_json, final_vram_json, storage_activity, "
+                "storage_activity_detail, rates_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
+                "?,?,?,?,?,?,?,?,?)",
                 (run["profile_name"], run["plan_id"],
                  run.get("hardware_fingerprint", ""), run.get("backend_fingerprint", ""),
                  run.get("started_at", time.time()), run.get("finished_at"),
@@ -333,7 +359,16 @@ class RuntimeDB:
                  run.get("read_bytes_warmup"),
                  run.get("read_bytes_generation"),
                  run.get("major_faults"),
-                 run.get("minor_faults")))
+                 run.get("minor_faults"),
+                 run.get("peak_pss_bytes"),
+                 run.get("read_syscalls"),
+                 run.get("disk_read_bytes"),
+                 run.get("storage_device", "") or "",
+                 json.dumps(run.get("baseline_vram_bytes", {})),
+                 json.dumps(run.get("final_vram_bytes", {})),
+                 run.get("storage_activity", "") or "",
+                 run.get("storage_activity_detail", "") or "",
+                 json.dumps(run.get("rates", {}))))
             return c.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     def plan_runs_for(self, profile_name, plan_id=None, limit=50):

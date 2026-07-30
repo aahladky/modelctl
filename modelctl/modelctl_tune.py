@@ -8,6 +8,7 @@ plans already validated under the current hardware/backend fingerprints.
 Measured results feed rank_plans via RuntimeDB.observations_for_profile --
 theory proposes, measurement disposes.
 """
+import json
 import os
 import signal
 import subprocess
@@ -64,36 +65,218 @@ def _post_stream(url, body, timeout):
     return ttft, time.time() - t0, usage
 
 
+def _short_device_name(device):
+    """"/dev/nvme1n1p1" -> "nvme1n1p1", as /proc/diskstats names it."""
+    if not device:
+        return ""
+    return str(device).rsplit("/", 1)[-1]
+
+
+def _disk_read_bytes(device):
+    """Cumulative bytes read from one block device, or None if unknown.
+
+    /proc/diskstats field 6 is sectors read; sectors are 512 bytes for
+    this interface regardless of the device's physical sector size.
+    """
+    if not device:
+        return None
+    try:
+        with open("/proc/diskstats") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) > 5 and parts[2] == device:
+                    return int(parts[5]) * 512
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+# A run has to touch at least this much before "the storage was busy" is a
+# claim worth making; below it, the reads are startup noise.
+_STORAGE_ACTIVE_BYTES = 64 << 20
+
+
+def classify_storage_activity(read_bytes, major_faults, storage_mode,
+                              elapsed_seconds=None):
+    """Say what the storage actually did, from counters rather than config.
+
+    `mmap=true` says the model *can* be paged from disk, not that it was:
+    a fully page-cached model reads nothing and takes no major faults.
+    Inferring "SSD streaming" from the mount option is the specific error
+    this exists to prevent, so every answer here is backed by a counter.
+
+    Returns (label, explanation).
+    """
+    read_bytes = read_bytes or 0
+    major_faults = major_faults or 0
+
+    if read_bytes < _STORAGE_ACTIVE_BYTES and major_faults < 1000:
+        if storage_mode == "mmap":
+            return ("page-cache-served",
+                    "mmap is in use but almost nothing was read from disk — "
+                    "the model was already in the page cache")
+        return ("no-storage-activity",
+                "the run did essentially no storage reads")
+
+    if major_faults >= 1000 and read_bytes >= _STORAGE_ACTIVE_BYTES:
+        detail = (f"{major_faults} major faults and "
+                  f"{modelctl._format_size(read_bytes)} read from disk")
+        if elapsed_seconds:
+            detail += (f" ({modelctl._format_size(read_bytes / elapsed_seconds)}/s)")
+        return ("storage-backed", "weights were paged in during the run: " + detail)
+
+    if read_bytes >= _STORAGE_ACTIVE_BYTES:
+        return ("bulk-read",
+                f"{modelctl._format_size(read_bytes)} read from disk with few "
+                f"major faults — consistent with the model load itself rather "
+                f"than paging during generation")
+
+    return ("fault-heavy",
+            f"{major_faults} major faults but little data read — "
+            f"unusual; check for memory pressure")
+
+
+def classify_bottleneck(run):
+    """What limited this run: storage, CPU, H2D transfer, or GPU compute?
+
+    Task D5. Every branch is justified by a counter the run actually
+    recorded, and the answer is "unknown" whenever the evidence does not
+    support one -- a confident wrong answer here sends someone off to
+    optimise the wrong thing.
+
+    `run` is a plan_run dict (or sqlite row). Returns (label, why).
+    """
+    def num(key, default=0):
+        try:
+            value = run[key] if key in run.keys() else run.get(key, default)
+        except (AttributeError, TypeError, KeyError, IndexError):
+            value = run.get(key, default) if hasattr(run, "get") else default
+        return value if value is not None else default
+
+    gen_read = num("read_bytes_generation")
+    major = num("major_faults")
+    gen_tps = num("generation_tps")
+    ram_bytes = 0
+    try:
+        claim = run.get("claim_json") or run.get("claim") or {}
+        if isinstance(claim, str):
+            claim = json.loads(claim)
+        ram_bytes = claim.get("ram_bytes", 0) or 0
+    except Exception:
+        ram_bytes = 0
+
+    # Storage: bytes are still being pulled from disk while generating.
+    if gen_read >= 256 << 20:
+        return ("storage",
+                f"{modelctl._format_size(gen_read)} was read from disk during "
+                f"generation — the model is being paged in as it runs")
+    if major >= 10_000 and gen_read >= 64 << 20:
+        return ("storage",
+                f"{major} major faults during the run with "
+                f"{modelctl._format_size(gen_read)} read — weights are "
+                f"faulting in from storage")
+
+    # CPU: weights live in RAM and are not being re-read, so the host is
+    # doing that part of the FFN every token.
+    if ram_bytes >= 4 << 30 and gen_read < 64 << 20:
+        return ("cpu",
+                f"{modelctl._format_size(ram_bytes)} of weights sit on the "
+                f"host and are not being re-read from disk — the CPU is "
+                f"computing over them each token")
+
+    # H2D: the expert cache is missing often enough that every token drags
+    # weights across PCIe.
+    cache = run.get("cache_metrics") if hasattr(run, "get") else None
+    if isinstance(cache, dict) and cache.get("lookups"):
+        hit_ratio = cache.get("hit_ratio")
+        if hit_ratio is None and cache.get("lookups"):
+            hit_ratio = cache.get("hits", 0) / cache["lookups"]
+        if hit_ratio is not None and hit_ratio < 0.5:
+            return ("h2d",
+                    f"expert cache hit rate is {hit_ratio * 100:.0f}% — most "
+                    f"tokens transfer expert weights over PCIe")
+
+    if gen_tps:
+        return ("gpu",
+                f"no significant storage reads, host weights, or cache misses "
+                f"— generation at {gen_tps:.1f} t/s is GPU-bound")
+
+    return ("unknown",
+            "not enough evidence in this run to attribute a bottleneck")
+
+
 class _Sampler:
     """1 Hz peak sampler: per-device VRAM free, child RSS, system RAM
     available, and cumulative storage read bytes / page faults across the
     launched process group (Task 3.3) -- distinguishes compute speed from
     active storage reads."""
 
-    def __init__(self, pid):
+    def __init__(self, pid, storage_device=""):
         self.pid = pid
         self.peak_vram = {}
+        self.baseline_vram = {}
+        # VRAM after the process exits, so a leak (or a device that never
+        # released) is visible rather than being read as peak usage.
+        self.final_vram = {}
         self.peak_ram = 0
+        self.peak_pss = 0
         self.read_bytes = 0
+        self.read_syscalls = 0
         self.minor_faults = 0
         self.major_faults = 0
+        # Block-device counters for the disk the model lives on, so
+        # storage throughput is attributed to the right device rather than
+        # to whatever else the machine happened to be doing.
+        self.storage_device = _short_device_name(storage_device)
+        self._disk_start = None
+        self.disk_read_bytes = 0
+        self.started_at = 0.0
+        self.finished_at = 0.0
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def __enter__(self):
+        self.started_at = time.time()
+        self._disk_start = _disk_read_bytes(self.storage_device)
         self._thread.start()
         return self
 
     def __exit__(self, *a):
         self._stop.set()
         self._thread.join(timeout=3)
+        self.finished_at = time.time()
+        end = _disk_read_bytes(self.storage_device)
+        if self._disk_start is not None and end is not None:
+            self.disk_read_bytes = max(0, end - self._disk_start)
+        try:
+            for d in modelctl.get_gpu_inventory():
+                self.final_vram[d["device"]] = (
+                    (d["total_bytes"] - d["free_bytes"])
+                    - self.baseline_vram.get(d["device"], 0))
+        except Exception:
+            pass
 
     def io_snapshot(self):
-        """Current cumulative (read_bytes, minor_faults, major_faults) --
-        callers diff two snapshots to get a phase's contribution (e.g.
-        warmup vs. measured generation)."""
-        return {"read_bytes": self.read_bytes, "minor_faults": self.minor_faults,
+        """Current cumulative counters -- callers diff two snapshots to get
+        a phase's contribution (e.g. warmup vs. measured generation)."""
+        return {"read_bytes": self.read_bytes,
+                "read_syscalls": self.read_syscalls,
+                "minor_faults": self.minor_faults,
                 "major_faults": self.major_faults}
+
+    def rates(self):
+        """Derived rates alongside the raw counters.
+
+        The raw counters are what get stored; these are for display, and
+        are computed here so every surface derives them the same way.
+        """
+        elapsed = max(1e-6, (self.finished_at or time.time()) - (self.started_at or 0))
+        return {
+            "elapsed_seconds": elapsed,
+            "read_bytes_per_second": self.read_bytes / elapsed,
+            "disk_read_bytes_per_second": self.disk_read_bytes / elapsed,
+            "major_faults_per_second": self.major_faults / elapsed,
+        }
 
     def _run(self):
         baseline = {}
@@ -109,18 +292,27 @@ class _Sampler:
                     used = (d["total_bytes"] - d["free_bytes"]) - baseline.get(d["device"], 0)
                     self.peak_vram[d["device"]] = max(
                         self.peak_vram.get(d["device"], 0), used)
-                rss = self._child_rss()
+                rss, pss = self._child_memory()
                 self.peak_ram = max(self.peak_ram, rss)
-                read_bytes, minor, major = self._child_io()
+                self.peak_pss = max(self.peak_pss, pss)
+                read_bytes, minor, major, syscr = self._child_io()
                 self.read_bytes = read_bytes
                 self.minor_faults = minor
                 self.major_faults = major
+                self.read_syscalls = syscr
             except Exception:
                 pass
             self._stop.wait(1.0)
 
-    def _child_rss(self):
-        total = 0
+    def _child_memory(self):
+        """(RSS, PSS) summed across the process group.
+
+        PSS divides shared pages by the number of sharers, so a main model
+        and its draft sharing mmap'd pages are not counted twice. It comes
+        from smaps_rollup, which is not always readable; 0 means unknown,
+        not zero.
+        """
+        rss = pss = 0
         try:
             for f in os.listdir("/proc"):
                 if not f.isdigit():
@@ -132,12 +324,21 @@ class _Sampler:
                     with open(f"/proc/{f}/status") as fh:
                         for line in fh:
                             if line.startswith("VmRSS:"):
-                                total += int(line.split()[1]) * 1024
+                                rss += int(line.split()[1]) * 1024
+                                break
                 except (OSError, ValueError, IndexError):
                     continue
+                try:
+                    with open(f"/proc/{f}/smaps_rollup") as fh:
+                        for line in fh:
+                            if line.startswith("Pss:"):
+                                pss += int(line.split()[1]) * 1024
+                                break
+                except (OSError, ValueError, IndexError):
+                    pass
         except OSError:
             pass
-        return total
+        return rss, pss
 
     def _child_io(self):
         """Cumulative read_bytes (/proc/<pid>/io, bytes actually fetched
@@ -145,7 +346,7 @@ class _Sampler:
         hits) and minflt/majflt (/proc/<pid>/stat), summed across every
         process in the launched process group (same pgrp-match as
         _child_rss -- catches draft-model/worker subprocesses too)."""
-        read_bytes = minor = major = 0
+        read_bytes = minor = major = syscr = 0
         try:
             for f in os.listdir("/proc"):
                 if not f.isdigit():
@@ -164,12 +365,16 @@ class _Sampler:
                         for line in fh:
                             if line.startswith("read_bytes:"):
                                 read_bytes += int(line.split()[1])
-                                break
+                            elif line.startswith("syscr:"):
+                                # Read syscall count separates "many small
+                                # reads" from "few large ones" at the same
+                                # byte total.
+                                syscr += int(line.split()[1])
                 except OSError:
                     pass
         except OSError:
             pass
-        return read_bytes, minor, major
+        return read_bytes, minor, major, syscr
 
 
 def _wait_ready(port, proc, timeout=900):
@@ -267,7 +472,8 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
         if proc_register:
             proc_register(proc)
 
-        with _Sampler(proc.pid) as sampler:
+        with _Sampler(proc.pid,
+                      storage_device=plan.claim.storage_device) as sampler:
             ready, load_s = _wait_ready(port, proc)
             if not ready:
                 run["failure_class"] = "health_timeout" if proc.poll() is None else "backend_crash"
@@ -345,11 +551,29 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
 
         run["peak_vram_bytes"] = sampler.peak_vram
         run["peak_ram_bytes"] = sampler.peak_ram
+        run["peak_pss_bytes"] = sampler.peak_pss
+        run["baseline_vram_bytes"] = sampler.baseline_vram
+        run["final_vram_bytes"] = sampler.final_vram
         io_at_end = sampler.io_snapshot()
         run["read_bytes"] = io_at_end["read_bytes"]
         run["read_bytes_generation"] = io_at_end["read_bytes"] - io_after_warmup["read_bytes"]
         run["major_faults"] = io_at_end["major_faults"]
         run["minor_faults"] = io_at_end["minor_faults"]
+        run["read_syscalls"] = io_at_end["read_syscalls"]
+        run["disk_read_bytes"] = sampler.disk_read_bytes
+        run["storage_device"] = sampler.storage_device
+        # Raw counters are what get stored; the rates are derived here so
+        # every surface derives them identically.
+        run["rates"] = sampler.rates()
+        # What the storage actually did, from counters -- never from the
+        # fact that mmap was enabled.
+        label, why = classify_storage_activity(
+            io_at_end["read_bytes"], io_at_end["major_faults"],
+            plan.claim.storage_mode,
+            elapsed_seconds=run["rates"]["elapsed_seconds"])
+        run["storage_activity"] = label
+        run["storage_activity_detail"] = why
+        log(f"storage: {label} — {why}")
         return run
     except Exception as e:
         run["failure_class"] = run.get("failure_class") or "unknown"
