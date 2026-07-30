@@ -5,6 +5,7 @@ from unittest import mock
 
 import modelctl
 import modelctl_hardware
+import modelctl_plans
 import modelctl_services.profile_service as profile_service
 import modelctl_services.plan_service as plan_service
 import modelctl_services.hardware_service as hardware_service
@@ -114,7 +115,47 @@ class TestPlanService(unittest.TestCase):
             )
             result = plan_service.compile_plans("test")
         self.assertTrue(result.ok)
-        self.assertTrue(result.plans)
+
+    def test_apply_plan_writes_config_and_syncs(self):
+        profile = modelctl.normalize_profile({
+            "name": "test",
+            "model_path": "/tmp/test.gguf",
+            "config": {"ctx": 4096, "device": "SYCL0", "flash_attn": "auto",
+                       "fit": "on", "mtp": "off", "extra": ""},
+        })
+        modelctl.save_profile(profile)
+        snap = mock.MagicMock(
+            gpus=[], fingerprint="test",
+            ram_total_bytes=16 * (1 << 30), ram_available_bytes=8 * (1 << 30),
+            ram_reserve_bytes=0, backend_fingerprints={}, captured_at=0,
+        )
+        with mock.patch("modelctl_hardware.capture_hardware_snapshot", return_value=snap), \
+             mock.patch("modelctl_vram.file_fingerprint", return_value="abc"):
+            plans = modelctl_plans.compile_launch_plans(profile, snap)
+            target = plans[0]
+            with mock.patch("modelctl.generate_artifacts"), \
+                 mock.patch("modelctl.sync_all_backends") as mock_sync:
+                result = plan_service.apply_plan("test", target.id)
+        self.assertTrue(result.ok, result.messages)
+        mock_sync.assert_called_once()
+        saved = modelctl.load_profile("test")
+        self.assertEqual(saved["config"], target.config)
+
+    def test_apply_plan_unknown_id_fails(self):
+        profile = modelctl.normalize_profile({
+            "name": "test", "model_path": "/tmp/test.gguf",
+            "config": {"ctx": 4096, "flash_attn": "auto", "fit": "on",
+                       "mtp": "off", "extra": ""},
+        })
+        modelctl.save_profile(profile)
+        with mock.patch("modelctl_hardware.capture_hardware_snapshot") as mock_snap:
+            mock_snap.return_value = mock.MagicMock(
+                gpus=[], fingerprint="test", ram_total_bytes=16 << 30,
+                ram_available_bytes=8 << 30, ram_reserve_bytes=0,
+                backend_fingerprints={}, captured_at=0,
+            )
+            result = plan_service.apply_plan("test", "nonexistent-plan-id")
+        self.assertFalse(result.ok)
 
 
 class TestPlanServiceSelection(unittest.TestCase):

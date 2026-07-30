@@ -41,6 +41,35 @@ def compile_plans(profile_name: str) -> PlanResult:
     return PlanResult(ok=True, plans=plans, observations=observations)
 
 
+def apply_plan(profile_name: str, plan_id: str, resync: bool = True) -> PlanResult:
+    """Apply a specific candidate plan's config directly to the profile
+    (fixed placement, not managed-mode pinning -- see select_plan() for
+    that). Used by the add-model wizard: 'register' a plan the user
+    compared and (optionally) tested means the profile actually launches
+    with that plan's device/split/context/etc, not whatever it had before.
+    """
+    try:
+        profile = modelctl.load_profile(profile_name)
+    except (SystemExit, Exception) as e:
+        return PlanResult(ok=False, messages=[f"failed to load profile: {e}"])
+
+    snap = modelctl_hardware.capture_hardware_snapshot()
+    plans = modelctl_plans.compile_launch_plans(profile, snap)
+    plan = next((p for p in plans if p.id == plan_id), None)
+    if plan is None:
+        return PlanResult(ok=False, messages=[f"plan {plan_id} not found for '{profile_name}'"])
+
+    if plan.config:
+        profile["config"] = plan.config
+    modelctl.save_profile(profile)
+    modelctl.generate_artifacts(profile)
+    if resync:
+        modelctl.sync_all_backends(restart_router=True, restart_openarc=True)
+
+    return PlanResult(ok=True, plans=[plan], selected_plan={"id": plan_id, "label": plan.label},
+                      messages=[f"applied plan {plan.label} ({plan_id[:8]})"])
+
+
 def rank_plans(profile_name: str, policy=None) -> PlanResult:
     """Compile and rank plans according to policy.
 

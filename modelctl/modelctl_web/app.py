@@ -540,8 +540,13 @@ def create_app(token=None, store=None, runner=None):
                 pass
         elif state.download_job_id:
             job = store.get(state.download_job_id)
-            if job and job.get("status") == "done" and job.get("result"):
-                pname = job["result"].get("profile")
+            if job and job.get("status") == "done" and job.get("outcome"):
+                # job["result"] is the plain-text log (see append_result_line);
+                # the structured return value submit_pull()/submit_import_local()
+                # return is JSON-encoded in job["outcome"] (job_fragment.html
+                # reads it the same way via the `fromjson` filter).
+                outcome = json.loads(job["outcome"])
+                pname = outcome.get("profile")
                 if pname:
                     state.profile_name = pname
                     store_wiz.save(state)
@@ -559,6 +564,15 @@ def create_app(token=None, store=None, runner=None):
         state = store_wiz.load(wizard_id)
         if not state:
             return RedirectResponse("/add", status_code=303)
+        # The import/pull job may still be running (its result populates
+        # profile_name) -- advancing to plans before it lands in a redirect
+        # loop back to /add, silently dropping the user out of the wizard.
+        # Stay on analyze (which re-checks the job and shows progress)
+        # instead of forcing the user to restart the whole wizard.
+        if not state.profile_name and state.download_job_id:
+            job = store.get(state.download_job_id)
+            if not (job and job.get("status") == "done" and job.get("outcome")):
+                return RedirectResponse(f"/add/{wizard_id}/analyze", status_code=303)
         state.advance("plans")
         store_wiz.save(state)
         return RedirectResponse(f"/add/{wizard_id}/plans", status_code=303)
@@ -570,8 +584,10 @@ def create_app(token=None, store=None, runner=None):
         import modelctl_hardware
         store_wiz = WizardStore()
         state = store_wiz.load(wizard_id)
-        if not state or not state.profile_name:
+        if not state:
             return RedirectResponse("/add", status_code=303)
+        if not state.profile_name:
+            return RedirectResponse(f"/add/{wizard_id}/analyze", status_code=303)
         profile = modelctl.load_profile(state.profile_name)
         snap = modelctl_hardware.capture_hardware_snapshot()
         plans = modelctl_plans.compile_launch_plans(profile, snap)
@@ -588,6 +604,7 @@ def create_app(token=None, store=None, runner=None):
             return RedirectResponse("/add", status_code=303)
         form = await request.form()
         action = form.get("action", "next")
+        state.selected_plan_id = form.get("plan_id", "")
         if action == "test":
             state.advance("test")
         elif action == "register":
@@ -614,7 +631,13 @@ def create_app(token=None, store=None, runner=None):
         state = store_wiz.load(wizard_id)
         if not state:
             return RedirectResponse("/add", status_code=303)
-        job_id = mutate.submit_smoke_test(runner, state.profile_name)
+        # Test the specific plan the user picked on the previous step (real
+        # launch + measured throughput), not just a generic smoke test of
+        # whatever the profile's default config happened to be.
+        if state.selected_plan_id:
+            job_id = mutate.submit_plan_test(runner, state.profile_name, state.selected_plan_id)
+        else:
+            job_id = mutate.submit_smoke_test(runner, state.profile_name)
         state.test_job_id = job_id
         state.advance("register")
         store_wiz.save(state)
@@ -638,12 +661,21 @@ def create_app(token=None, store=None, runner=None):
     @app.post("/add/{wizard_id}/register")
     def wizard_register_submit(request: Request, wizard_id: str):
         from .wizard import WizardStore
+        from modelctl_services import plan_service
         store_wiz = WizardStore()
         state = store_wiz.load(wizard_id)
         if not state:
             return RedirectResponse("/add", status_code=303)
-        # Warm-load through llama-swap to verify.
         if state.profile_name:
+            # Apply the plan the user compared/tested so the profile
+            # actually launches with it, not whatever config import_local()
+            # or the pull wizard happened to default to.
+            if state.selected_plan_id:
+                result = plan_service.apply_plan(state.profile_name, state.selected_plan_id)
+                if not result.ok:
+                    state.set_error(result.messages[0] if result.messages
+                                    else "failed to apply selected plan")
+            # Warm-load through llama-swap to verify.
             job_id = mutate.submit_load(runner, state.profile_name)
             state.registration_complete = True
             state.endpoint = f"/v1/models"

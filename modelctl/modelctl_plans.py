@@ -61,6 +61,10 @@ class LaunchPlan:
     source: str               # "current-profile", "tier-planner", "single-gpu", etc.
     warnings: tuple
     decision_data: dict       # extra info for explainability
+    config: dict = field(default_factory=dict)  # profile["config"] fields this
+                                                  # plan implies -- select_plan()
+                                                  # applies this back onto the
+                                                  # profile when a user picks it.
 
 
 @dataclass(frozen=True)
@@ -360,6 +364,7 @@ def _make_plan(profile, config, source, hardware, extra_warnings=(), decision=No
         source=source,
         warnings=tuple(extra_warnings),
         decision_data=decision or {},
+        config=dict(merged),
     )
 
 
@@ -404,7 +409,9 @@ def _compile_ovms_plans(profile, hardware):
                 source="ovms-adapter",
                 warnings=(() if ir_bytes else
                           ("IR size unknown until OVMS downloads the model",)),
-                decision_data={"target_device": target, "cache_size": cache}))
+                decision_data={"target_device": target, "cache_size": cache},
+                config={**profile.get("config", {}), "target_device": target,
+                        "cache_size": cache}))
     return plans
 
 
@@ -446,7 +453,8 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
             estimated={}, source="current-profile", warnings=(),
             decision_data={
                 "target_device": profile["config"].get("target_device"),
-                "cache_size": profile["config"].get("cache_size")})
+                "cache_size": profile["config"].get("cache_size")},
+            config=dict(profile.get("config", {})))
         return [baseline] + _compile_ovms_plans(profile, hardware)
     if not hardware:
         from modelctl_hardware import capture_hardware_snapshot
