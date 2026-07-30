@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 import modelctl
+import modelctl_hardware
 import modelctl_services.profile_service as profile_service
 import modelctl_services.plan_service as plan_service
 import modelctl_services.hardware_service as hardware_service
@@ -182,6 +183,59 @@ class TestHardwareService(unittest.TestCase):
     def test_load_settings_returns_dict(self):
         settings = hardware_service.load_settings()
         self.assertIsInstance(settings, dict)
+
+
+class TestHardwareServiceCalibration(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._orig_models = modelctl.DEFAULT_MODELS_DIR
+        modelctl.DEFAULT_MODELS_DIR = Path(self.tmp.name) / "models"
+        self.addCleanup(setattr, modelctl, "DEFAULT_MODELS_DIR", self._orig_models)
+
+    def test_pick_calibration_file_finds_largest_gguf(self):
+        modelctl.DEFAULT_MODELS_DIR.mkdir(parents=True)
+        small = modelctl.DEFAULT_MODELS_DIR / "small.gguf"
+        small.write_bytes(b"\x00" * 100)
+        sub = modelctl.DEFAULT_MODELS_DIR / "sub"
+        sub.mkdir()
+        big = sub / "big.gguf"
+        big.write_bytes(b"\x00" * 1000)
+        self.assertEqual(hardware_service.pick_calibration_file(), str(big))
+
+    def test_pick_calibration_file_none_when_no_models_dir(self):
+        self.assertIsNone(hardware_service.pick_calibration_file())
+
+    def test_pick_calibration_file_none_when_no_gguf(self):
+        modelctl.DEFAULT_MODELS_DIR.mkdir(parents=True)
+        (modelctl.DEFAULT_MODELS_DIR / "readme.txt").write_text("x")
+        self.assertIsNone(hardware_service.pick_calibration_file())
+
+    def test_calibrate_storage_persists_measurement(self):
+        modelctl.DEFAULT_MODELS_DIR.mkdir(parents=True)
+        model_file = modelctl.DEFAULT_MODELS_DIR / "m.gguf"
+        model_file.write_bytes(b"\x00" * (2 * 1024 * 1024))
+
+        settings_path = Path(self.tmp.name) / "hardware.json"
+        with mock.patch("modelctl_hardware.SETTINGS_PATH", settings_path):
+            result = hardware_service.calibrate_storage(str(model_file))
+            self.assertTrue(result.ok, result.messages)
+            saved = modelctl_hardware.load_settings()
+
+        import modelctl_storage
+        mount = modelctl_storage.probe_storage(str(model_file)).mount_point
+        entry = saved["storage"][mount]
+        self.assertGreater(entry["measured_sequential_read_bps"], 0)
+        self.assertIn("measured_at", entry)
+
+        # And the hardware snapshot picks it up.
+        with mock.patch("modelctl_hardware.SETTINGS_PATH", settings_path), \
+             mock.patch.object(modelctl_hardware, "probe_gpus", return_value=[]):
+            snap = modelctl_hardware.capture_hardware_snapshot()
+        matching = [s for s in snap.storage if s.mount_point == mount]
+        self.assertTrue(matching)
+        self.assertGreater(matching[0].measured_sequential_read_bps, 0)
+        self.assertIsNotNone(matching[0].measurement_age_seconds)
 
 
 class _FakeCtx:

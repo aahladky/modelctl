@@ -46,11 +46,17 @@
       {{ s.filesystem }}
       {% if s.block_devices %} · {{ s.block_devices | join(', ') }}{% endif %}
       {% if not s.allow_mmap %} · mmap unsafe{% endif %}
-      {% if s.measured_sequential_read_bps %} · measured {{ (s.measured_sequential_read_bps / 1048576) | round(0) }} MiB/s seq{% else %} · not calibrated{% endif %}
+      {% if s.measured_sequential_read_bps %}
+        · measured {{ (s.measured_sequential_read_bps / 1048576) | round(0) }} MiB/s seq
+        {% if s.measurement_age_seconds %} ({{ (s.measurement_age_seconds / 3600) | round(1) }}h ago){% endif %}
+      {% else %} · not calibrated{% endif %}
     </div>
   </div>
 {% endfor %}
 </div>
+<form method="post" action="/hardware/calibrate">
+  <button type="submit">calibrate sequential read (reads ~100MB from the largest local model file)</button>
+</form>
 {% endif %}
 
 {% if snap.backend_fingerprints %}

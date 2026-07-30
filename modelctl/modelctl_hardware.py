@@ -192,35 +192,39 @@ def capture_hardware_snapshot(settings=None):
     ram_avail = modelctl_vram.system_ram_available()
     backend_fps = _backend_fingerprints()
 
-    storage_devs = settings.get("storage", {})
+    # Always probe the real model directory's topology (mount, filesystem,
+    # transport, rotational/raid, capacity) -- settings["storage"], keyed by
+    # mount_point, only overlays calibration measurements and an optional
+    # allow_mmap override on top of that, rather than replacing the probe.
+    # A settings-only snapshot (no real probe) would silently lose transport/
+    # capacity detail the moment a user calibrates or overrides anything.
+    storage_settings = settings.get("storage", {})
     storage_snapshots = []
-    for v in storage_devs.values():
-        if isinstance(v, dict) and v.get("path"):
+    try:
+        import modelctl_storage
+        import modelctl as _mc
+        model_dir = str(_mc.DEFAULT_MODELS_DIR)
+        if os.path.isdir(model_dir):
+            info = modelctl_storage.probe_storage(model_dir)
+            override = storage_settings.get(info.mount_point, {})
+            measured_at = override.get("measured_at")
             storage_snapshots.append(StorageSnapshot(
-                path=v.get("path", ""), kind=v.get("kind", ""),
-                allow_mmap=v.get("allow_mmap", True)))
-    # Auto-probe storage for model directories if not explicitly configured.
-    if not storage_snapshots:
-        try:
-            import modelctl_storage
-            import modelctl as _mc
-            model_dir = str(_mc.DEFAULT_MODELS_DIR)
-            if os.path.isdir(model_dir):
-                info = modelctl_storage.probe_storage(model_dir)
-                storage_snapshots.append(StorageSnapshot(
-                    path=info.path, kind=info.filesystem,
-                    allow_mmap=info.allow_mmap,
-                    mount_point=info.mount_point,
-                    filesystem=info.filesystem,
-                    block_devices=info.block_devices,
-                    transport=info.transport,
-                    rotational=info.rotational,
-                    raid_level=info.raid_level,
-                    total_bytes=info.total_bytes,
-                    free_bytes=info.free_bytes,
-                ))
-        except Exception:
-            pass
+                path=info.path, kind=info.filesystem,
+                allow_mmap=override.get("allow_mmap", info.allow_mmap),
+                mount_point=info.mount_point,
+                filesystem=info.filesystem,
+                block_devices=info.block_devices,
+                transport=info.transport,
+                rotational=info.rotational,
+                raid_level=info.raid_level,
+                total_bytes=info.total_bytes,
+                free_bytes=info.free_bytes,
+                measured_sequential_read_bps=override.get("measured_sequential_read_bps"),
+                measured_random_read_bps=override.get("measured_random_read_bps"),
+                measurement_age_seconds=(time.time() - measured_at) if measured_at else None,
+            ))
+    except Exception:
+        pass
     storage = tuple(storage_snapshots)
 
     snap = HardwareSnapshot(

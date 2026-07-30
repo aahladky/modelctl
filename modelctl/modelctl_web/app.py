@@ -843,6 +843,11 @@ def create_app(token=None, store=None, runner=None):
         modelctl_hardware.save_settings(settings)
         return RedirectResponse("/hardware?saved=1", status_code=303)
 
+    @app.post("/hardware/calibrate")
+    def hardware_calibrate():
+        job_id = mutate.submit_calibrate_storage(runner)
+        return RedirectResponse(f"/jobs/{job_id}?back=/hardware", status_code=303)
+
     @app.get("/api/hardware")
     def api_hardware():
         import modelctl_hardware

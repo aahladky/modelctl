@@ -609,6 +609,26 @@ class TestHardware(WebTestBase):
         self.assertEqual(len(resp.json()["storage"]), 1)
         self.assertEqual(resp.json()["storage"][0]["transport"], "nvme")
 
+    def test_calibrate_route_submits_job(self):
+        with mock.patch("modelctl_web.mutate.submit_calibrate_storage",
+                        return_value="job-cal") as sub:
+            resp = self.client.post("/hardware/calibrate", headers=self.auth,
+                                    follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
+        self.assertIn("job-cal", resp.headers["location"])
+        sub.assert_called_once()
+
+    def test_calibrate_job_runs_end_to_end(self):
+        from modelctl_services import hardware_service
+        with mock.patch.object(hardware_service, "pick_calibration_file",
+                               return_value="/nonexistent/model.gguf"):
+            resp = self.client.post("/hardware/calibrate", headers=self.auth,
+                                    follow_redirects=False)
+            job = self.wait_job(resp.headers["location"].split("/jobs/")[1].split("?")[0])
+        # No real model file in this test env -- calibration fails cleanly,
+        # it doesn't crash the job.
+        self.assertEqual(job["status"], "failed")
+
 
 class TestPlans(WebTestBase):
     def _mock_hardware(self, gpus=None):

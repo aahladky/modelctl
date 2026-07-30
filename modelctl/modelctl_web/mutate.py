@@ -296,6 +296,23 @@ def submit_autotune(runner, name, objective="balanced", candidate_ids=None):
                          payload={"name": name, "objective": objective})
 
 
+def submit_calibrate_storage(runner):
+    def fn(ctx):
+        from modelctl_services import hardware_service
+        file_path = hardware_service.pick_calibration_file()
+        if not file_path:
+            raise RuntimeError("no .gguf file found under the models directory to calibrate against")
+        ctx.log(f"calibrating sequential read using {file_path} ...")
+        result = hardware_service.calibrate_storage(file_path)
+        if not result.ok:
+            raise RuntimeError(result.messages[0] if result.messages
+                              else "storage calibration failed")
+        for m in result.messages:
+            ctx.log(m)
+        return {"messages": result.messages}
+    return runner.submit("calibrate-storage", "calibrate storage", fn, lane="mutation")
+
+
 def submit_matrix_apply(runner):
     def fn(ctx):
         import shutil
