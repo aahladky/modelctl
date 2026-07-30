@@ -14,7 +14,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import (HTMLResponse, JSONResponse, PlainTextResponse,
-                               RedirectResponse, StreamingResponse)
+                               RedirectResponse, Response, StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -949,7 +949,13 @@ def create_app(token=None, store=None, runner=None):
     # ---- settings --------------------------------------------------------
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request, saved: str = ""):
+        import modelctl_diagnostics
+        import modelctl_hardware
         defaults = modelctl.load_defaults()
+        try:
+            storage = modelctl_hardware.capture_hardware_snapshot().storage
+        except Exception:
+            storage = ()
         return templates.TemplateResponse(request=request, name="settings.html", context=ctx(
             request, defaults=defaults, saved=saved,
             models_dir=str(modelctl.DEFAULT_MODELS_DIR),
@@ -958,7 +964,41 @@ def create_app(token=None, store=None, runner=None):
             llama_swap_config=str(modelctl.LLAMA_SWAP_CONFIG_PATH),
             llama_swap_service=modelctl.LLAMA_SWAP_SERVICE_NAME,
             llama_swap_base_url=modelctl.LLAMA_SWAP_BASE_URL,
+            manifest=modelctl_diagnostics.manifest_status(),
+            capabilities=modelctl_diagnostics.capability_report(),
+            environment=modelctl_diagnostics.environment_report(),
+            storage=storage,
         ))
+
+    @app.get("/api/diagnostics")
+    def api_diagnostics():
+        import modelctl_diagnostics
+        status = modelctl_diagnostics.manifest_status()
+        return {
+            "manifest": {
+                "path": status.path, "error": status.error,
+                "present": status.present, "ok": status.ok,
+                "content": status.manifest,
+                "modelctl_commit": status.modelctl_commit,
+                "submodule_pinned": status.submodule_pinned,
+                "submodule_checked_out": status.submodule_checked_out,
+                "working_tree_dirty": status.working_tree_dirty,
+                "mismatches": list(status.mismatches),
+                "notes": list(status.notes),
+            },
+            "capabilities": modelctl_diagnostics.capability_report(),
+            "environment": modelctl_diagnostics.environment_report(),
+        }
+
+    @app.get("/settings/support-bundle")
+    def support_bundle():
+        import modelctl_diagnostics
+        data = modelctl_diagnostics.support_bundle_bytes()
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        return Response(
+            content=data, media_type="application/zip",
+            headers={"content-disposition":
+                     f'attachment; filename="modelctl-support-{stamp}.zip"'})
 
     @app.post("/settings/save")
     async def settings_save(request: Request):

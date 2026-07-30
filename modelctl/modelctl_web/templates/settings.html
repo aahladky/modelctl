@@ -18,6 +18,129 @@
   MODELCTL_LLAMA_SERVER, MODELCTL_LLAMA_SWAP_CONFIG, etc.</p>
 </div>
 
+<h2>integration manifest</h2>
+<div class="card">
+  {% if not manifest.present %}
+  <p class="warn">{{ manifest.error or 'no manifest found' }}</p>
+  <p class="muted">Expected at <code>{{ manifest.path }}</code>.</p>
+  {% else %}
+  <table>
+    <tr><td><strong>runtime pinned (manifest)</strong></td>
+        <td><code>{{ manifest.manifest.get('llama_cpp_commit', '—') }}</code></td></tr>
+    <tr><td><strong>runtime pinned (submodule)</strong></td>
+        <td><code>{{ manifest.submodule_pinned or '—' }}</code></td></tr>
+    <tr><td><strong>runtime checked out</strong></td>
+        <td><code>{{ manifest.submodule_checked_out or '—' }}</code></td></tr>
+    <tr><td><strong>modelctl commit</strong></td>
+        <td><code>{{ manifest.modelctl_commit or '—' }}</code></td></tr>
+    <tr><td><strong>capability schema</strong></td>
+        <td>{{ manifest.manifest.get('capability_schema', '—') }}</td></tr>
+    <tr><td><strong>profile schema</strong></td>
+        <td>{{ manifest.manifest.get('profile_schema', '—') }}</td></tr>
+    <tr><td><strong>release channel</strong></td>
+        <td>{{ manifest.manifest.get('release_channel', '—') }}</td></tr>
+    <tr><td><strong>supported features</strong></td>
+        <td>{{ manifest.manifest.get('supported_runtime_features', []) | join(', ') or '—' }}</td></tr>
+    <tr><td><strong>unsupported features</strong></td>
+        <td class="muted">{{ manifest.manifest.get('unsupported_runtime_features', []) | join(', ') or '—' }}</td></tr>
+  </table>
+
+  {% if manifest.mismatches %}
+  <p class="err"><strong>this install does not match the manifest:</strong></p>
+  <ul>{% for m in manifest.mismatches %}<li class="err">{{ m }}</li>{% endfor %}</ul>
+  {% else %}
+  <p class="ok">Runtime matches the manifest.</p>
+  {% endif %}
+  {% if manifest.notes %}
+  <ul>{% for n in manifest.notes %}<li class="muted">{{ n }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% endif %}
+</div>
+
+<h2>runtime builds and capabilities</h2>
+<div class="card">
+  {% if capabilities.error %}<p class="warn">{{ capabilities.error }}</p>{% endif %}
+  <table>
+    <tr><td><strong>selected binary</strong></td>
+        <td><code>{{ capabilities.binary or '—' }}</code></td></tr>
+    <tr><td><strong>builds found</strong></td>
+        <td>{% for c in capabilities.candidates %}<code>{{ c }}</code><br>{% else %}—{% endfor %}
+          <span class="muted">A profile's <code>binary</code> field pins one of these.</span></td></tr>
+    {% if capabilities.get('capability_fingerprint') %}
+    <tr><td><strong>capability fingerprint</strong></td>
+        <td><code>{{ capabilities.capability_fingerprint }}</code></td></tr>
+    {% endif %}
+  </table>
+  {% if capabilities.probe %}
+  <details>
+    <summary>raw capability response</summary>
+    <pre>{{ capabilities.probe | tojson(indent=2) }}</pre>
+  </details>
+  {% endif %}
+</div>
+
+<h2>oneAPI environment</h2>
+<div class="card">
+  {% if environment.oneapi_env_scripts %}
+  <ul>{% for s in environment.oneapi_env_scripts %}<li><code>{{ s }}</code></li>{% endfor %}</ul>
+  <p class="muted">The first script providing LD_LIBRARY_PATH is sourced for
+  SYCL profiles that have none saved.</p>
+  {% else %}
+  <p class="warn">No oneAPI env script found. SYCL builds may fail to start
+  with a shared-library error unless the profile saves LD_LIBRARY_PATH.</p>
+  {% endif %}
+</div>
+
+<h2>storage</h2>
+<div class="card">
+  {% if storage %}
+  <table>
+    <tr><th>path</th><th>filesystem</th><th>transport</th><th>free</th><th>calibration</th></tr>
+    {% for s in storage %}
+    <tr>
+      <td><code>{{ s.path }}</code><br><span class="muted">{{ s.mount_point }}</span></td>
+      <td>{{ s.filesystem or '—' }}{% if s.raid_level %} ({{ s.raid_level }}){% endif %}</td>
+      <td>{{ s.transport or 'unknown' }}{% if s.rotational %} · rotational{% endif %}</td>
+      <td>{{ s.free_bytes | fmt_size }} / {{ s.total_bytes | fmt_size }}</td>
+      <td>
+        {% if s.measured_sequential_read_bps %}
+          seq {{ s.measured_sequential_read_bps | fmt_size }}/s
+          {% if s.measurement_age_seconds %}
+            <br><span class="muted">{{ (s.measurement_age_seconds / 3600) | round(1) }}h old</span>
+          {% endif %}
+        {% else %}<span class="muted">not calibrated</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted"><a href="/hardware">calibrate on the hardware page &rarr;</a></p>
+  {% else %}
+  <p class="muted">No storage topology probed.</p>
+  {% endif %}
+</div>
+
+<h2>policy</h2>
+<div class="card">
+  <table>
+    <tr><td><strong>benchmark modes</strong></td>
+        <td>{{ environment.benchmark_modes | join(', ') or '—' }}</td></tr>
+    <tr><td><strong>experimental plans</strong></td>
+        <td>Off unless a profile's <code>runtime.allow_experimental_plans</code>
+          is set. Experimental cache flags are additionally gated on the
+          backend reporting the feature — an unprobed or incapable build
+          never receives them.</td></tr>
+  </table>
+</div>
+
+<h2>support bundle</h2>
+<div class="card">
+  <p>Manifest, environment, capability probe, hardware snapshot, readiness
+  checks, profiles, and log tails — as one zip.</p>
+  <p class="muted">Credential-looking values are redacted by variable name,
+  and the console's own token is never included.</p>
+  <p><a class="btn" href="/settings/support-bundle">download support bundle</a></p>
+</div>
+
 <h2>profile defaults</h2>
 <form method="post" action="/settings/save" class="card">
 <table>

@@ -3766,6 +3766,61 @@ def cmd_web(args):
                 log_level="info")
 
 
+def cmd_doctor(args):
+    """Print readiness, the integration manifest, and backend capabilities;
+    optionally write a support bundle.
+
+    The console's settings/setup pages show the same thing -- this is the
+    headless and recovery path (roadmap Tasks C1/C4).
+    """
+    import modelctl_diagnostics
+    import modelctl_setup
+
+    status = modelctl_setup.probe_setup(probe_backend=True)
+    print("readiness:")
+    for c in status.checks:
+        print(f"  [{c.severity:7}] {c.title}: {c.detail}")
+        if c.fix and c.severity != "ok":
+            print(f"            {c.fix}")
+    print(f"  => {'ready' if status.ready else 'NOT ready'}")
+
+    man = modelctl_diagnostics.manifest_status()
+    print("\nintegration manifest:")
+    if not man.present:
+        print(f"  {man.error}")
+    else:
+        print(f"  runtime pinned (manifest):  {man.manifest.get('llama_cpp_commit', '—')}")
+        print(f"  runtime pinned (submodule): {man.submodule_pinned or '—'}")
+        print(f"  runtime checked out:        {man.submodule_checked_out or '—'}")
+        print(f"  modelctl commit:            {man.modelctl_commit or '—'}")
+        for m in man.mismatches:
+            print(f"  MISMATCH: {m}")
+        for n in man.notes:
+            print(f"  note: {n}")
+        if not man.mismatches:
+            print("  runtime matches the manifest")
+
+    caps = modelctl_diagnostics.capability_report()
+    print("\nbackend:")
+    print(f"  selected: {caps.get('binary') or '—'}")
+    for c in caps.get("candidates", []):
+        print(f"  build:    {c}")
+    if caps.get("error"):
+        print(f"  error:    {caps['error']}")
+    probe = caps.get("probe") or {}
+    if probe:
+        features = [k for k, v in (probe.get("features") or {}).items() if v]
+        print(f"  probe:    {probe.get('_probe_status', 'unknown')}, "
+              f"schema {probe.get('schema', 0)}")
+        print(f"  features: {', '.join(sorted(features)) or 'none'}")
+
+    if getattr(args, "bundle", None):
+        path = modelctl_diagnostics.write_support_bundle(args.bundle)
+        print(f"\nwrote support bundle: {path}")
+
+    return 0 if status.ready else 1
+
+
 def cmd_web_url(args):
     """Print where the console is and how to authenticate to it."""
     print(web_console_url())
@@ -4131,6 +4186,13 @@ def build_arg_parser():
     p_web_url = web_sub.add_parser(
         "url", help="print the console URL and token")
     p_web_url.set_defaults(func=cmd_web_url)
+
+    p_doctor = sub.add_parser(
+        "doctor", help="report readiness, integration manifest, and backend "
+                       "capabilities; optionally write a support bundle")
+    p_doctor.add_argument("--bundle", metavar="PATH", default=None,
+                          help="also write a support bundle zip to PATH")
+    p_doctor.set_defaults(func=cmd_doctor)
 
     p_disable = sub.add_parser("disable", help="exclude a saved profile from router/Hermes sync without deleting it")
     p_disable.add_argument("name")

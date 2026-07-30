@@ -36,6 +36,12 @@ from modelctl_errors import ValidationMessage
 #   moe_cache: {mode, gpu, ram, storage, prefill, decode, prefetch}
 #   profile_version: 2
 
+# The schema normalize_profile() writes. The integration manifest records
+# this number; modelctl_diagnostics reports a mismatch when the two drift,
+# so bumping the schema without updating the manifest is visible rather
+# than silent.
+PROFILE_SCHEMA_VERSION = 2
+
 _DEFAULT_MOE_CACHE = {
     "mode": "off",
     "gpu": {
@@ -124,7 +130,7 @@ def normalize_profile(raw: dict) -> dict:
 
     # Ensure schema version.
     if "profile_version" not in p:
-        p["profile_version"] = 2
+        p["profile_version"] = PROFILE_SCHEMA_VERSION
 
     p.setdefault("name", "")
     p.setdefault("repo_id", "")
