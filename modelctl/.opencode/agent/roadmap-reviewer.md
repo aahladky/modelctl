@@ -5,7 +5,7 @@ permission:
   edit: deny
 ---
 
-You review uncommitted changes (`git diff`, plus `git status` for new files) in the modelctl repo against `modelctl-task-by-task-roadmap-2026-07-29.md`.
+You review uncommitted changes (`git diff`, plus `git status` for new files) in the modelctl repo against `docs/modelctl-task-by-task-roadmap-2026-07-29.md`.
 
 Check, in order:
 

@@ -4,7 +4,7 @@ Python CLI + optional TUI/web console for managing local GGUF models on multi-GP
 
 ## Active Roadmap
 
-The current implementation plan is `modelctl-task-by-task-roadmap-2026-07-29.md`. Read the relevant phase/task before implementing. Key invariants: experimental features fail closed (§2.5), one canonical launch path (§2.2), cold/warm measurements never conflated, control plane stays in Python, tensor execution stays in the `../llama.cpp` fork.
+The current implementation plan is `docs/modelctl-task-by-task-roadmap-2026-07-29.md`. Read the relevant phase/task before implementing. Key invariants: experimental features fail closed (§2.5), one canonical launch path (§2.2), cold/warm measurements never conflated, control plane stays in Python, tensor execution stays in the `../llama.cpp` fork.
 
 ## Setup
 
@@ -36,11 +36,25 @@ Tests are pure unittest (no fixtures, no services). Web tests use FastAPI's `Tes
 |---|---|
 | `modelctl` (no ext) | Shell launcher — resolves `.venv` and runs `modelctl.py` |
 | `modelctl.py` | Main CLI: profile lifecycle, placement, router management |
-| `modelctl_vram.py` | Pure-stdlib VRAM math. No `modelctl` import — standalone calculator |
-| `modelctl_tiers.py` | Tier planner for `place --tiers` |
-| `modelctl_tui.py` | Textual wizard (`pull --tui`). Calls into `modelctl.py`, no logic duplication |
-| `modelctl_web/` | FastAPI + HTMX console (`modelctl web`). Reads concurrent, writes via single JobRunner |
+| `modelctl_backends.py` | Backend adapters (managed runtime beyond llama.cpp) |
+| `modelctl_benchmark.py` | Benchmark mode definitions and safety |
 | `modelctl_capabilities.py` | Backend capability probe/cache (`--modelctl-capabilities`) |
+| `modelctl_errors.py` | Structured validation messages and failure classes |
+| `modelctl_hardware.py` | Hardware settings, snapshots, and fingerprinting |
+| `modelctl_launch.py` | Canonical resolved-backend and launch-command types |
+| `modelctl_matrix.py` | Managed llama-swap routing matrix |
+| `modelctl_plans.py` | Launch-plan generation |
+| `modelctl_profiles.py` | Profile schema, migration, and validation |
+| `modelctl_runtime.py` | Runtime database: reservations and runtime events |
+| `modelctl_services/` | Application services (cache, hardware, plan, profile, runtime) shared by CLI and web |
+| `modelctl_storage.py` | Storage topology probing |
+| `modelctl_tiers.py` | Tier planner for `place --tiers` |
+| `modelctl_transactions.py` | Atomic multi-file mutation transactions |
+| `modelctl_tui.py` | Textual wizard (`pull --tui`). Calls into `modelctl.py`, no logic duplication |
+| `modelctl_tune.py` | Plan testing and autotuning |
+| `modelctl_vram.py` | Pure-stdlib VRAM math. No `modelctl` import — standalone calculator |
+| `modelctl_web/` | FastAPI + HTMX console (`modelctl web`). Reads concurrent, writes via single JobRunner |
+| `modelctl_worker.py` | Managed worker process |
 
 ## Key Conventions
 

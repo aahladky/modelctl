@@ -2,7 +2,7 @@
 description: Implement a roadmap task by number, e.g. /task 1.3
 ---
 
-Read task $ARGUMENTS in `modelctl-task-by-task-roadmap-2026-07-29.md` (plus the phase intro and cross-cutting test plan in section 10).
+Read task $ARGUMENTS in `docs/modelctl-task-by-task-roadmap-2026-07-29.md` (plus the phase intro and cross-cutting test plan in section 10).
 
 Then:
 

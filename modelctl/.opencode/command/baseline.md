@@ -2,7 +2,7 @@
 description: Capture the Phase 0 hardware/software baseline (roadmap Task 0.1).
 ---
 
-Perform roadmap Task 0.1 from `modelctl-task-by-task-roadmap-2026-07-29.md`:
+Perform roadmap Task 0.1 from `docs/modelctl-task-by-task-roadmap-2026-07-29.md`:
 
 1. Record `git rev-parse HEAD` and `git submodule status`.
 2. Record versions: `.venv/bin/python -V`, relevant `pip freeze` entries (textual, fastapi, uvicorn, huggingface-hub), llama-swap version, `uname -r`, `icpx --version`, GPU driver if queryable.

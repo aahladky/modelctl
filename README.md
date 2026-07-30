@@ -31,7 +31,7 @@ modelctl expects. Already cloned without it? `git submodule update --init`.
   experts, so the two never collide.
 
 Design docs live in [modelctl/docs/](modelctl/docs/) and
-[modelctl/modelctl_sparse_moe_expert_cache_coding_plan.md](modelctl/modelctl_sparse_moe_expert_cache_coding_plan.md).
+[modelctl/docs/modelctl_sparse_moe_expert_cache_coding_plan.md](modelctl/docs/modelctl_sparse_moe_expert_cache_coding_plan.md).
 
 See [modelctl/README.md](modelctl/README.md) for modelctl itself
 (install, profiles, placement, web console).
