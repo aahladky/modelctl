@@ -129,6 +129,22 @@ def submit_pull(runner, repo_id, quant_label=None, want_mtp=True):
                          lane="download")
 
 
+def submit_import_local(runner, file_path, name=None, copy=False):
+    """Import a local GGUF file as a profile."""
+    def fn(ctx):
+        ctx.log(f"importing {file_path}")
+        ctx.raise_if_cancelled()
+        profile = modelctl.import_local(file_path, name=name, copy=copy,
+                                        resync=True)
+        if profile is None:
+            raise RuntimeError(f"import of {file_path} failed -- see job log")
+        ctx.log(f"profile '{profile['name']}' saved and synced")
+        return {"profile": profile["name"], "config": profile["config"]}
+    return runner.submit("import", f"import {file_path}", fn,
+                         payload={"file_path": file_path, "name": name},
+                         lane="mutation")
+
+
 def submit_smoke_test(runner, name):
     def fn(ctx):
         ctx.raise_if_cancelled()

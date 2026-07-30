@@ -1284,7 +1284,7 @@ class TestCacheVariants(WebTestBase):
         import modelctl_plans
         patches = [
             mock.patch("modelctl_capabilities.probe_backend",
-                       return_value={"features": {"moe_expert_cache": True}}),
+                       return_value={"features": {"moe_weight_transfer_cache": True}}),
             mock.patch("modelctl.load_defaults",
                        return_value={"vram_limit_pct": 90, "primary_gpu": "SYCL0"}),
             mock.patch("modelctl.get_gpu_inventory", return_value=[]),
@@ -1352,8 +1352,8 @@ class TestCacheVariants(WebTestBase):
 
     def test_variants_honor_vram_limit_pct(self):
         import modelctl_plans
-        with mock.patch("modelctl_capabilities.probe_backend",
-                        return_value={"features": {"moe_expert_cache": True}}), \
+        with             mock.patch("modelctl_capabilities.probe_backend",
+                        return_value={"features": {"moe_weight_transfer_cache": True}}), \
              mock.patch("modelctl.load_defaults",
                         return_value={"vram_limit_pct": 50, "primary_gpu": "SYCL0"}), \
              mock.patch("modelctl.get_gpu_inventory", return_value=[]), \

@@ -1,0 +1,22 @@
+{
+  "_comment": "Profile with separate K/V cache types (new style)",
+  "name": "modern-kv-split",
+  "repo_id": "unsloth/Qwen3.5-35B-A3B-GGUF",
+  "model_path": "/home/user/models/Qwen3.5-35B-A3B-Q4_K_M.gguf",
+  "binary": "",
+  "backend": "llama-cpp",
+  "config": {
+    "device": "",
+    "split_mode": "layer",
+    "tensor_split": "5,3",
+    "ctx": 32768,
+    "flash_attn": "on",
+    "fit": "on",
+    "mtp": "off",
+    "cache_type_k": "q8_0",
+    "cache_type_v": "q4_0",
+    "ttl": 7200,
+    "extra": ""
+  },
+  "env": []
+}

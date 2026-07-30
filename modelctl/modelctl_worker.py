@@ -228,6 +228,20 @@ def worker_main(profile_name, port):
                "started_at": time.time(), "success": False}
         try:
             cmd = backend.build_command(profile, plan, port)
+
+            # Provenance: record the command and backend details so
+            # the history UI can explain "why this command?"
+            import modelctl_capabilities
+            binary = profile.get("binary") or modelctl.LLAMA_SERVER_BIN
+            caps = modelctl_capabilities.probe_backend(binary)
+            run["command_argv"] = cmd
+            run["binary_path"] = binary
+            run["binary_fingerprint"] = modelctl_vram.file_fingerprint(binary)
+            run["capability_schema"] = caps.get("schema", 0)
+            run["claim"] = {"vram_bytes": dict(plan.claim.vram_bytes),
+                            "ram_bytes": plan.claim.ram_bytes,
+                            "storage_mode": plan.claim.storage_mode}
+            run["decision"] = plan.decision_data or {}
             print(f"modelctl-worker: launching plan '{plan.label}' "
                   f"(id={plan.id}) on port {port}", file=sys.stderr)
             print(f"modelctl-worker: cmd: {' '.join(cmd)}", file=sys.stderr)

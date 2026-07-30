@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Add Model: Plans - modelctl{% endblock %}
+{% block content %}
+<h1>Add Model: Select Plan</h1>
+<p class="muted">Step 5 of 7 · {{ w.profile_name }}</p>
+
+{% if plans %}
+<div class="card">
+  <h3>Launch Plans</h3>
+  <table>
+    <thead>
+      <tr><th>Label</th><th>Source</th><th>VRAM</th><th>RAM</th><th>Storage</th><th>Context</th></tr>
+    </thead>
+    <tbody>
+    {% for p in plans %}
+    <tr>
+      <td><strong>{{ p.label }}</strong></td>
+      <td class="muted">{{ p.source }}</td>
+      <td>{{ "%.1f" | format(p.estimated.total_vram / 1073741824) }} GiB</td>
+      <td>{{ "%.1f" | format(p.estimated.ram / 1073741824) }} GiB</td>
+      <td>{{ p.claim.storage_mode }}</td>
+      <td>{{ p.estimated.context }}</td>
+    </tr>
+    {% if p.warnings %}
+    <tr><td colspan="6" class="warning">{{ p.warnings | join('; ') }}</td></tr>
+    {% endif %}
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p class="error">No plans could be compiled for this profile.</p>
+{% endif %}
+
+<form method="post" action="/add/{{ w.wizard_id }}/plans">
+  <div class="actions">
+    <button type="submit" name="action" value="test" class="btn">Test Selected</button>
+    <button type="submit" name="action" value="register" class="btn btn-primary">Register Without Testing</button>
+  </div>
+  <p class="muted" style="margin-top:.3rem">Testing verifies the model loads and responds. Skipping is faster but less safe.</p>
+</form>
+{% endblock %}

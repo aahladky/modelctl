@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Add Model: Analyze - modelctl{% endblock %}
+{% block content %}
+<h1>Add Model: Analysis</h1>
+<p class="muted">Step 4 of 7 · {{ w.profile_name }}</p>
+
+{% if profile %}
+<div class="card">
+  <h3>{{ profile.name }}</h3>
+  <table>
+    <tr><td><strong>Model path</strong></td><td><code>{{ profile.model_path }}</code></td></tr>
+    <tr><td><strong>Backend</strong></td><td>{{ profile.backend }}</td></tr>
+    <tr><td><strong>Context</strong></td><td>{{ profile.config.ctx }}</td></tr>
+    <tr><td><strong>K cache</strong></td><td>{{ profile.config.cache_type_k }}</td></tr>
+    <tr><td><strong>V cache</strong></td><td>{{ profile.config.cache_type_v }}</td></tr>
+    {% if profile.mmproj_path %}
+    <tr><td><strong>mmproj</strong></td><td><code>{{ profile.mmproj_path }}</code></td></tr>
+    {% endif %}
+    {% if profile.mtp_path %}
+    <tr><td><strong>MTP draft</strong></td><td><code>{{ profile.mtp_path }}</code></td></tr>
+    {% endif %}
+  </table>
+</div>
+{% elif w.download_job_id %}
+<div class="card">
+  <p>Waiting for download to complete...</p>
+  <div hx-get="/jobs/{{ w.download_job_id }}/fragment" hx-trigger="every 2s"
+       hx-swap="innerHTML">
+    Loading...
+  </div>
+</div>
+{% else %}
+<div class="card">
+  <p class="error">No profile found. The download may not have completed.</p>
+</div>
+{% endif %}
+
+<form method="post" action="/add/{{ w.wizard_id }}/analyze">
+  <div class="actions">
+    <button type="submit" class="btn btn-primary">Continue to Plans</button>
+  </div>
+</form>
+{% endblock %}

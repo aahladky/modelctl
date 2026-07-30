@@ -1,0 +1,21 @@
+{
+  "_comment": "Legacy v1 profile with flat config and kv_quant only",
+  "name": "legacy-llama-v1",
+  "repo_id": "TheBloke/Llama-2-7B-GGUF",
+  "model_path": "/home/user/models/llama-2-7b.Q4_K_M.gguf",
+  "binary": "",
+  "backend": "llama-cpp",
+  "config": {
+    "device": "SYCL0",
+    "split_mode": "",
+    "tensor_split": "",
+    "ctx": 4096,
+    "flash_attn": "auto",
+    "fit": "off",
+    "mtp": "off",
+    "kv_quant": "q8_0",
+    "ttl": 3600,
+    "extra": ""
+  },
+  "env": []
+}

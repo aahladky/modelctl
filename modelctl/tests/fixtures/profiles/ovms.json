@@ -1,0 +1,15 @@
+{
+  "_comment": "OVMS profile",
+  "name": "ovms-qwen",
+  "repo_id": "Qwen/Qwen2.5-7B-Instruct",
+  "backend": "ovms",
+  "config": {
+    "task": "text_generation",
+    "target_device": "GPU.0",
+    "cache_size": 8,
+    "tool_parser": "hermes",
+    "reasoning_parser": "deepseek_r1",
+    "ttl": 3600
+  },
+  "env": []
+}

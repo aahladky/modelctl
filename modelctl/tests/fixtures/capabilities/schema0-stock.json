@@ -1,0 +1,22 @@
+{
+  "_comment": "Stock llama.cpp binary that rejects --modelctl-capabilities probe",
+  "schema": 2,
+  "backend": "unknown",
+  "build": {"commit": "", "compiler": "", "dynamic_backends": false},
+  "devices": [],
+  "features": {
+    "moe_weight_transfer_cache": false,
+    "moe_hybrid_cpu_miss": false,
+    "moe_cache_metrics": false,
+    "moe_cache_prefill_policy": false,
+    "moe_cache_reset": false,
+    "moe_cache_prefetch": false
+  },
+  "constraints": {
+    "moe_cache_backend": "",
+    "moe_cache_min_batch": 0,
+    "moe_cache_supported_projections": []
+  },
+  "cli": {},
+  "_probe_status": "unsupported"
+}

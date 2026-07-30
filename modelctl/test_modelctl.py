@@ -2068,3 +2068,70 @@ class TestNormalizeProfile(unittest.TestCase):
         p2 = modelctl.normalize_profile(p1)
         self.assertEqual(p1, p2)
         self.assertEqual(p1["custom_field"], 42)
+
+
+class TestImportLocal(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._orig_profiles = modelctl.PROFILES_DIR
+        self._orig_models = modelctl.DEFAULT_MODELS_DIR
+        self.profiles_dir = Path(self.tmp.name) / "profiles"
+        self.models_dir = Path(self.tmp.name) / "models"
+        modelctl.PROFILES_DIR = self.profiles_dir
+        modelctl.DEFAULT_MODELS_DIR = self.models_dir
+        self.addCleanup(setattr, modelctl, "PROFILES_DIR", self._orig_profiles)
+        self.addCleanup(setattr, modelctl, "DEFAULT_MODELS_DIR", self._orig_models)
+
+    def _make_gguf(self, name="model-Q4_K_M.gguf"):
+        p = Path(self.tmp.name) / name
+        # GGUF magic bytes
+        p.write_bytes(b"GGUF" + b"\x00" * 100)
+        return str(p)
+
+    def test_import_basic(self):
+        path = self._make_gguf()
+        with mock.patch("modelctl.sync_all_backends"), \
+             mock.patch("modelctl.generate_artifacts"):
+            profile = modelctl.import_local(path, resync=False)
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile["model_path"], path)
+        self.assertTrue(profile["name"])
+
+    def test_import_with_custom_name(self):
+        path = self._make_gguf()
+        with mock.patch("modelctl.sync_all_backends"), \
+             mock.patch("modelctl.generate_artifacts"):
+            profile = modelctl.import_local(path, name="my-model", resync=False)
+        self.assertEqual(profile["name"], "my-model")
+
+    def test_import_nonexistent_returns_none(self):
+        result = modelctl.import_local("/nonexistent/model.gguf")
+        self.assertIsNone(result)
+
+    def test_import_non_gguf_returns_none(self):
+        p = Path(self.tmp.name) / "not-a-model.txt"
+        p.write_text("hello")
+        result = modelctl.import_local(str(p))
+        self.assertIsNone(result)
+
+    def test_import_detects_companions(self):
+        base = Path(self.tmp.name)
+        model = base / "model.gguf"
+        model.write_bytes(b"GGUF" + b"\x00" * 100)
+        mmproj = base / "mmproj-model.gguf"
+        mmproj.write_bytes(b"GGUF" + b"\x00" * 50)
+        mtp = base / "model-mtp.gguf"
+        mtp.write_bytes(b"GGUF" + b"\x00" * 30)
+        with mock.patch("modelctl.sync_all_backends"), \
+             mock.patch("modelctl.generate_artifacts"):
+            profile = modelctl.import_local(str(model), resync=False)
+        self.assertEqual(profile["mmproj_path"], str(mmproj))
+        self.assertEqual(profile["mtp_path"], str(mtp))
+
+    def test_import_strips_quant_suffix_from_name(self):
+        path = self._make_gguf("DeepSeek-R1-Q4_K_M.gguf")
+        with mock.patch("modelctl.sync_all_backends"), \
+             mock.patch("modelctl.generate_artifacts"):
+            profile = modelctl.import_local(path, resync=False)
+        self.assertNotIn("Q4_K_M", profile["name"])

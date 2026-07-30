@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Add Model: Complete - modelctl{% endblock %}
+{% block content %}
+<h1>Add Model: Complete</h1>
+
+<div class="card ok">
+  <h3>{{ w.profile_name }}</h3>
+  <p>Model successfully added and registered.</p>
+  <table>
+    <tr><td><strong>Profile</strong></td><td>{{ w.profile_name }}</td></tr>
+    {% if w.registration_complete %}
+    <tr><td><strong>Status</strong></td><td>Registered with llama-swap</td></tr>
+    {% endif %}
+  </table>
+</div>
+
+<div class="actions">
+  <a href="/runtime" class="btn btn-primary">View Runtime</a>
+  <a href="/profiles/{{ w.profile_name }}/plans" class="btn">View Plans</a>
+  <a href="/" class="btn">Dashboard</a>
+</div>
+{% endblock %}

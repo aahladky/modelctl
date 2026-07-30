@@ -50,6 +50,17 @@ class StorageSnapshot:
     path: str
     kind: str
     allow_mmap: bool
+    mount_point: str = ""
+    filesystem: str = ""
+    block_devices: tuple = ()
+    transport: str = "unknown"
+    rotational: bool | None = None
+    raid_level: str | None = None
+    total_bytes: int = 0
+    free_bytes: int = 0
+    measured_sequential_read_bps: int | None = None
+    measured_random_read_bps: int | None = None
+    measurement_age_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -182,11 +193,35 @@ def capture_hardware_snapshot(settings=None):
     backend_fps = _backend_fingerprints()
 
     storage_devs = settings.get("storage", {})
-    storage = tuple(
-        StorageSnapshot(path=v.get("path", ""), kind=v.get("kind", ""),
-                        allow_mmap=v.get("allow_mmap", True))
-        for v in storage_devs.values() if isinstance(v, dict)
-    )
+    storage_snapshots = []
+    for v in storage_devs.values():
+        if isinstance(v, dict) and v.get("path"):
+            storage_snapshots.append(StorageSnapshot(
+                path=v.get("path", ""), kind=v.get("kind", ""),
+                allow_mmap=v.get("allow_mmap", True)))
+    # Auto-probe storage for model directories if not explicitly configured.
+    if not storage_snapshots:
+        try:
+            import modelctl_storage
+            import modelctl as _mc
+            model_dir = str(_mc.DEFAULT_MODELS_DIR)
+            if os.path.isdir(model_dir):
+                info = modelctl_storage.probe_storage(model_dir)
+                storage_snapshots.append(StorageSnapshot(
+                    path=info.path, kind=info.filesystem,
+                    allow_mmap=info.allow_mmap,
+                    mount_point=info.mount_point,
+                    filesystem=info.filesystem,
+                    block_devices=info.block_devices,
+                    transport=info.transport,
+                    rotational=info.rotational,
+                    raid_level=info.raid_level,
+                    total_bytes=info.total_bytes,
+                    free_bytes=info.free_bytes,
+                ))
+        except Exception:
+            pass
+    storage = tuple(storage_snapshots)
 
     snap = HardwareSnapshot(
         captured_at=time.time(),

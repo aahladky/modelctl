@@ -1,0 +1,30 @@
+{
+  "_comment": "Future hybrid cache response (Phase 7) - not yet implemented",
+  "schema": 2,
+  "backend": "llama.cpp",
+  "build": {"commit": "future", "compiler": "icpx-2026", "dynamic_backends": true},
+  "devices": [
+    {"type": "SYCL", "name": "SYCL0", "index": 0, "features": {"moe_weight_transfer_cache": true}}
+  ],
+  "features": {
+    "moe_weight_transfer_cache": true,
+    "moe_hybrid_cpu_miss": true,
+    "moe_cache_metrics": true,
+    "moe_cache_prefill_policy": true,
+    "moe_cache_reset": true,
+    "moe_cache_prefetch": false
+  },
+  "constraints": {
+    "moe_cache_backend": "SYCL",
+    "moe_cache_min_batch": 1,
+    "moe_cache_supported_projections": ["gate", "up", "down"]
+  },
+  "cli": {
+    "moe_cache_bytes": "--moe-cache-bytes",
+    "moe_cache_policy": "--moe-cache-policy",
+    "moe_cache_admission": "--moe-cache-admission-misses",
+    "moe_cache_prefill": "--moe-cache-prefill-admission"
+  },
+  "_probe_status": "ok",
+  "_note": "moe_hybrid_cpu_miss will be forced false by normalize_capabilities() until Phase 7"
+}

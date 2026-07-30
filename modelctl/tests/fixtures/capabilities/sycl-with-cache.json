@@ -1,0 +1,30 @@
+{
+  "_comment": "SYCL build with weight transfer cache support (the current fork)",
+  "schema": 2,
+  "backend": "llama.cpp",
+  "build": {"commit": "f42f2fe4e", "compiler": "icpx-2025", "dynamic_backends": true},
+  "devices": [
+    {"type": "SYCL", "name": "SYCL0", "index": 0, "features": {"moe_weight_transfer_cache": true}},
+    {"type": "SYCL", "name": "SYCL1", "index": 1, "features": {"moe_weight_transfer_cache": true}}
+  ],
+  "features": {
+    "moe_weight_transfer_cache": true,
+    "moe_hybrid_cpu_miss": false,
+    "moe_cache_metrics": true,
+    "moe_cache_prefill_policy": true,
+    "moe_cache_reset": true,
+    "moe_cache_prefetch": false
+  },
+  "constraints": {
+    "moe_cache_backend": "SYCL",
+    "moe_cache_min_batch": 32,
+    "moe_cache_supported_projections": ["gate", "up", "down"]
+  },
+  "cli": {
+    "moe_cache_bytes": "--moe-cache-bytes",
+    "moe_cache_policy": "--moe-cache-policy",
+    "moe_cache_admission": "--moe-cache-admission-misses",
+    "moe_cache_prefill": "--moe-cache-prefill-admission"
+  },
+  "_probe_status": "ok"
+}

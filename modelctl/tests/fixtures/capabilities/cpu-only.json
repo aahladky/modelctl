@@ -1,0 +1,22 @@
+{
+  "_comment": "CPU-only llama-server that supports the probe but has no SYCL/GPU features",
+  "schema": 2,
+  "backend": "llama.cpp",
+  "build": {"commit": "abc123", "compiler": "gcc-14", "dynamic_backends": false},
+  "devices": [{"type": "CPU", "name": "CPU", "index": 0, "features": {"moe_weight_transfer_cache": false}}],
+  "features": {
+    "moe_weight_transfer_cache": false,
+    "moe_hybrid_cpu_miss": false,
+    "moe_cache_metrics": false,
+    "moe_cache_prefill_policy": false,
+    "moe_cache_reset": false,
+    "moe_cache_prefetch": false
+  },
+  "constraints": {
+    "moe_cache_backend": "",
+    "moe_cache_min_batch": 0,
+    "moe_cache_supported_projections": []
+  },
+  "cli": {},
+  "_probe_status": "ok"
+}

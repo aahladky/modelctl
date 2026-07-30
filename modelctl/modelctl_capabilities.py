@@ -1,7 +1,7 @@
 """Backend capability probing and caching for modelctl.
 
-Probes a llama-server binary for feature support (MoE expert cache,
-hybrid CPU miss execution, cache metrics, etc.) by running:
+Probes a llama-server binary for feature support (MoE weight transfer
+cache, hybrid CPU miss execution, cache metrics, etc.) by running:
 
     llama-server --modelctl-capabilities
 
@@ -9,16 +9,29 @@ and caching the JSON response keyed by binary content hash.  Stock
 llama.cpp binaries don't support this flag; the probe classifies the
 result accordingly.
 
-The capability dict is consumed by:
-  - modelctl.build_moe_cache_args() for flag name resolution
-  - modelctl.preflight_moe_cache() for launch-time validation
-  - modelctl_plans.compile_launch_plans() for cache-variant filtering
-  - modelctl_backends.LlamaCppAdapter for adapter-level methods
+Schema versions:
+  0 — stock binary that rejects the probe (no cache support)
+  1 — early fork response (moe_expert_cache, moe_cache_sycl, etc.)
+  2 — canonical schema with moe_weight_transfer_cache, device features,
+      constraints, and cli flag declarations
+
+normalize_capabilities() converts schema 0/1 to the internal canonical
+form so all consumers see a consistent representation.  The raw probe
+output is preserved in _raw_probe for debugging.
 
 Public API:
     probe_backend(binary_path) -> dict
     get_cached_capabilities(binary_path) -> dict | None
     clear_cache()
+    normalize_capabilities(raw_caps) -> dict
+    is_cache_capable(caps) -> bool
+    is_weight_transfer_cache_capable(caps) -> bool
+    supports_hybrid_miss(caps) -> bool
+    supports_metrics(caps) -> bool
+    supports_prefetch(caps) -> bool
+    backend_features(caps) -> dict
+    backend_constraints(caps) -> dict
+    backend_cli(caps) -> dict
 """
 import hashlib
 import json
@@ -103,12 +116,175 @@ def _classify_probe_failure(binary_path: str) -> dict:
     """Build a minimal capability dict for a binary that doesn't support
     the probe command (stock llama.cpp or non-llama.cpp backend)."""
     return {
-        "schema": 0,
+        "schema": 2,
         "backend": "unknown",
-        "build": "",
-        "features": {},
+        "build": {"commit": "", "compiler": "", "dynamic_backends": False},
+        "devices": [],
+        "features": {
+            "moe_weight_transfer_cache": False,
+            "moe_hybrid_cpu_miss": False,
+            "moe_cache_metrics": False,
+            "moe_cache_prefill_policy": False,
+            "moe_cache_reset": False,
+            "moe_cache_prefetch": False,
+        },
+        "constraints": {
+            "moe_cache_backend": "",
+            "moe_cache_min_batch": 0,
+            "moe_cache_supported_projections": [],
+        },
         "cli": {},
         "_probe_status": "unsupported",
+    }
+
+
+def normalize_capabilities(raw_caps: dict) -> dict:
+    """Convert any schema version to the canonical internal representation.
+
+    Schema 0 (unsupported probe): all features false.
+    Schema 1 (early fork): map old names to canonical names.
+    Schema 2+: pass through with defaults filled.
+
+    Never invents support — missing or unknown fields evaluate false.
+    """
+    schema = raw_caps.get("schema", 0)
+    status = raw_caps.get("_probe_status", "ok")
+
+    if schema == 0 or status == "unsupported":
+        return _classify_probe_failure(raw_caps.get("_binary", ""))
+
+    features = raw_caps.get("features", {})
+    cli = raw_caps.get("cli", {})
+    build = raw_caps.get("build", "")
+    devices = raw_caps.get("devices", [])
+
+    if schema == 1:
+        # Map schema 1 names to canonical names.
+        # moe_expert_cache was the generic "cache works" flag.
+        # moe_cache_sycl was the SYCL-specific flag.
+        # Together they mean: weight transfer cache on SYCL.
+        has_cache = bool(features.get("moe_expert_cache"))
+        has_sycl = bool(features.get("moe_cache_sycl"))
+
+        canonical_features = {
+            "moe_weight_transfer_cache": has_cache and has_sycl,
+            "moe_hybrid_cpu_miss": bool(features.get("moe_hybrid_cpu_miss")),
+            "moe_cache_metrics": bool(features.get("moe_cache_metrics")),
+            "moe_cache_prefill_policy": bool(features.get("moe_cache_prefill_policy")),
+            "moe_cache_reset": has_cache,
+            "moe_cache_prefetch": False,
+        }
+
+        # Map schema 1 CLI names to canonical names.
+        canonical_cli = {}
+        if cli.get("cache_bytes"):
+            canonical_cli["moe_cache_bytes"] = cli["cache_bytes"]
+        if cli.get("cache_policy"):
+            canonical_cli["moe_cache_policy"] = cli["cache_policy"]
+        if cli.get("admission_misses"):
+            canonical_cli["moe_cache_admission"] = cli["admission_misses"]
+        if cli.get("prefill_admission"):
+            canonical_cli["moe_cache_prefill"] = cli["prefill_admission"]
+
+        # Normalize build to structured form.
+        if isinstance(build, str):
+            build = {"commit": build, "compiler": "", "dynamic_backends": False}
+
+        # Normalize devices: schema 1 has string list, schema 2 has objects.
+        normalized_devices = []
+        for d in devices:
+            if isinstance(d, str):
+                normalized_devices.append({
+                    "type": "SYCL" if "SYCL" in d else "CPU",
+                    "name": d,
+                    "index": len(normalized_devices),
+                    "features": {"moe_weight_transfer_cache": has_cache and has_sycl},
+                })
+            elif isinstance(d, dict):
+                normalized_devices.append(d)
+
+        return {
+            "schema": 2,
+            "backend": raw_caps.get("backend", "unknown"),
+            "build": build,
+            "devices": normalized_devices,
+            "features": canonical_features,
+            "constraints": {
+                "moe_cache_backend": "SYCL" if has_sycl else "",
+                "moe_cache_min_batch": 0,
+                "moe_cache_supported_projections": [],
+            },
+            "cli": canonical_cli,
+            "_probe_status": "ok",
+            "_raw_schema": 1,
+        }
+
+    # Schema 2+: fill defaults for missing fields.
+    if isinstance(build, str):
+        build = {"commit": build, "compiler": "", "dynamic_backends": False}
+
+    canonical_features = {
+        "moe_weight_transfer_cache": bool(features.get("moe_weight_transfer_cache")),
+        "moe_hybrid_cpu_miss": bool(features.get("moe_hybrid_cpu_miss")),
+        "moe_cache_metrics": bool(features.get("moe_cache_metrics")),
+        "moe_cache_prefill_policy": bool(features.get("moe_cache_prefill_policy")),
+        "moe_cache_reset": bool(features.get("moe_cache_reset")),
+        "moe_cache_prefetch": False,  # Not implemented until Phase 9
+    }
+
+    # Force prefetch false until implemented. Hybrid is now allowed through
+    # when the backend reports it (Phase 7 implements the control plane).
+    raw_features = dict(features)
+
+    constraints = raw_caps.get("constraints", {})
+    if not isinstance(constraints, dict):
+        constraints = {}
+
+    canonical_constraints = {
+        "moe_cache_backend": constraints.get("moe_cache_backend", ""),
+        "moe_cache_min_batch": int(constraints.get("moe_cache_min_batch", 0)),
+        "moe_cache_supported_projections": list(
+            constraints.get("moe_cache_supported_projections", [])),
+        "moe_hybrid_supported_archs": list(
+            constraints.get("moe_hybrid_supported_archs", [])),
+        "moe_hybrid_supported_quant": list(
+            constraints.get("moe_hybrid_supported_quant", [])),
+        "moe_hybrid_can_overlap": bool(
+            constraints.get("moe_hybrid_can_overlap", False)),
+    }
+
+    canonical_cli = {}
+    for key in ("moe_cache_bytes", "moe_cache_policy", "moe_cache_admission",
+                "moe_cache_prefill", "moe_cache_reset", "moe_hybrid_mode"):
+        if cli.get(key):
+            canonical_cli[key] = cli[key]
+
+    normalized_devices = []
+    for d in devices:
+        if isinstance(d, dict):
+            # Ensure device features also fail closed.
+            dev_features = d.get("features", {})
+            normalized_devices.append({
+                "type": d.get("type", "unknown"),
+                "name": d.get("name", ""),
+                "index": d.get("index", 0),
+                "features": {
+                    "moe_weight_transfer_cache": bool(
+                        dev_features.get("moe_weight_transfer_cache")),
+                },
+            })
+
+    return {
+        "schema": 2,
+        "backend": raw_caps.get("backend", "unknown"),
+        "build": build,
+        "devices": normalized_devices,
+        "features": canonical_features,
+        "constraints": canonical_constraints,
+        "cli": canonical_cli,
+        "_probe_status": "ok",
+        "_raw_schema": schema,
+        "_raw_features": raw_features,
     }
 
 
@@ -148,8 +324,8 @@ def _write_cache(binary_path: str, caps: dict):
 
 
 def probe_backend(binary_path: str) -> dict:
-    """Probe a binary for backend capabilities.  Returns a dict with at
-    minimum: schema, backend, build, features, cli, _probe_status.
+    """Probe a binary for backend capabilities.  Returns a normalized dict
+    with schema 2 representation.
 
     _probe_status is one of:
       "ok"         — binary responded with valid JSON
@@ -166,6 +342,9 @@ def probe_backend(binary_path: str) -> dict:
     # Disk cache next.
     cached = _read_cache(binary_path)
     if cached is not None:
+        # Re-normalize in case we upgraded from schema 1 to 2.
+        if cached.get("schema") != 2:
+            cached = normalize_capabilities(cached)
         _session_cache[fp] = cached
         return cached
 
@@ -178,9 +357,10 @@ def probe_backend(binary_path: str) -> dict:
         raw.setdefault("features", {})
         raw.setdefault("cli", {})
         raw["_probe_status"] = "ok"
-        _write_cache(binary_path, raw)
-        _session_cache[fp] = raw
-        return raw
+        normalized = normalize_capabilities(raw)
+        _write_cache(binary_path, normalized)
+        _session_cache[fp] = normalized
+        return normalized
 
     # Unsupported binary.
     caps = _classify_probe_failure(binary_path)
@@ -196,6 +376,8 @@ def get_cached_capabilities(binary_path: str) -> dict | None:
         return _session_cache[fp]
     cached = _read_cache(binary_path)
     if cached is not None:
+        if cached.get("schema") != 2:
+            cached = normalize_capabilities(cached)
         _session_cache[fp] = cached
     return cached
 
@@ -211,18 +393,35 @@ def clear_cache():
                 pass
 
 
+# --- Canonical feature queries (consumers should use these) ---
+
 def is_cache_capable(caps: dict) -> bool:
-    """True if the backend supports MoE expert caching at all."""
-    return bool(caps.get("features", {}).get("moe_expert_cache"))
+    """True if the backend supports any form of MoE expert caching.
+
+    This is the broad gate: if false, no cache variant is generated.
+    """
+    return bool(caps.get("features", {}).get("moe_weight_transfer_cache"))
+
+
+def is_weight_transfer_cache_capable(caps: dict) -> bool:
+    """True if the backend supports GPU-side weight transfer caching."""
+    return bool(caps.get("features", {}).get("moe_weight_transfer_cache"))
 
 
 def is_sycl_cache_capable(caps: dict) -> bool:
-    """True if the backend supports GPU-side expert caching on SYCL."""
-    return bool(caps.get("features", {}).get("moe_cache_sycl"))
+    """True if the backend supports GPU-side expert caching on SYCL.
+
+    Alias for is_weight_transfer_cache_capable — the only current
+    implementation is SYCL-based.
+    """
+    return bool(caps.get("features", {}).get("moe_weight_transfer_cache"))
 
 
 def supports_hybrid_miss(caps: dict) -> bool:
-    """True if cache misses can execute on CPU without blocking GPU."""
+    """True if cache misses can execute on CPU without blocking GPU.
+
+    Always false until Phase 7 implements true hybrid execution.
+    """
     return bool(caps.get("features", {}).get("moe_hybrid_cpu_miss"))
 
 
@@ -232,5 +431,38 @@ def supports_metrics(caps: dict) -> bool:
 
 
 def supports_prefetch(caps: dict) -> bool:
-    """True if the backend supports expert prefetching."""
+    """True if the backend supports expert prefetching.
+
+    Always false until Phase 9 implements prefetch.
+    """
     return bool(caps.get("features", {}).get("moe_cache_prefetch"))
+
+
+def supports_prefill_policy(caps: dict) -> bool:
+    """True if the backend supports prefill/decode phase admission."""
+    return bool(caps.get("features", {}).get("moe_cache_prefill_policy"))
+
+
+def supports_reset(caps: dict) -> bool:
+    """True if the backend supports cache reset."""
+    return bool(caps.get("features", {}).get("moe_cache_reset"))
+
+
+def backend_features(caps: dict) -> dict:
+    """Return the normalized features dict."""
+    return caps.get("features", {})
+
+
+def backend_constraints(caps: dict) -> dict:
+    """Return the normalized constraints dict."""
+    return caps.get("constraints", {})
+
+
+def backend_cli(caps: dict) -> dict:
+    """Return the canonical CLI flag name mapping."""
+    return caps.get("cli", {})
+
+
+def backend_build(caps: dict) -> dict:
+    """Return the build info dict."""
+    return caps.get("build", {})

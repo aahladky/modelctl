@@ -73,6 +73,22 @@ ON plan_runs (profile_name, plan_id, hardware_fingerprint, backend_fingerprint, 
 
 _STATES = {"pending", "starting", "active", "releasing", "stale"}
 
+# Additive migrations for plan_runs provenance columns (Task 1.6).
+# Each tuple is (column_name, column_type, default).
+_MIGRATIONS = [
+    ("command_fingerprint", "TEXT NOT NULL DEFAULT ''", ""),
+    ("command_argv_json", "TEXT NOT NULL DEFAULT '[]'", "[]"),
+    ("binary_path", "TEXT NOT NULL DEFAULT ''", ""),
+    ("binary_fingerprint", "TEXT NOT NULL DEFAULT ''", ""),
+    ("environment_fingerprint", "TEXT NOT NULL DEFAULT ''", ""),
+    ("capability_schema", "INTEGER NOT NULL DEFAULT 0", 0),
+    ("capability_digest", "TEXT NOT NULL DEFAULT ''", ""),
+    ("claim_json", "TEXT NOT NULL DEFAULT '{}'", "{}"),
+    ("decision_json", "TEXT NOT NULL DEFAULT '{}'", "{}"),
+    ("parent_job_id", "TEXT", None),
+    ("fallback_ordinal", "INTEGER", None),
+]
+
 
 class RuntimeDB:
     def __init__(self, db_path=DB_PATH):
@@ -81,6 +97,7 @@ class RuntimeDB:
         self._local = threading.local()
         with self._conn() as c:
             c.executescript(_SCHEMA)
+            self._run_migrations(c)
 
     def _conn(self):
         conn = getattr(self._local, "conn", None)
@@ -90,6 +107,13 @@ class RuntimeDB:
             conn.execute("PRAGMA journal_mode=WAL")
             self._local.conn = conn
         return conn
+
+    def _run_migrations(self, cursor):
+        """Additive migrations: add columns that don't exist yet."""
+        existing = {row[1] for row in cursor.execute("PRAGMA table_info(plan_runs)").fetchall()}
+        for col_name, col_type, _default in _MIGRATIONS:
+            if col_name not in existing:
+                cursor.execute(f"ALTER TABLE plan_runs ADD COLUMN {col_name} {col_type}")
 
     # --- reservations ---
 
@@ -262,8 +286,11 @@ class RuntimeDB:
                 "INSERT INTO plan_runs (profile_name, plan_id, hardware_fingerprint, "
                 "backend_fingerprint, started_at, finished_at, success, failure_class, "
                 "load_seconds, ttft_seconds, prompt_tps, generation_tps, peak_vram_json, "
-                "peak_ram_bytes, actual_context, exit_code, log_path, details_json) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "peak_ram_bytes, actual_context, exit_code, log_path, details_json, "
+                "command_fingerprint, command_argv_json, binary_path, binary_fingerprint, "
+                "environment_fingerprint, capability_schema, capability_digest, "
+                "claim_json, decision_json, parent_job_id, fallback_ordinal) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (run["profile_name"], run["plan_id"],
                  run.get("hardware_fingerprint", ""), run.get("backend_fingerprint", ""),
                  run.get("started_at", time.time()), run.get("finished_at"),
@@ -273,7 +300,18 @@ class RuntimeDB:
                  json.dumps(run.get("peak_vram_bytes", {})),
                  run.get("peak_ram_bytes"), run.get("actual_context"),
                  run.get("exit_code"), run.get("log_path", ""),
-                 json.dumps(run.get("details", {}))))
+                 json.dumps(run.get("details", {})),
+                 run.get("command_fingerprint", ""),
+                 json.dumps(run.get("command_argv", [])),
+                 run.get("binary_path", ""),
+                 run.get("binary_fingerprint", ""),
+                 run.get("environment_fingerprint", ""),
+                 run.get("capability_schema", 0),
+                 run.get("capability_digest", ""),
+                 json.dumps(run.get("claim", {})),
+                 json.dumps(run.get("decision", {})),
+                 run.get("parent_job_id"),
+                 run.get("fallback_ordinal")))
             return c.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     def plan_runs_for(self, profile_name, plan_id=None, limit=50):

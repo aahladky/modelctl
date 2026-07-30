@@ -36,6 +36,10 @@ class ResourceClaim:
     storage_mode: str         # "none", "mmap", "direct"
     expected_context: int | None
     breakdown: dict = field(default_factory=dict)
+    storage_path: str = ""    # actual model file path
+    model_bytes: int = 0      # total model weight bytes
+    expected_resident_bytes: int = 0  # expected RSS from model
+    cache_bytes: int = 0      # dynamic cache budget separate from static VRAM
     # breakdown is an optional per-device decomposition for UI/debug:
     # {"vram": {"SYCL0": {"fixed": N, "kv": N, "static_experts": N,
     #           "dynamic_expert_cache": N, "reserve": N}},
@@ -278,11 +282,22 @@ def _make_claim(profile, config, hardware):
 
     storage = "mmap" if cpu_bytes and "--no-mmap" not in extra else "none"
 
+    # Dynamic cache budget (from moe_cache config).
+    cache_budget = 0
+    mc = profile.get("moe_cache", {})
+    if mc.get("mode", "off") != "off":
+        budgets = mc.get("gpu", {}).get("budgets_bytes", {})
+        cache_budget = max((b for b in budgets.values() if b > 0), default=0)
+
     return ResourceClaim(
         vram_bytes=vram_map,
         ram_bytes=cpu_bytes,
         storage_mode=storage,
         expected_context=ctx,
+        storage_path=model_path,
+        model_bytes=weights,
+        expected_resident_bytes=cpu_bytes + sum(vram_map.values()),
+        cache_bytes=cache_budget,
     )
 
 
@@ -527,6 +542,70 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
                                           cache_cfg, label_suffix, hardware,
                                           decision={"moe_cache": variant_mc})
                         add(plan)
+        except Exception:
+            pass
+
+    # I. Hybrid plans (GPU cache hit + CPU miss execution) — only when
+    # the backend supports moe_hybrid_cpu_miss and the model is oversized.
+    if mc.get("mode", "off") != "off" and mc.get("decode", {}).get("miss_execution") == "cpu":
+        try:
+            import modelctl_capabilities
+            binary = profile.get("binary") or modelctl.LLAMA_SERVER_BIN
+            caps = modelctl_capabilities.probe_backend(binary)
+            if (modelctl_capabilities.supports_hybrid_miss(caps)
+                    and modelctl_capabilities.is_cache_capable(caps)):
+                gpus_enabled = [g for g in hardware.gpus if g.enabled]
+                cfg0 = profile.get("config", {})
+                weights_h = 0
+                model_path = profile.get("model_path", "")
+                if model_path and os.path.exists(model_path):
+                    try:
+                        weights_h = modelctl_vram.weights_bytes_on_disk(model_path)
+                    except Exception:
+                        pass
+                # Hybrid needs oversized models that exceed GPU VRAM.
+                total_est = modelctl_vram.estimate_from_parts(
+                    weights_h, int(cfg0.get("ctx", 8192)),
+                    cfg0.get("cache_type_k", "q8_0"),
+                    cache_type_v=cfg0.get("cache_type_v", "q8_0"))
+                total_gpu_budget = sum(
+                    g.total_bytes - g.reserve_bytes for g in gpus_enabled)
+                if total_est.get("total", 0) > total_gpu_budget:
+                    # Use a moderate cache budget — the miss path handles
+                    # the overflow, so we don't need to fill the GPU.
+                    for frac, label_suffix in ((0.30, "hybrid-balanced"),
+                                                 (0.60, "hybrid-large")):
+                        for g in gpus_enabled:
+                            limit_pct = d.get("vram_limit_pct", 90) if 'd' in dir() else 90
+                            try:
+                                hw_settings = modelctl_hardware.load_settings()
+                            except Exception:
+                                hw_settings = {}
+                            dev_cfg = hw_settings.get("devices", {})
+                            usable = (g.total_bytes * limit_pct / 100.0
+                                      - dev_cfg.get(g.device, {}).get("reserve_bytes", 0))
+                            budget = int(usable * frac)
+                            if budget < 64 * (1 << 20):
+                                continue
+                            variant_mc = {
+                                **mc,
+                                "gpu": {**mc.get("gpu", {}),
+                                        "budgets_bytes": {g.device: budget}},
+                                "decode": {**mc.get("decode", {}),
+                                           "miss_execution": "cpu"},
+                            }
+                            hybrid_cfg = {
+                                "device": g.device,
+                                "split_mode": "",
+                                "tensor_split": "",
+                            }
+                            plan = _make_plan(
+                                {**profile, "moe_cache": variant_mc},
+                                hybrid_cfg, label_suffix, hardware,
+                                extra_warnings=("hybrid: CPU miss execution",),
+                                decision={"moe_cache": variant_mc,
+                                          "hybrid": True})
+                            add(plan)
         except Exception:
             pass
 

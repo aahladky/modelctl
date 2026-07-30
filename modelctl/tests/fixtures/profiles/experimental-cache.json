@@ -1,0 +1,45 @@
+{
+  "_comment": "Experimental transfer-cache profile for oversized MoE",
+  "name": "experimental-cache",
+  "repo_id": "unsloth/DeepSeek-R1-0528-GGUF",
+  "model_path": "/home/user/models/DeepSeek-R1-0528-Q4_K_M.gguf",
+  "binary": "/opt/llama.cpp/build-sycl/bin/llama-server",
+  "backend": "llama-cpp",
+  "config": {
+    "device": "",
+    "split_mode": "",
+    "tensor_split": "",
+    "ctx": 16384,
+    "flash_attn": "on",
+    "fit": "off",
+    "mtp": "off",
+    "cache_type_k": "q8_0",
+    "cache_type_v": "q8_0",
+    "ttl": 3600,
+    "extra": ""
+  },
+  "runtime": {
+    "mode": "managed",
+    "objective": "balanced",
+    "pinned_plan_id": null,
+    "allow_fallback": true,
+    "allow_untested": false,
+    "minimum_context": 8192,
+    "maximum_cpu_bytes": null,
+    "maximum_storage_tier": 3
+  },
+  "moe_cache": {
+    "mode": "manual",
+    "gpu": {
+      "budgets_bytes": {"SYCL0": 10737418240, "SYCL1": 4294967296},
+      "policy": "slru",
+      "admission_misses": 2
+    },
+    "ram": {"budget_bytes": 0},
+    "storage": {"mode": "mmap"},
+    "prefill": {"admit_to_gpu_cache": false},
+    "decode": {"miss_execution": "cpu"},
+    "prefetch": {"enabled": false}
+  },
+  "env": []
+}

@@ -402,6 +402,262 @@ def create_app(token=None, store=None, runner=None):
         job_id = mutate.submit_pull(runner, repo_id, quant_label=quant or None)
         return RedirectResponse(f"/jobs/{job_id}?back=/pull", status_code=303)
 
+    # ---- local import ---------------------------------------------------
+    @app.get("/import", response_class=HTMLResponse)
+    def import_form(request: Request):
+        return templates.TemplateResponse(request=request, name="import.html", context=ctx(
+            request))
+
+    @app.post("/import")
+    def import_start(file_path: str = Form(...), name: str = Form(""),
+                     copy: bool = Form(False)):
+        job_id = mutate.submit_import_local(runner, file_path,
+                                            name=name or None, copy=copy)
+        return RedirectResponse(f"/jobs/{job_id}?back=/import", status_code=303)
+
+    # ---- add-model wizard -----------------------------------------------
+    @app.get("/add", response_class=HTMLResponse)
+    def wizard_list(request: Request):
+        from .wizard import WizardStore
+        store_wiz = WizardStore()
+        active = store_wiz.list_active()
+        return templates.TemplateResponse(request=request, name="wizard_list.html",
+                                          context=ctx(request, wizards=active))
+
+    @app.post("/add")
+    def wizard_create():
+        from .wizard import WizardState, WizardStore
+        store_wiz = WizardStore()
+        state = WizardState()
+        store_wiz.save(state)
+        return RedirectResponse(f"/add/{state.wizard_id}/source", status_code=303)
+
+    @app.get("/add/{wizard_id}/source", response_class=HTMLResponse)
+    def wizard_source(request: Request, wizard_id: str):
+        from .wizard import WizardStore
+        store_wiz = WizardStore()
+        state = store_wiz.load(wizard_id)
+        if not state:
+            return RedirectResponse("/add", status_code=303)
+        return templates.TemplateResponse(request=request, name="wizard_source.html",
+                                          context=ctx(request, w=state))
+
+    @app.post("/add/{wizard_id}/source")
+    async def wizard_source_submit(request: Request, wizard_id: str):
+        from .wizard import WizardStore, WizardState
+        store_wiz = WizardStore()
+        state = store_wiz.load(wizard_id)
+        if not state:
+            return RedirectResponse("/add", status_code=303)
+        form = await request.form()
+        source_type = form.get("source_type", "")
+        state.source_type = source_type
+        if source_type == "hf_repo":
+            state.repo_id = form.get("repo_id", "")
+            state.advance("inspect")
+        elif source_type == "local_file":
+            state.local_path = form.get("local_path", "")
+            state.advance("download")
+        store_wiz.save(state)
+        return RedirectResponse(f"/add/{wizard_id}/{state.step}", status_code=303)
+
+    @app.get("/add/{wizard_id}/inspect", response_class=HTMLResponse)
+    def wizard_inspect(request: Request, wizard_id: str):
+        from .wizard import WizardStore
+        store_wiz = WizardStore()
+        state = store_wiz.load(wizard_id)
+        if not state or not state.repo_id:
+            return RedirectResponse("/add", status_code=303)
+        contents = modelctl.get_repo_contents(state.repo_id)
+        return templates.TemplateResponse(request=request, name="wizard_inspect.html",
+                                          context=ctx(request, w=state, contents=contents))
+
+    @app.post("/add/{wizard_id}/inspect")
+    async def wizard_inspect_submit(request: Request, wizard_id: str):
+        from .wizard import WizardStore
+        store_wiz = WizardStore()
+        state = store_wiz.load(wizard_id)
+        if not state:
+            return RedirectResponse("/add", status_code=303)
+        form = await request.form()
+        state.selected_quant = form.get("quant", "")
+        state.advance("download")
+        store_wiz.save(state)
+        return RedirectResponse(f"/add/{wizard_id}/download", status_code=303)
+
+    @app.get("/add/{wizard_id}/download", response_class=HTMLResponse)
+    def wizard_download(request: Request, wizard_id: str):
+        from .wizard import WizardStore
+        store_wiz = WizardStore()
+        state = store_wiz.load(wizard_id)
+        if not state:
+            return RedirectResponse("/add", status_code=303)
+        # For local files, skip download and go straight to analysis.
+        if state.source_type == "local_file" and state.local_path:
+            if not state.download_complete:
+                job_id = mutate.submit_import_local(runner, state.local_path)
+                state.download_job_id = job_id
+                state.download_complete = True
+                store_wiz.save(state)
+            return templates.TemplateResponse(request=request, name="wizard_download.html",
+                                              context=ctx(request, w=state, is_local=True))
+        # For HF repos, start the pull job.
+        if state.repo_id and not state.download_complete and not state.download_job_id:
+            job_id = mutate.submit_pull(runner, state.repo_id,
+                                        quant_label=state.selected_quant or None)
+            state.download_job_id = job_id
+            store_wiz.save(state)
+        return templates.TemplateResponse(request=request, name="wizard_download.html",
+                                          context=ctx(request, w=state, is_local=False))
+
+    @app.post("/add/{wizard_id}/download")
+    def wizard_download_next(request: Request, wizard_id: str):
+        from .wizard import WizardStore
+        store_wiz = WizardStore()
+        state = store_wiz.load(wizard_id)
+        if not state:
+            return RedirectResponse("/add", status_code=303)
+        state.advance("analyze")
+        store_wiz.save(state)
+        return RedirectResponse(f"/add/{wizard_id}/analyze", status_code=303)
+
+    @app.get("/add/{wizard_id}/analyze", response_class=HTMLResponse)
+    def wizard_analyze(request: Request, wizard_id: str):
+        from .wizard import WizardStore
+        store_wiz = WizardStore()
+        state = store_wiz.load(wizard_id)
+        if not state:
+            return RedirectResponse("/add", status_code=303)
+        # If the pull job completed, load the created profile.
+        profile = None
+        if state.profile_name:
+            try:
+                profile = modelctl.load_profile(state.profile_name)
+            except Exception:
+                pass
+        elif state.download_job_id:
+            job = store.get(state.download_job_id)
+            if job and job.get("status") == "done" and job.get("result"):
+                pname = job["result"].get("profile")
+                if pname:
+                    state.profile_name = pname
+                    store_wiz.save(state)
+                    try:
+                        profile = modelctl.load_profile(pname)
+                    except Exception:
+                        pass
+        return templates.TemplateResponse(request=request, name="wizard_analyze.html",
+                                          context=ctx(request, w=state, profile=profile))
+
+    @app.post("/add/{wizard_id}/analyze")
+    def wizard_analyze_next(request: Request, wizard_id: str):
+        from .wizard import WizardStore
+        store_wiz = WizardStore()
+        state = store_wiz.load(wizard_id)
+        if not state:
+            return RedirectResponse("/add", status_code=303)
+        state.advance("plans")
+        store_wiz.save(state)
+        return RedirectResponse(f"/add/{wizard_id}/plans", status_code=303)
+
+    @app.get("/add/{wizard_id}/plans", response_class=HTMLResponse)
+    def wizard_plans(request: Request, wizard_id: str):
+        from .wizard import WizardStore
+        import modelctl_plans
+        import modelctl_hardware
+        store_wiz = WizardStore()
+        state = store_wiz.load(wizard_id)
+        if not state or not state.profile_name:
+            return RedirectResponse("/add", status_code=303)
+        profile = modelctl.load_profile(state.profile_name)
+        snap = modelctl_hardware.capture_hardware_snapshot()
+        plans = modelctl_plans.compile_launch_plans(profile, snap)
+        return templates.TemplateResponse(request=request, name="wizard_plans.html",
+                                          context=ctx(request, w=state, plans=plans,
+                                                      profile=profile))
+
+    @app.post("/add/{wizard_id}/plans")
+    async def wizard_plans_submit(request: Request, wizard_id: str):
+        from .wizard import WizardStore
+        store_wiz = WizardStore()
+        state = store_wiz.load(wizard_id)
+        if not state:
+            return RedirectResponse("/add", status_code=303)
+        form = await request.form()
+        action = form.get("action", "next")
+        if action == "test":
+            state.advance("test")
+        elif action == "register":
+            state.advance("register")
+        else:
+            state.advance("test")
+        store_wiz.save(state)
+        return RedirectResponse(f"/add/{wizard_id}/{state.step}", status_code=303)
+
+    @app.get("/add/{wizard_id}/test", response_class=HTMLResponse)
+    def wizard_test(request: Request, wizard_id: str):
+        from .wizard import WizardStore
+        store_wiz = WizardStore()
+        state = store_wiz.load(wizard_id)
+        if not state or not state.profile_name:
+            return RedirectResponse("/add", status_code=303)
+        return templates.TemplateResponse(request=request, name="wizard_test.html",
+                                          context=ctx(request, w=state))
+
+    @app.post("/add/{wizard_id}/test")
+    def wizard_test_submit(request: Request, wizard_id: str):
+        from .wizard import WizardStore
+        store_wiz = WizardStore()
+        state = store_wiz.load(wizard_id)
+        if not state:
+            return RedirectResponse("/add", status_code=303)
+        job_id = mutate.submit_smoke_test(runner, state.profile_name)
+        state.test_job_id = job_id
+        state.advance("register")
+        store_wiz.save(state)
+        return RedirectResponse(f"/add/{wizard_id}/register", status_code=303)
+
+    @app.get("/add/{wizard_id}/register", response_class=HTMLResponse)
+    def wizard_register(request: Request, wizard_id: str):
+        from .wizard import WizardStore
+        store_wiz = WizardStore()
+        state = store_wiz.load(wizard_id)
+        if not state or not state.profile_name:
+            return RedirectResponse("/add", status_code=303)
+        profile = None
+        try:
+            profile = modelctl.load_profile(state.profile_name)
+        except Exception:
+            pass
+        return templates.TemplateResponse(request=request, name="wizard_register.html",
+                                          context=ctx(request, w=state, profile=profile))
+
+    @app.post("/add/{wizard_id}/register")
+    def wizard_register_submit(request: Request, wizard_id: str):
+        from .wizard import WizardStore
+        store_wiz = WizardStore()
+        state = store_wiz.load(wizard_id)
+        if not state:
+            return RedirectResponse("/add", status_code=303)
+        # Warm-load through llama-swap to verify.
+        if state.profile_name:
+            job_id = mutate.submit_load(runner, state.profile_name)
+            state.registration_complete = True
+            state.endpoint = f"/v1/models"
+        state.advance("done")
+        store_wiz.save(state)
+        return RedirectResponse(f"/add/{wizard_id}/done", status_code=303)
+
+    @app.get("/add/{wizard_id}/done", response_class=HTMLResponse)
+    def wizard_done(request: Request, wizard_id: str):
+        from .wizard import WizardStore
+        store_wiz = WizardStore()
+        state = store_wiz.load(wizard_id)
+        if not state:
+            return RedirectResponse("/add", status_code=303)
+        return templates.TemplateResponse(request=request, name="wizard_done.html",
+                                          context=ctx(request, w=state))
+
     # ---- jobs -----------------------------------------------------------
     @app.get("/jobs", response_class=HTMLResponse)
     def jobs_list(request: Request):
@@ -601,6 +857,37 @@ def create_app(token=None, store=None, runner=None):
     def api_hardware_settings():
         import modelctl_hardware
         return modelctl_hardware.load_settings()
+
+    # ---- settings --------------------------------------------------------
+    @app.get("/settings", response_class=HTMLResponse)
+    def settings_page(request: Request, saved: str = ""):
+        defaults = modelctl.load_defaults()
+        return templates.TemplateResponse(request=request, name="settings.html", context=ctx(
+            request, defaults=defaults, saved=saved,
+            models_dir=str(modelctl.DEFAULT_MODELS_DIR),
+            profiles_dir=str(modelctl.PROFILES_DIR),
+            llama_server=modelctl.LLAMA_SERVER_BIN,
+            llama_swap_config=str(modelctl.LLAMA_SWAP_CONFIG_PATH),
+            llama_swap_service=modelctl.LLAMA_SWAP_SERVICE_NAME,
+            llama_swap_base_url=modelctl.LLAMA_SWAP_BASE_URL,
+        ))
+
+    @app.post("/settings/save")
+    async def settings_save(request: Request):
+        form = await request.form()
+        defaults = modelctl.load_defaults()
+        for key in ("device", "split_mode", "tensor_split", "cache_type_k",
+                     "cache_type_v", "flash_attn", "mtp", "primary_gpu"):
+            if key in form:
+                defaults[key] = str(form[key])
+        for key in ("ctx", "ttl", "vram_limit_pct"):
+            if key in form:
+                try:
+                    defaults[key] = int(form[key])
+                except ValueError:
+                    pass
+        modelctl.save_defaults(defaults)
+        return RedirectResponse("/settings?saved=1", status_code=303)
 
     # ---- launch plans ----------------------------------------------------
     @app.get("/profiles/{name}/plans", response_class=HTMLResponse)

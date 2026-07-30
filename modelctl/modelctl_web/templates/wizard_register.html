@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Add Model: Register - modelctl{% endblock %}
+{% block content %}
+<h1>Add Model: Register</h1>
+<p class="muted">Step 7 of 7 · {{ w.profile_name }}</p>
+
+{% if profile %}
+<div class="card">
+  <h3>{{ profile.name }}</h3>
+  <table>
+    <tr><td><strong>Model</strong></td><td><code>{{ profile.model_path }}</code></td></tr>
+    <tr><td><strong>Backend</strong></td><td>{{ profile.backend }}</td></tr>
+    <tr><td><strong>Runtime mode</strong></td><td>{{ profile.runtime.mode if profile.runtime else 'fixed' }}</td></tr>
+    <tr><td><strong>Context</strong></td><td>{{ profile.config.ctx }}</td></tr>
+    <tr><td><strong>Cache mode</strong></td><td>{{ profile.moe_cache.mode }}</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <p>This will register <strong>{{ profile.name }}</strong> with llama-swap
+  and perform a warm-load verification.</p>
+</div>
+
+<form method="post" action="/add/{{ w.wizard_id }}/register">
+  <div class="actions">
+    <button type="submit" class="btn btn-primary">Register & Verify</button>
+  </div>
+</form>
+{% else %}
+<p class="error">Profile not found.</p>
+{% endif %}
+{% endblock %}

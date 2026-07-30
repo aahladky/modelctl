@@ -1,0 +1,25 @@
+{
+  "_comment": "SYCL build without MoE cache support (e.g. stock SYCL build)",
+  "schema": 2,
+  "backend": "llama.cpp",
+  "build": {"commit": "def456", "compiler": "icpx-2025", "dynamic_backends": true},
+  "devices": [
+    {"type": "SYCL", "name": "SYCL0", "index": 0, "features": {"moe_weight_transfer_cache": false}},
+    {"type": "SYCL", "name": "SYCL1", "index": 1, "features": {"moe_weight_transfer_cache": false}}
+  ],
+  "features": {
+    "moe_weight_transfer_cache": false,
+    "moe_hybrid_cpu_miss": false,
+    "moe_cache_metrics": false,
+    "moe_cache_prefill_policy": false,
+    "moe_cache_reset": false,
+    "moe_cache_prefetch": false
+  },
+  "constraints": {
+    "moe_cache_backend": "",
+    "moe_cache_min_batch": 0,
+    "moe_cache_supported_projections": []
+  },
+  "cli": {},
+  "_probe_status": "ok"
+}

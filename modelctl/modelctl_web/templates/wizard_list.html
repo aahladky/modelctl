@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Add Model - modelctl{% endblock %}
+{% block content %}
+<h1>Add Model</h1>
+
+{% if wizards %}
+<h2>Active Wizards</h2>
+<div class="card">
+{% for w in wizards %}
+<div style="display:flex;justify-content:space-between;align-items:center;padding:.3rem 0;border-bottom:1px solid var(--border)">
+  <div>
+    <strong>{{ w.wizard_id }}</strong> · step: {{ w.step }}
+    {% if w.repo_id %} · {{ w.repo_id }}{% endif %}
+    {% if w.profile_name %} · profile: {{ w.profile_name }}{% endif %}
+  </div>
+  <div>
+    <a href="/add/{{ w.wizard_id }}/{{ w.step }}" class="btn">Resume</a>
+  </div>
+</div>
+{% endfor %}
+</div>
+{% endif %}
+
+<form method="post" action="/add" style="margin-top:1rem">
+  <button type="submit" class="btn btn-primary">Start New Add-Model Wizard</button>
+</form>
+{% endblock %}

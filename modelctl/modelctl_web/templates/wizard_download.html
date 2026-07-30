@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Add Model: Download - modelctl{% endblock %}
+{% block content %}
+<h1>Add Model: Download</h1>
+<p class="muted">Step 3 of 7 · {{ w.repo_id or w.local_path }}</p>
+
+<div class="card" id="download-status">
+  {% if w.download_job_id %}
+    <div hx-get="/jobs/{{ w.download_job_id }}/fragment" hx-trigger="every 2s"
+         hx-swap="innerHTML">
+      Loading...
+    </div>
+  {% elif is_local %}
+    <p>Importing local file: <code>{{ w.local_path }}</code></p>
+    <p class="muted">Processing...</p>
+  {% else %}
+    <p>Starting download...</p>
+  {% endif %}
+</div>
+
+<form method="post" action="/add/{{ w.wizard_id }}/download">
+  <div class="actions">
+    <button type="submit" class="btn btn-primary">Continue to Analysis</button>
+    <a href="/add" class="btn">Cancel</a>
+  </div>
+</form>
+{% endblock %}

@@ -38,8 +38,8 @@ class TestClassifyProbeFailure(unittest.TestCase):
     def test_returns_unsupported_status(self):
         caps = modelctl_capabilities._classify_probe_failure("/usr/bin/llama-server")
         self.assertEqual(caps["_probe_status"], "unsupported")
-        self.assertEqual(caps["schema"], 0)
-        self.assertEqual(caps["features"], {})
+        self.assertEqual(caps["schema"], 2)
+        self.assertFalse(caps["features"]["moe_weight_transfer_cache"])
 
 
 class TestProbeRaw(unittest.TestCase):
@@ -59,11 +59,11 @@ class TestProbeRaw(unittest.TestCase):
 
     def test_parses_valid_json(self):
         caps_json = json.dumps({
-            "schema": 1,
+            "schema": 2,
             "backend": "llama.cpp",
             "build": "test",
-            "features": {"moe_expert_cache": True},
-            "cli": {"cache_bytes": "--moe-cache-bytes"},
+            "features": {"moe_weight_transfer_cache": True},
+            "cli": {"moe_cache_bytes": "--moe-cache-bytes"},
         })
         with TemporaryDirectory() as d:
             script = Path(d) / "fake-server"
@@ -71,13 +71,13 @@ class TestProbeRaw(unittest.TestCase):
             script.chmod(0o755)
             result = modelctl_capabilities._probe_raw(str(script))
             self.assertIsNotNone(result)
-            self.assertTrue(result["features"]["moe_expert_cache"])
+            self.assertTrue(result["features"]["moe_weight_transfer_cache"])
 
     def test_retries_with_env_script_after_bare_failure(self):
         # SYCL binaries crash without their oneAPI env even for the probe;
         # _probe_raw must retry with the launch path's env scripts.
-        caps_json = json.dumps({"schema": 1,
-                                "features": {"moe_expert_cache": True}})
+        caps_json = json.dumps({"schema": 2,
+                                "features": {"moe_weight_transfer_cache": True}})
         with TemporaryDirectory() as d:
             script = Path(d) / "fake-server"
             script.write_text(
@@ -92,10 +92,10 @@ class TestProbeRaw(unittest.TestCase):
                                    return_value={"PROBE_TEST_MARKER": "1"}):
                 result = modelctl_capabilities._probe_raw(str(script))
             self.assertIsNotNone(result)
-            self.assertTrue(result["features"]["moe_expert_cache"])
+            self.assertTrue(result["features"]["moe_weight_transfer_cache"])
 
     def test_env_fallback_not_used_when_bare_probe_works(self):
-        caps_json = json.dumps({"schema": 1, "features": {}})
+        caps_json = json.dumps({"schema": 2, "features": {}})
         with TemporaryDirectory() as d:
             script = Path(d) / "fake-server"
             script.write_text(f"#!/bin/sh\necho '{caps_json}'\n")
@@ -130,16 +130,22 @@ class TestProbeBackend(unittest.TestCase):
 
     def test_supported_binary(self):
         caps_json = json.dumps({
-            "schema": 1,
+            "schema": 2,
             "backend": "llama.cpp",
             "build": "b123",
             "features": {
-                "moe_expert_cache": True,
-                "moe_cache_sycl": True,
-                "moe_hybrid_cpu_miss": True,
+                "moe_weight_transfer_cache": True,
+                "moe_hybrid_cpu_miss": False,
                 "moe_cache_metrics": True,
+                "moe_cache_prefill_policy": True,
+                "moe_cache_reset": True,
             },
-            "cli": {"cache_bytes": "--moe-cache-bytes"},
+            "cli": {
+                "moe_cache_bytes": "--moe-cache-bytes",
+                "moe_cache_policy": "--moe-cache-policy",
+                "moe_cache_admission": "--moe-cache-admission-misses",
+                "moe_cache_prefill": "--moe-cache-prefill-admission",
+            },
         })
         with TemporaryDirectory() as d:
             script = Path(d) / "fake-server"
@@ -148,15 +154,39 @@ class TestProbeBackend(unittest.TestCase):
             caps = modelctl_capabilities.probe_backend(str(script))
             self.assertEqual(caps["_probe_status"], "ok")
             self.assertTrue(modelctl_capabilities.is_cache_capable(caps))
+            self.assertTrue(modelctl_capabilities.is_weight_transfer_cache_capable(caps))
             self.assertTrue(modelctl_capabilities.is_sycl_cache_capable(caps))
-            self.assertTrue(modelctl_capabilities.supports_hybrid_miss(caps))
+            self.assertFalse(modelctl_capabilities.supports_hybrid_miss(caps))
             self.assertTrue(modelctl_capabilities.supports_metrics(caps))
             self.assertFalse(modelctl_capabilities.supports_prefetch(caps))
 
+    def test_supported_binary_with_hybrid(self):
+        caps_json = json.dumps({
+            "schema": 2,
+            "backend": "llama.cpp",
+            "build": "b123",
+            "features": {
+                "moe_weight_transfer_cache": True,
+                "moe_hybrid_cpu_miss": True,
+                "moe_cache_metrics": True,
+            },
+            "constraints": {
+                "moe_hybrid_supported_archs": ["deepseek_v2", "qwen3_moe"],
+            },
+        })
+        with TemporaryDirectory() as d:
+            script = Path(d) / "fake-server"
+            script.write_text(f"#!/bin/sh\necho '{caps_json}'\n")
+            script.chmod(0o755)
+            caps = modelctl_capabilities.probe_backend(str(script))
+            self.assertTrue(modelctl_capabilities.supports_hybrid_miss(caps))
+            self.assertIn("deepseek_v2",
+                          caps["constraints"]["moe_hybrid_supported_archs"])
+
     def test_session_cache_hit(self):
         caps_json = json.dumps({
-            "schema": 1, "backend": "llama.cpp", "build": "x",
-            "features": {"moe_expert_cache": True}, "cli": {},
+            "schema": 2, "backend": "llama.cpp", "build": "x",
+            "features": {"moe_weight_transfer_cache": True}, "cli": {},
         })
         with TemporaryDirectory() as d:
             script = Path(d) / "fake-server"
@@ -168,7 +198,7 @@ class TestProbeBackend(unittest.TestCase):
 
     def test_disk_cache_persists(self):
         caps_json = json.dumps({
-            "schema": 1, "backend": "llama.cpp", "build": "y",
+            "schema": 2, "backend": "llama.cpp", "build": "y",
             "features": {}, "cli": {},
         })
         with TemporaryDirectory() as d:
@@ -183,7 +213,7 @@ class TestProbeBackend(unittest.TestCase):
 
     def test_clear_cache_removes_files(self):
         caps_json = json.dumps({
-            "schema": 1, "backend": "llama.cpp", "build": "z",
+            "schema": 2, "backend": "llama.cpp", "build": "z",
             "features": {}, "cli": {},
         })
         with TemporaryDirectory() as d:
@@ -279,10 +309,10 @@ class TestMoeCacheArgsIntegration(unittest.TestCase):
         }
         caps = {
             "cli": {
-                "cache_bytes": "--custom-cache-bytes",
-                "cache_policy": "--custom-policy",
-                "admission_misses": "--custom-admission",
-                "prefill_admission": "--custom-prefill-admission",
+                "moe_cache_bytes": "--custom-cache-bytes",
+                "moe_cache_policy": "--custom-policy",
+                "moe_cache_admission": "--custom-admission",
+                "moe_cache_prefill": "--custom-prefill-admission",
             }
         }
         args = modelctl.build_moe_cache_args(profile, capabilities=caps)
@@ -333,9 +363,8 @@ class TestPreflightMoeCache(unittest.TestCase):
         }
         caps = {
             "features": {
-                "moe_expert_cache": True,
-                "moe_cache_sycl": True,
-                "moe_hybrid_cpu_miss": True,
+                "moe_weight_transfer_cache": True,
+                "moe_hybrid_cpu_miss": False,
             }
         }
         msgs = modelctl.preflight_moe_cache(profile, capabilities=caps)
@@ -348,14 +377,15 @@ class TestPreflightMoeCache(unittest.TestCase):
         profile = {
             "moe_cache": {
                 "mode": "auto",
+                "gpu": {"budgets_bytes": {"SYCL0": 10 * (1 << 30)}},
                 "decode": {"miss_execution": "cpu"},
                 "prefetch": {"enabled": True},
             }
         }
         caps = {
             "features": {
-                "moe_expert_cache": True,
-                "moe_hybrid_cpu_miss": True,
+                "moe_weight_transfer_cache": True,
+                "moe_hybrid_cpu_miss": False,
                 "moe_cache_prefetch": False,
             }
         }
@@ -459,3 +489,152 @@ class TestBuildServerArgsMoeCache(unittest.TestCase):
         args = modelctl.build_server_args(profile)
         self.assertNotIn("--moe-cache-bytes", args)
         self.assertNotIn("--metrics", args)
+
+
+class TestNormalizeCapabilities(unittest.TestCase):
+    """Test normalize_capabilities() converts schema 0/1 to canonical form."""
+
+    def test_schema0_unsupported(self):
+        raw = {"schema": 0, "_probe_status": "unsupported", "features": {}}
+        norm = modelctl_capabilities.normalize_capabilities(raw)
+        self.assertEqual(norm["schema"], 2)
+        self.assertFalse(norm["features"]["moe_weight_transfer_cache"])
+        self.assertFalse(norm["features"]["moe_hybrid_cpu_miss"])
+        self.assertEqual(norm["_probe_status"], "unsupported")
+
+    def test_schema1_maps_to_canonical_features(self):
+        raw = {
+            "schema": 1,
+            "backend": "llama.cpp",
+            "build": "test",
+            "devices": ["CPU", "SYCL0"],
+            "features": {
+                "moe_expert_cache": True,
+                "moe_cache_sycl": True,
+                "moe_hybrid_cpu_miss": True,  # was wrongly true in schema 1
+                "moe_cache_metrics": True,
+                "moe_cache_prefill_policy": True,
+            },
+            "cli": {
+                "cache_bytes": "--moe-cache-bytes",
+                "cache_policy": "--moe-cache-policy",
+                "admission_misses": "--moe-cache-admission-misses",
+                "prefill_admission": "--moe-cache-prefill-admission",
+            },
+        }
+        norm = modelctl_capabilities.normalize_capabilities(raw)
+        self.assertEqual(norm["schema"], 2)
+        self.assertTrue(norm["features"]["moe_weight_transfer_cache"])
+        # hybrid is allowed through from schema 1 when both flags are true
+        self.assertTrue(norm["features"]["moe_hybrid_cpu_miss"])
+        self.assertTrue(norm["features"]["moe_cache_metrics"])
+        self.assertTrue(norm["features"]["moe_cache_prefill_policy"])
+        self.assertTrue(norm["features"]["moe_cache_reset"])
+        self.assertFalse(norm["features"]["moe_cache_prefetch"])
+        self.assertEqual(norm["_raw_schema"], 1)
+
+    def test_schema1_cli_mapped_to_canonical_keys(self):
+        raw = {
+            "schema": 1,
+            "features": {"moe_expert_cache": True, "moe_cache_sycl": True},
+            "cli": {
+                "cache_bytes": "--my-cache-bytes",
+                "cache_policy": "--my-policy",
+                "admission_misses": "--my-admission",
+                "prefill_admission": "--my-prefill",
+            },
+        }
+        norm = modelctl_capabilities.normalize_capabilities(raw)
+        self.assertEqual(norm["cli"]["moe_cache_bytes"], "--my-cache-bytes")
+        self.assertEqual(norm["cli"]["moe_cache_policy"], "--my-policy")
+        self.assertEqual(norm["cli"]["moe_cache_admission"], "--my-admission")
+        self.assertEqual(norm["cli"]["moe_cache_prefill"], "--my-prefill")
+
+    def test_schema1_devices_normalized_to_objects(self):
+        raw = {
+            "schema": 1,
+            "features": {"moe_expert_cache": True, "moe_cache_sycl": True},
+            "devices": ["CPU", "SYCL0", "SYCL1"],
+            "cli": {},
+        }
+        norm = modelctl_capabilities.normalize_capabilities(raw)
+        self.assertEqual(len(norm["devices"]), 3)
+        self.assertEqual(norm["devices"][0]["type"], "CPU")
+        self.assertEqual(norm["devices"][1]["type"], "SYCL")
+        self.assertEqual(norm["devices"][1]["name"], "SYCL0")
+        self.assertTrue(norm["devices"][1]["features"]["moe_weight_transfer_cache"])
+
+    def test_schema1_without_sycl_not_cache_capable(self):
+        raw = {
+            "schema": 1,
+            "features": {"moe_expert_cache": True, "moe_cache_sycl": False},
+            "cli": {},
+        }
+        norm = modelctl_capabilities.normalize_capabilities(raw)
+        self.assertFalse(norm["features"]["moe_weight_transfer_cache"])
+
+    def test_schema2_passthrough(self):
+        raw = {
+            "schema": 2,
+            "backend": "llama.cpp",
+            "build": {"commit": "abc", "compiler": "gcc", "dynamic_backends": True},
+            "devices": [
+                {"type": "SYCL", "name": "SYCL0", "index": 0,
+                 "features": {"moe_weight_transfer_cache": True}},
+            ],
+            "features": {
+                "moe_weight_transfer_cache": True,
+                "moe_hybrid_cpu_miss": False,
+                "moe_cache_metrics": True,
+                "moe_cache_prefill_policy": True,
+                "moe_cache_reset": True,
+                "moe_cache_prefetch": False,
+            },
+            "constraints": {
+                "moe_cache_backend": "SYCL",
+                "moe_cache_min_batch": 32,
+                "moe_cache_supported_projections": ["gate", "up", "down"],
+            },
+            "cli": {
+                "moe_cache_bytes": "--moe-cache-bytes",
+                "moe_cache_policy": "--moe-cache-policy",
+                "moe_cache_admission": "--moe-cache-admission-misses",
+                "moe_cache_prefill": "--moe-cache-prefill-admission",
+            },
+        }
+        norm = modelctl_capabilities.normalize_capabilities(raw)
+        self.assertEqual(norm["schema"], 2)
+        self.assertTrue(norm["features"]["moe_weight_transfer_cache"])
+        self.assertEqual(norm["constraints"]["moe_cache_backend"], "SYCL")
+        self.assertEqual(norm["constraints"]["moe_cache_min_batch"], 32)
+
+    def test_schema2_forced_fail_closed(self):
+        """Prefetch is forced false; hybrid passes through."""
+        raw = {
+            "schema": 2,
+            "features": {
+                "moe_weight_transfer_cache": True,
+                "moe_hybrid_cpu_miss": True,
+                "moe_cache_prefetch": True,   # not implemented
+            },
+        }
+        norm = modelctl_capabilities.normalize_capabilities(raw)
+        self.assertTrue(norm["features"]["moe_hybrid_cpu_miss"])  # now allowed
+        self.assertFalse(norm["features"]["moe_cache_prefetch"])  # still forced false
+        self.assertTrue(norm["_raw_features"]["moe_cache_prefetch"])
+
+    def test_schema1_missing_features_default_false(self):
+        raw = {"schema": 1, "features": {}, "cli": {}}
+        norm = modelctl_capabilities.normalize_capabilities(raw)
+        self.assertFalse(norm["features"]["moe_weight_transfer_cache"])
+        self.assertFalse(norm["features"]["moe_hybrid_cpu_miss"])
+        self.assertFalse(norm["features"]["moe_cache_metrics"])
+
+    def test_normalize_idempotent(self):
+        raw = {
+            "schema": 2,
+            "features": {"moe_weight_transfer_cache": True},
+        }
+        n1 = modelctl_capabilities.normalize_capabilities(raw)
+        n2 = modelctl_capabilities.normalize_capabilities(n1)
+        self.assertEqual(n1["features"], n2["features"])

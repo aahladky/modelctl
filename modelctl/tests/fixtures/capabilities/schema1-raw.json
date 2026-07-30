@@ -1,0 +1,22 @@
+{
+  "_comment": "Raw schema 1 response from early fork - tests normalize_capabilities()",
+  "schema": 1,
+  "backend": "llama.cpp",
+  "build": "custom-moe-cache",
+  "devices": ["CPU", "SYCL0", "SYCL1"],
+  "features": {
+    "moe_expert_cache": true,
+    "moe_cache_sycl": true,
+    "moe_hybrid_cpu_miss": true,
+    "moe_cache_metrics": true,
+    "moe_cache_prefill_policy": true,
+    "moe_cache_mmap_advice": false,
+    "moe_cache_prefetch": false
+  },
+  "cli": {
+    "cache_bytes": "--moe-cache-bytes",
+    "cache_policy": "--moe-cache-policy",
+    "admission_misses": "--moe-cache-admission-misses",
+    "prefill_admission": "--moe-cache-prefill-admission"
+  }
+}

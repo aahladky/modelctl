@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Add Model: Source - modelctl{% endblock %}
+{% block content %}
+<h1>Add Model: Select Source</h1>
+<p class="muted">Step 1 of 7 · wizard {{ w.wizard_id }}</p>
+
+<form method="post" action="/add/{{ w.wizard_id }}/source" class="form-grid">
+  <div class="field">
+    <label>
+      <input type="radio" name="source_type" value="hf_repo" checked>
+      Hugging Face Repository
+    </label>
+    <div style="margin-left:1.5rem;margin-top:.3rem">
+      <input type="text" name="repo_id" placeholder="org/model-name"
+             value="{{ w.repo_id }}" size="40">
+    </div>
+  </div>
+
+  <div class="field">
+    <label>
+      <input type="radio" name="source_type" value="local_file">
+      Local GGUF File
+    </label>
+    <div style="margin-left:1.5rem;margin-top:.3rem">
+      <input type="text" name="local_path" placeholder="/path/to/model.gguf"
+             value="{{ w.local_path }}" size="40">
+    </div>
+  </div>
+
+  <div class="actions">
+    <button type="submit" class="btn btn-primary">Next</button>
+    <a href="/add" class="btn">Cancel</a>
+  </div>
+</form>
+{% endblock %}

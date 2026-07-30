@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}settings - modelctl{% endblock %}
+{% block content %}
+<h1>settings</h1>
+{% if saved %}<p class="ok">settings saved</p>{% endif %}
+
+<h2>paths</h2>
+<div class="card">
+  <table>
+    <tr><td><strong>models directory</strong></td><td><code>{{ models_dir }}</code></td></tr>
+    <tr><td><strong>profiles directory</strong></td><td><code>{{ profiles_dir }}</code></td></tr>
+    <tr><td><strong>llama-server binary</strong></td><td><code>{{ llama_server }}</code></td></tr>
+    <tr><td><strong>llama-swap config</strong></td><td><code>{{ llama_swap_config }}</code></td></tr>
+    <tr><td><strong>llama-swap service</strong></td><td><code>{{ llama_swap_service }}</code></td></tr>
+    <tr><td><strong>llama-swap base URL</strong></td><td><code>{{ llama_swap_base_url }}</code></td></tr>
+  </table>
+  <p class="muted">Override with environment variables: MODELCTL_MODELS_DIR,
+  MODELCTL_LLAMA_SERVER, MODELCTL_LLAMA_SWAP_CONFIG, etc.</p>
+</div>
+
+<h2>profile defaults</h2>
+<form method="post" action="/settings/save" class="card">
+<table>
+  <tr>
+    <td><label for="device">GPU device</label></td>
+    <td><input id="device" name="device" value="{{ defaults.device }}" size="12" placeholder="SYCL0"></td>
+  </tr>
+  <tr>
+    <td><label for="split_mode">split mode</label></td>
+    <td><input id="split_mode" name="split_mode" value="{{ defaults.split_mode }}" size="12" placeholder="layer"></td>
+  </tr>
+  <tr>
+    <td><label for="tensor_split">tensor split</label></td>
+    <td><input id="tensor_split" name="tensor_split" value="{{ defaults.tensor_split }}" size="12" placeholder="5,3"></td>
+  </tr>
+  <tr>
+    <td><label for="ctx">context length</label></td>
+    <td><input id="ctx" name="ctx" value="{{ defaults.ctx }}" size="8" type="number" min="512" step="512"></td>
+  </tr>
+  <tr>
+    <td><label for="cache_type_k">K cache quant</label></td>
+    <td><input id="cache_type_k" name="cache_type_k" value="{{ defaults.cache_type_k }}" size="8" placeholder="q8_0"></td>
+  </tr>
+  <tr>
+    <td><label for="cache_type_v">V cache quant</label></td>
+    <td><input id="cache_type_v" name="cache_type_v" value="{{ defaults.cache_type_v }}" size="8" placeholder="q8_0"></td>
+  </tr>
+  <tr>
+    <td><label for="flash_attn">flash attention</label></td>
+    <td><input id="flash_attn" name="flash_attn" value="{{ defaults.flash_attn }}" size="8" placeholder="auto"></td>
+  </tr>
+  <tr>
+    <td><label for="ttl">idle TTL (seconds)</label></td>
+    <td><input id="ttl" name="ttl" value="{{ defaults.ttl }}" size="8" type="number" min="0"></td>
+  </tr>
+  <tr>
+    <td><label for="mtp">multi-token prediction</label></td>
+    <td><input id="mtp" name="mtp" value="{{ defaults.mtp }}" size="8" placeholder="off"></td>
+  </tr>
+  <tr>
+    <td><label for="vram_limit_pct">VRAM limit %</label></td>
+    <td><input id="vram_limit_pct" name="vram_limit_pct" value="{{ defaults.vram_limit_pct }}" size="6" type="number" min="50" max="100"></td>
+  </tr>
+  <tr>
+    <td><label for="primary_gpu">primary GPU</label></td>
+    <td><input id="primary_gpu" name="primary_gpu" value="{{ defaults.primary_gpu }}" size="12" placeholder="auto"></td>
+  </tr>
+</table>
+<div style="margin-top:.5rem">
+  <button type="submit" class="btn btn-primary">Save Defaults</button>
+</div>
+</form>
+{% endblock %}

@@ -1493,6 +1493,136 @@ def pull_model(repo_id, quant_label=None, want_mtp=True, resync=True,
     return profile
 
 
+def import_local(file_path: str, name: str | None = None, copy: bool = False,
+                 resync: bool = True) -> dict | None:
+    """Import a local GGUF file as a modelctl profile.
+
+    Validates readability, detects split GGUF parts and companions
+    (mmproj, MTP), and creates a profile referencing the file in place
+    (or copying/moving into the managed model directory).
+
+    Returns the saved profile dict, or None on failure.
+    """
+    path = Path(file_path).expanduser().resolve()
+    if not path.exists():
+        print(f"Error: file not found: {path}")
+        return None
+    if not path.is_file():
+        print(f"Error: not a file: {path}")
+        return None
+
+    # Check it's a GGUF file (magic bytes).
+    try:
+        with open(path, "rb") as f:
+            magic = f.read(4)
+        if magic != b"GGUF":
+            print(f"Error: {path} does not appear to be a GGUF file")
+            return None
+    except OSError as e:
+        print(f"Error: cannot read {path}: {e}")
+        return None
+
+    # Detect split parts and companions.
+    parent = path.parent
+    stem = path.stem
+    companions = {"mmproj": [], "mtp": []}
+    split_parts = [str(path)]
+
+    for sibling in sorted(parent.glob("*.gguf")):
+        if sibling == path:
+            continue
+        sname = sibling.name.lower()
+        if sname.startswith("mmproj"):
+            companions["mmproj"].append(str(sibling))
+        elif "mtp" in sname or "draft" in sname:
+            companions["mtp"].append(str(sibling))
+        elif sibling.stem.startswith(stem.rsplit("-", 1)[0] if "-" in stem else stem):
+            # Likely a split part of the same model.
+            split_parts.append(str(sibling))
+
+    # Generate profile name.
+    if name:
+        profile_name = name
+    else:
+        clean = path.stem
+        # Strip common quant suffixes for the profile name.
+        for suffix in ("-Q4_K_M", "-Q4_K_S", "-Q5_K_M", "-Q5_K_S",
+                       "-Q8_0", "-Q6_K", "-Q3_K_M", "-Q3_K_S",
+                       "-IQ4_XS", "-IQ3_XS", "-bf16", "-fp16"):
+            if clean.upper().endswith(suffix.upper()):
+                clean = clean[:len(clean) - len(suffix)]
+                break
+        profile_name = next_unique_profile_name(slugify(clean))
+
+    # Auto-configure based on file analysis.
+    config = _default_config()
+    env = capture_env_passthrough()
+    if not env:
+        env = _env_from_scripts()
+
+    # Determine mmproj and mtp paths.
+    mmproj_path = companions["mmproj"][0] if companions["mmproj"] else None
+    mtp_path = companions["mtp"][0] if companions["mtp"] else None
+
+    # Optionally copy into managed directory.
+    model_path = str(path)
+    if copy:
+        dest_dir = DEFAULT_MODELS_DIR / profile_name
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        import shutil
+        dest = dest_dir / path.name
+        if not dest.exists():
+            shutil.copy2(path, dest)
+            model_path = str(dest)
+        for aux_list, aux_key in [(companions["mmproj"], "mmproj"),
+                                   (companions["mtp"], "mtp")]:
+            if aux_list:
+                aux_dest = dest_dir / Path(aux_list[0]).name
+                if not aux_dest.exists():
+                    shutil.copy2(aux_list[0], aux_dest)
+                if aux_key == "mmproj":
+                    mmproj_path = str(aux_dest)
+                else:
+                    mtp_path = str(aux_dest)
+
+    profile = {
+        "name": profile_name,
+        "repo_id": "",
+        "file": path.name,
+        "model_path": model_path,
+        "mmproj_path": mmproj_path,
+        "mtp_path": mtp_path,
+        "config": config,
+        "env": env,
+        "enabled": True,
+    }
+    save_profile(profile)
+    generate_artifacts(profile)
+    print(f"-> saved profile '{profile_name}'")
+
+    if resync:
+        sync_all_backends(restart_router=True, restart_openarc=True)
+    return profile
+
+
+def _default_config() -> dict:
+    """Return a copy of the default profile config."""
+    d = load_defaults()
+    return {
+        "device": d.get("device", ""),
+        "split_mode": d.get("split_mode", ""),
+        "tensor_split": d.get("tensor_split", ""),
+        "ctx": int(d.get("ctx", 8192)),
+        "cache_type_k": d.get("cache_type_k", "q8_0"),
+        "cache_type_v": d.get("cache_type_v", "q8_0"),
+        "flash_attn": d.get("flash_attn", "auto"),
+        "ttl": int(d.get("ttl", 3600)),
+        "mtp": d.get("mtp", "off"),
+        "fit": d.get("fit", "on"),
+        "extra": "",
+    }
+
+
 def cmd_pull(args):
     if getattr(args, "tui", False):
         run_pull_wizard(
@@ -2201,10 +2331,10 @@ def build_moe_cache_args(profile, plan=None, capabilities=None):
     if capabilities and isinstance(capabilities, dict):
         cli = capabilities.get("cli", {})
 
-    cache_bytes_flag = cli.get("cache_bytes", "--moe-cache-bytes")
-    cache_policy_flag = cli.get("cache_policy", "--moe-cache-policy")
-    admission_flag = cli.get("admission_misses", "--moe-cache-admission-misses")
-    prefill_admission_flag = cli.get("prefill_admission", "--moe-cache-prefill-admission")
+    cache_bytes_flag = cli.get("moe_cache_bytes", "--moe-cache-bytes")
+    cache_policy_flag = cli.get("moe_cache_policy", "--moe-cache-policy")
+    admission_flag = cli.get("moe_cache_admission", "--moe-cache-admission-misses")
+    prefill_admission_flag = cli.get("moe_cache_prefill", "--moe-cache-prefill-admission")
 
     args = []
 
@@ -2231,6 +2361,13 @@ def build_moe_cache_args(profile, plan=None, capabilities=None):
 
     prefill_admit = prefill_section.get("admit_to_gpu_cache", False)
     args.extend([prefill_admission_flag, "on" if prefill_admit else "off"])
+
+    # Hybrid mode: emit --moe-hybrid-mode when miss_execution is "cpu"
+    # and the backend supports it.
+    decode_section = mc.get("decode", {})
+    if decode_section.get("miss_execution") == "cpu":
+        hybrid_flag = cli.get("moe_hybrid_mode", "--moe-hybrid-mode")
+        args.extend([hybrid_flag, "on"])
 
     # Storage mode: the fork uses --no-mmap for fully-resident loading.
     # Only emit when explicitly set (mmap is the default).
@@ -2265,24 +2402,24 @@ def preflight_moe_cache(profile, capabilities=None):
         return messages
 
     features = capabilities.get("features", {})
-    if not features.get("moe_expert_cache"):
+    if not features.get("moe_weight_transfer_cache"):
         if mode == "manual":
             messages.append(("error",
                              "moe_cache mode=manual requested but backend does not "
-                             "support moe_expert_cache"))
+                             "support moe_weight_transfer_cache"))
         else:
             messages.append(("warning",
                              "moe_cache mode=auto but backend does not support "
-                             "moe_expert_cache; cache plans will be filtered"))
+                             "moe_weight_transfer_cache; cache plans will be filtered"))
         return messages
 
-    messages.append(("ok", "binary supports MoE expert cache"))
+    messages.append(("ok", "binary supports MoE weight transfer cache"))
 
     gpu_budgets = mc.get("gpu", {}).get("budgets_bytes", {})
-    if gpu_budgets and not features.get("moe_cache_sycl"):
+    if gpu_budgets and not features.get("moe_weight_transfer_cache"):
         messages.append(("warning",
                          "GPU cache budgets requested but backend lacks "
-                         "moe_cache_sycl; GPU cache plans will be skipped"))
+                         "moe_weight_transfer_cache; GPU cache plans will be skipped"))
 
     if mc.get("decode", {}).get("miss_execution") == "cpu":
         if features.get("moe_hybrid_cpu_miss"):
@@ -2290,7 +2427,8 @@ def preflight_moe_cache(profile, capabilities=None):
         else:
             messages.append(("warning",
                              "cpu miss execution requested but backend lacks "
-                             "moe_hybrid_cpu_miss; will fall back to GPU-only"))
+                             "moe_hybrid_cpu_miss; will fall back to GPU-only "
+                             "(weight transfer on cache miss)"))
 
     if mc.get("prefetch", {}).get("enabled"):
         if not features.get("moe_cache_prefetch"):
