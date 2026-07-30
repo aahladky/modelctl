@@ -1,0 +1,33 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  "instructions": ["AGENTS.md"],
+
+  "references": {
+    "llama.cpp": {
+      "path": "../llama.cpp",
+      "description": "SYCL MoE expert-cache llama.cpp fork (git submodule, branch feature/sycl-moe-expert-cache). Runtime data plane for the roadmap. Build: source llama-sycl-env.sh, then cmake --build build-sycl --target llama-server."
+    }
+  },
+
+  "permission": {
+    "edit": "allow",
+    "bash": {
+      "*": "ask",
+      "git status*": "allow",
+      "git diff*": "allow",
+      "git log*": "allow",
+      "git show*": "allow",
+      "git branch*": "allow",
+      "git submodule*": "allow",
+      ".venv/bin/python -m unittest*": "allow",
+      ".venv/bin/python -m compileall*": "allow",
+      ".venv/bin/python -m pytest*": "allow",
+      "cmake --build*": "allow",
+      "ctest*": "allow",
+      "curl *localhost*": "allow",
+      "sudo *": "deny",
+      "*drop_caches*": "deny"
+    }
+  }
+}
