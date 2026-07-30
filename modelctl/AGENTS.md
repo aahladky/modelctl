@@ -4,7 +4,7 @@ Python CLI + optional TUI/web console for managing local GGUF models on multi-GP
 
 ## Active Roadmap
 
-The current implementation plan is `docs/modelctl-task-by-task-roadmap-2026-07-29.md`. Read the relevant phase/task before implementing. Key invariants: experimental features fail closed (§2.5), one canonical launch path (§2.2), cold/warm measurements never conflated, control plane stays in Python, tensor execution stays in the `../llama.cpp` fork.
+The current implementation plan is `docs/modelctl-task-by-task-roadmap-2026-07-30.md` (supersedes the 2026-07-29 revision — the live repository had already implemented much of that plan's early/middle phases, and this revision adds a Phase 0 controlled upstream-sync/maintenance strategy ahead of further runtime work). Read the relevant phase/task before implementing. Key invariants: experimental features fail closed (§2.5), one canonical launch path (§2.2), cold/warm measurements never conflated, control plane stays in Python, tensor execution stays in the `../llama.cpp` fork.
 
 ## Setup
 
