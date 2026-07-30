@@ -86,16 +86,13 @@ rather than an immediate conflict.
   (#25042)" — an env-var rename for backend toggles. Worth double-checking
   the cache/launch code doesn't reference the old env var names anywhere.
 - No commit in this window touches SYCL device enumeration/selection
-  (`dev_mgr`, `select_device`) specifically. **I found nothing upstream that
-  explains the SYCL device-selection crash observed against the current
-  pre-sync `build-sycl` binary** (`sycl::_V1::detail::select_device`
-  throwing "No device of requested type available" in `dpct::dev_mgr::dev_mgr()`
-  — see baseline doc). Since that binary predates all 348 of these commits
-  and the crash reproduces with unset/forced `ONEAPI_DEVICE_SELECTOR` alike,
-  it looks like a local build/runtime-drift issue (stale binary vs. the
-  currently installed Level-Zero/compute-runtime stack), not something
-  upstream changed or will fix. Treat this as an open pre-existing question
-  for Task 0.5, unrelated to the sync itself.
+  (`dev_mgr`, `select_device`) specifically, and that's now moot: **resolved
+  same day** (see baseline doc update) as transient SYCL/UR adapter
+  cold-start flakiness in the session, not a real bug. Re-probing both the
+  pre-sync `build-sycl` binary and the post-sync `build-sycl-sync` binary
+  (Task 0.3) now succeeds consistently and returns byte-for-byte identical
+  capability JSON. Not something upstream changed or will fix, and not
+  something the sync caused.
 
 ## Server memory abstraction / model unload/reload paths
 
