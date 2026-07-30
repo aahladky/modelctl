@@ -2,10 +2,12 @@
 
 **Date:** July 30, 2026  
 **Revision:** Upstream synchronization and maintenance strategy integrated  
-**Source of truth:**
+**Source of truth:** local checkouts and the private `gitea` remotes are
+authoritative. GitHub is a mirror for external review only, not canonical
+(see Phase A scope correction below).
 
-- Control plane / umbrella repository: <https://github.com/aahladky/modelctl>
-- Runtime fork: <https://github.com/aahladky/llama.cpp>
+- Control plane / umbrella repository: local checkout, mirrored at <https://github.com/aahladky/modelctl>
+- Runtime fork: local checkout, mirrored at <https://github.com/aahladky/llama.cpp>
 - Runtime development branch: `feature/sycl-moe-expert-cache`
 
 **Primary goal:** Deliver a web-first, hardware-aware local model management and serving system that can acquire, inspect, place, benchmark, serve, monitor, and remove models across heterogeneous GPUs, system RAM, and storage, with practical optimization for oversized sparse-MoE models.
@@ -391,9 +393,20 @@ The feature is ported to a recent upstream base, the old state remains reproduci
 
 # Phase A — Make the umbrella repository reproducible
 
-## Task A1 — Correct repository metadata and links
+**2026-07-30 scope correction:** local state — the working tree and the
+private `gitea` remote — is the actual source of truth for this project,
+not GitHub. The public GitHub repositories (`aahladky/modelctl`,
+`aahladky/llama.cpp` — or, in the current checkout, `ggerganov/llama.cpp`
+as the upstream mirror on `origin`) exist only so others can review the
+code externally. Task A1 as originally written assumed the opposite
+priority; treat it as optional/lowest-priority polish, not a requirement,
+and don't block other phases on it. Tasks A2 (integration metadata) and A3
+(CI) still stand on their own merits regardless of which remote is
+"documented" anywhere.
 
-**Goal:** Make the GitHub repositories themselves the documented source of truth.
+## Task A1 — Correct repository metadata and links (optional, de-prioritized)
+
+**Goal (as originally written):** Make the GitHub repositories themselves the documented source of truth. **Superseded** — see scope correction above. If anyone picks this up, the goal is just "the README doesn't lie about which remote is which," not "GitHub becomes canonical."
 
 **Files:**
 
@@ -402,18 +415,15 @@ The feature is ported to a recent upstream base, the old state remains reproduci
 - `modelctl/README.md`
 - installation and contributor documentation
 
-**Work:**
+**Work (nice-to-have, not required):**
 
-- [ ] Replace stale Gitea and `moe-serving/*` references with the public GitHub repository locations.
 - [ ] Explain that the top-level repo is the integration repo and `modelctl/` contains the application source.
 - [ ] Document the runtime branch and the fact that the submodule commit, not branch head, is authoritative for a release.
-- [ ] Add clone instructions for HTTPS and SSH.
-- [ ] Add a command that verifies the submodule commit exists in the configured remote.
 - [ ] Change the product description from “CLI primary, UI for edge cases” to the intended web-first model.
 
 **Acceptance:**
 
-A new user can clone recursively, install, build the pinned runtime, start the web service, and identify exactly which runtime commit is in use without private infrastructure.
+Not gated on this task. If done, a new user reading the README understands local/gitea is authoritative and GitHub is a review mirror, without private infrastructure being a blocker to understanding that.
 
 ---
 
