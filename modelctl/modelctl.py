@@ -2111,40 +2111,12 @@ def save_profile(profile):
 # profile_version: 1 = original schema, 2 = adds moe_cache support.
 # Missing profile_version is treated as 1; migration is additive and lazy.
 
-_DEFAULT_MOE_CACHE = {
-    "mode": "off",
-    "gpu": {
-        "budgets_bytes": {},
-        "policy": "slru",
-        "probationary_fraction": 0.2,
-        "admission_misses": 2,
-        "pin_shared_experts": True,
-        "pin_static_experts": [],
-    },
-    "ram": {
-        "mode": "page_cache",
-        "budget_bytes": 0,
-        "mlock_hot_set": False,
-    },
-    "storage": {
-        "mode": "mmap",
-        "readahead": "adaptive",
-        "release_cold_pages": False,
-    },
-    "prefill": {
-        "admit_to_gpu_cache": False,
-        "protect_decode_entries": True,
-    },
-    "decode": {
-        "admit_to_gpu_cache": True,
-        "miss_execution": "cpu",
-    },
-    "prefetch": {
-        "enabled": False,
-        "method": "none",
-        "max_overfetch_ratio": 1.5,
-    },
-}
+# Single source of truth for moe_cache defaults lives in modelctl_profiles
+# (imported lazily to keep module-import cost down); do not fork a second
+# copy here.
+def _default_moe_cache():
+    from modelctl_profiles import _DEFAULT_MOE_CACHE, _deep_copy_dict as _dcd
+    return _dcd(_DEFAULT_MOE_CACHE)
 
 
 def normalize_profile(profile: dict) -> dict:
@@ -2173,10 +2145,10 @@ def normalize_profile(profile: dict) -> dict:
     # cache off.  Existing moe_cache blocks are left untouched so hand-edits
     # survive round-trips.
     if "moe_cache" not in p:
-        p["moe_cache"] = _deep_copy_dict(_DEFAULT_MOE_CACHE)
+        p["moe_cache"] = _default_moe_cache()
     else:
         mc = p["moe_cache"]
-        for section, defaults in _DEFAULT_MOE_CACHE.items():
+        for section, defaults in _default_moe_cache().items():
             if section not in mc:
                 mc[section] = _deep_copy_dict(defaults)
             elif isinstance(defaults, dict):
@@ -2213,9 +2185,34 @@ def _resolve_cache_types(cfg: dict):
     return cfg.get("cache_type_k") or legacy, cfg.get("cache_type_v") or legacy
 
 
-def build_server_args(profile):
+def _capabilities_for_profile(profile, binary=None, probe=False):
+    """Best-effort normalized capabilities for a profile's backend binary.
+
+    Default path reads the on-disk probe cache only (no subprocess), so it
+    is safe to call from preview/render paths.  probe=True runs a live
+    probe (result is cached) -- use it on paths that generate real launch
+    artifacts.  Returns None when nothing is known about the binary, in
+    which case callers must fail closed for experimental features."""
+    try:
+        import modelctl_capabilities
+        bin_ = binary or profile.get("binary") or LLAMA_SERVER_BIN
+        if not bin_:
+            return None
+        if probe:
+            return modelctl_capabilities.probe_backend(bin_)
+        return modelctl_capabilities.get_cached_capabilities(bin_)
+    except Exception:
+        return None
+
+
+def build_server_args(profile, capabilities=None):
     """Return a flat list of llama-server CLI tokens. Values with spaces are
-    kept as single tokens so callers don't have to re-tokenize with shlex."""
+    kept as single tokens so callers don't have to re-tokenize with shlex.
+
+    capabilities: normalized schema-2 capabilities for the backend binary.
+    When omitted and the profile has moe_cache enabled, the probe cache is
+    consulted; if nothing is known, experimental cache flags fail closed
+    (omitted)."""
     cfg = profile["config"]
     # fit="on" profiles (tier-1 zero-config pulls) let llama.cpp's --fit size
     # ngl AND context to whatever actually fits at load time. Both must be
@@ -2264,8 +2261,13 @@ def build_server_args(profile):
         # if cmd_pull captured one, tell llama-server to load it as the draft.
         if profile.get("mtp_path"):
             args.extend(["--spec-draft-model", str(profile["mtp_path"])])
-    # MoE expert cache flags from structured moe_cache settings.
-    moe_cache_args = build_moe_cache_args(profile)
+    # MoE expert cache flags from structured moe_cache settings.  Fail
+    # closed: build_moe_cache_args only emits experimental flags when the
+    # capabilities say the backend supports them.
+    if (capabilities is None
+            and profile.get("moe_cache", {}).get("mode", "off") != "off"):
+        capabilities = _capabilities_for_profile(profile)
+    moe_cache_args = build_moe_cache_args(profile, capabilities=capabilities)
     args.extend(moe_cache_args)
     if cfg.get("extra"):
         # Extra is a raw string the user typed; split it safely to preserve
@@ -2305,9 +2307,12 @@ def build_moe_cache_args(profile, plan=None, capabilities=None):
     When a plan carries cache-specific overrides (from the launch-plan
     compiler), those override the profile defaults.  The capabilities
     dict (from modelctl_capabilities.probe_backend) supplies the
-    flag names so we don't hard-code fork-specific names forever.
+    feature gates and flag names so we don't hard-code fork-specific
+    names forever.
 
-    Returns an empty list when moe_cache is off or unsupported.
+    Returns an empty list when moe_cache is off.  When the backend is
+    unprobed or lacks moe_weight_transfer_cache, experimental flags fail
+    closed and only the stock --metrics flag is emitted.
     """
     mc = profile.get("moe_cache", {})
     mode = mc.get("mode", "off")
@@ -2320,16 +2325,25 @@ def build_moe_cache_args(profile, plan=None, capabilities=None):
         plan_mc = plan.decision_data.get("moe_cache", {})
 
     # Resolve effective settings: plan overrides > profile > defaults.
-    # (decode.miss_execution has no fork CLI flag, so no decode section here.)
     gpu_section = {**mc.get("gpu", {}), **plan_mc.get("gpu", {})}
     prefill_section = {**mc.get("prefill", {}), **plan_mc.get("prefill", {})}
     storage_section = {**mc.get("storage", {}), **plan_mc.get("storage", {})}
+    decode_section = {**mc.get("decode", {}), **plan_mc.get("decode", {})}
 
-    # If capabilities are available, use their flag names; otherwise use
-    # the established defaults from the llama.cpp RFC / fork.
-    cli = {}
-    if capabilities and isinstance(capabilities, dict):
-        cli = capabilities.get("cli", {})
+    features = capabilities.get("features", {}) if isinstance(capabilities, dict) else {}
+    cli = capabilities.get("cli", {}) if isinstance(capabilities, dict) else {}
+
+    # The web console scrapes moe_cache_* from the server's Prometheus
+    # endpoint; without --metrics llama-server doesn't serve /metrics at
+    # all (501) and the runtime cache column is permanently blank.
+    # --metrics is a stock flag, not experimental, so it is emitted even
+    # when the cache itself must fail closed.
+    metrics_args = ["--metrics"]
+
+    # Fail closed (roadmap §2.5): an unprobed, stale, or incapable backend
+    # must never receive experimental cache flags.
+    if not features.get("moe_weight_transfer_cache"):
+        return metrics_args
 
     cache_bytes_flag = cli.get("moe_cache_bytes", "--moe-cache-bytes")
     cache_policy_flag = cli.get("moe_cache_policy", "--moe-cache-policy")
@@ -2362,10 +2376,12 @@ def build_moe_cache_args(profile, plan=None, capabilities=None):
     prefill_admit = prefill_section.get("admit_to_gpu_cache", False)
     args.extend([prefill_admission_flag, "on" if prefill_admit else "off"])
 
-    # Hybrid mode: emit --moe-hybrid-mode when miss_execution is "cpu"
-    # and the backend supports it.
-    decode_section = mc.get("decode", {})
-    if decode_section.get("miss_execution") == "cpu":
+    # Hybrid mode: emit --moe-hybrid-mode only when miss_execution is "cpu"
+    # AND the backend genuinely implements CPU miss execution.  The
+    # capability is fail-closed in normalization, so an unprobed or
+    # incapable backend never sees the flag.
+    if (decode_section.get("miss_execution") == "cpu"
+            and features.get("moe_hybrid_cpu_miss")):
         hybrid_flag = cli.get("moe_hybrid_mode", "--moe-hybrid-mode")
         args.extend([hybrid_flag, "on"])
 
@@ -2375,16 +2391,17 @@ def build_moe_cache_args(profile, plan=None, capabilities=None):
     if storage_mode == "mlock":
         args.extend(["--no-mmap"])
 
-    # The web console scrapes moe_cache_* from the server's Prometheus
-    # endpoint; without --metrics llama-server doesn't serve /metrics at
-    # all (501) and the runtime cache column is permanently blank.
-    args.append("--metrics")
-
+    args.extend(metrics_args)
     return args
 
 
 def preflight_moe_cache(profile, capabilities=None):
     """Validate moe_cache settings against backend capabilities.
+
+    Fail closed (roadmap §2.5): an unsupported, unprobed, stale, or
+    contradictory backend must never receive experimental cache flags.
+    Automatic mode omits the candidate (warning); manual mode blocks with
+    an explicit reason (error).
 
     Returns a list of (level, message) tuples where level is 'ok',
     'warning', or 'error'.  Errors prevent launch; warnings are advisory.
@@ -2395,45 +2412,47 @@ def preflight_moe_cache(profile, capabilities=None):
     if mode == "off":
         return messages
 
+    def _omit_or_block(warn_msg, err_msg):
+        if mode == "manual":
+            messages.append(("error", err_msg))
+        else:
+            messages.append(("warning", warn_msg))
+
     if capabilities is None:
-        messages.append(("warning",
-                         "moe_cache requested but backend capabilities unknown; "
-                         "cache flags will be emitted without validation"))
+        _omit_or_block(
+            "moe_cache requested but backend capabilities are unknown "
+            "(unprobed); cache flags are suppressed",
+            "moe_cache mode=manual requested but backend capabilities are "
+            "unknown (unprobed); refusing to emit experimental cache flags")
         return messages
 
     features = capabilities.get("features", {})
     if not features.get("moe_weight_transfer_cache"):
-        if mode == "manual":
-            messages.append(("error",
-                             "moe_cache mode=manual requested but backend does not "
-                             "support moe_weight_transfer_cache"))
-        else:
-            messages.append(("warning",
-                             "moe_cache mode=auto but backend does not support "
-                             "moe_weight_transfer_cache; cache plans will be filtered"))
+        _omit_or_block(
+            "moe_cache mode=auto but backend does not support "
+            "moe_weight_transfer_cache; cache plans will be filtered",
+            "moe_cache mode=manual requested but backend does not support "
+            "moe_weight_transfer_cache")
         return messages
 
     messages.append(("ok", "binary supports MoE weight transfer cache"))
-
-    gpu_budgets = mc.get("gpu", {}).get("budgets_bytes", {})
-    if gpu_budgets and not features.get("moe_weight_transfer_cache"):
-        messages.append(("warning",
-                         "GPU cache budgets requested but backend lacks "
-                         "moe_weight_transfer_cache; GPU cache plans will be skipped"))
 
     if mc.get("decode", {}).get("miss_execution") == "cpu":
         if features.get("moe_hybrid_cpu_miss"):
             messages.append(("ok", "hybrid CPU miss execution available"))
         else:
-            messages.append(("warning",
-                             "cpu miss execution requested but backend lacks "
-                             "moe_hybrid_cpu_miss; will fall back to GPU-only "
-                             "(weight transfer on cache miss)"))
+            _omit_or_block(
+                "cpu miss execution requested but backend lacks "
+                "moe_hybrid_cpu_miss; hybrid flag omitted, decode misses "
+                "use GPU weight transfer",
+                "decode.miss_execution=cpu requested but backend lacks "
+                "moe_hybrid_cpu_miss")
 
     if mc.get("prefetch", {}).get("enabled"):
         if not features.get("moe_cache_prefetch"):
-            messages.append(("warning",
-                             "prefetch requested but unsupported; prefetch plan omitted"))
+            _omit_or_block(
+                "prefetch requested but unsupported; prefetch plan omitted",
+                "prefetch requested but backend lacks moe_cache_prefetch")
 
     return messages
 
@@ -2491,7 +2510,11 @@ def render_llama_swap_entry(profile):
         return _render_worker_entry(profile, ok, effective_env, messages)
 
     ok, effective_bin, effective_env, messages = preflight(profile, auto_fix=True)
-    args = build_server_args(profile)
+    caps = _capabilities_for_profile(profile, effective_bin, probe=True)
+    cache_msgs = preflight_moe_cache(profile, capabilities=caps)
+    messages = list(messages) + [f"moe_cache {lvl}: {m}" for lvl, m in cache_msgs
+                                 if lvl != "ok"]
+    args = build_server_args(profile, capabilities=caps)
     # The cmd: block scalar is a *shell* command line, so quote for the
     # shell (shlex), not YAML -- json.dumps-style double quotes would leave
     # `$` and backticks live inside the string.
@@ -2625,12 +2648,18 @@ def generate_artifacts(profile):
         for m in messages:
             print(f"  {m}")
 
-    args = build_server_args(profile)
-    # An earlier version of this line called a helper that already joined
-    # `args` into one string, then .join()-ed *that string* again here --
-    # str.join() on a string iterates its characters, so every argument got
-    # split one letter per line in the generated run.sh. Map shlex.quote over
-    # each token individually instead, same as render_llama_swap_entry.
+    # Validate cache settings against the real binary (probe is cached);
+    # unprobed/incapable backends fail closed -- no experimental flags in
+    # the generated artifacts.
+    caps = _capabilities_for_profile(profile, effective_bin, probe=True)
+    cache_msgs = preflight_moe_cache(profile, capabilities=caps)
+    for level, msg in cache_msgs:
+        if level != "ok":
+            print(f"  moe_cache {level}: {msg}")
+    args = build_server_args(profile, capabilities=caps)
+    # Map shlex.quote over each token individually -- joining an already-
+    # joined string would iterate its characters and split every argument
+    # one letter per line in the generated run.sh.
     args_str = " \\\n  ".join(shlex.quote(str(a)) for a in args)
     env_exports = "\n".join(f"export {k}={shlex.quote(v)}" for k, v in effective_env.items())
 
@@ -3535,8 +3564,19 @@ def smoke_test_profile(name, timeout=600, prompt=None, proc_register=None):
     if not ok:
         return result
 
+    # Block the launch when cache validation fails (manual mode against an
+    # incapable/unprobed backend) rather than firing an untruthful command.
+    caps = _capabilities_for_profile(profile, effective_bin, probe=True)
+    cache_msgs = preflight_moe_cache(profile, capabilities=caps)
+    cache_errors = [m for lvl, m in cache_msgs if lvl == "error"]
+    result["messages"].extend(f"moe_cache {lvl}: {m}" for lvl, m in cache_msgs
+                              if lvl != "ok")
+    if cache_errors:
+        return result
+
     port = find_free_port()
-    cmd = [effective_bin, "--port", str(port)] + build_server_args(profile)
+    cmd = [effective_bin, "--port", str(port)] + build_server_args(
+        profile, capabilities=caps)
     env = dict(os.environ)
     env.update(effective_env)
 

@@ -121,7 +121,7 @@ class TestReleaseBHybridPlans(unittest.TestCase):
                 "cli": {},
             }
             plans = modelctl_plans.compile_launch_plans(
-                profile, self._mock_hardware())
+                profile, self._mock_hardware(), include_experimental=True)
 
         hybrid_plans = [p for p in plans if p.source.startswith("hybrid-")]
         self.assertTrue(hybrid_plans,
@@ -164,11 +164,53 @@ class TestReleaseBHybridPlans(unittest.TestCase):
                 "cli": {},
             }
             plans = modelctl_plans.compile_launch_plans(
-                profile, self._mock_hardware())
+                profile, self._mock_hardware(), include_experimental=True)
 
         hybrid_plans = [p for p in plans if p.source.startswith("hybrid-")]
         self.assertFalse(hybrid_plans,
                          "hybrid plans generated despite missing capability")
+
+    def test_no_experimental_plans_without_opt_in(self):
+        """Task 5.8: cache/hybrid variants stay disabled by default, even
+        when the profile enables moe_cache and the binary is capable."""
+        profile = modelctl.normalize_profile({
+            "name": "test-moe",
+            "model_path": "/tmp/huge-moe.gguf",
+            "config": {"ctx": 8192, "flash_attn": "auto", "fit": "off",
+                       "mtp": "off", "extra": ""},
+            "moe_cache": {
+                "mode": "manual",
+                "gpu": {"budgets_bytes": {"SYCL0": 4 * (1 << 30)}},
+                "decode": {"miss_execution": "cpu"},
+            },
+        })
+        modelctl.save_profile(profile)
+
+        with mock.patch("modelctl_capabilities.probe_backend") as mock_caps, \
+             mock.patch("modelctl_vram.weights_bytes_on_disk", return_value=80 << 30), \
+             mock.patch("modelctl_vram.estimate_from_parts",
+                       return_value={"total": 80 << 30, "kv_bytes": 2 << 30,
+                                     "overhead": 2 << 30}), \
+             mock.patch("modelctl_vram.file_fingerprint", return_value="abc"), \
+             mock.patch("modelctl.load_defaults",
+                       return_value={"vram_limit_pct": 90}), \
+             mock.patch("modelctl.get_gpu_inventory", return_value=[]), \
+             mock.patch("modelctl_hardware.load_settings", return_value={}):
+            mock_caps.return_value = {
+                "schema": 2,
+                "features": {
+                    "moe_weight_transfer_cache": True,
+                    "moe_hybrid_cpu_miss": True,
+                },
+                "cli": {},
+            }
+            plans = modelctl_plans.compile_launch_plans(
+                profile, self._mock_hardware())
+
+        experimental = [p for p in plans
+                        if p.source.startswith(("hybrid-", "cache-"))]
+        self.assertFalse(experimental,
+                         "experimental plans generated without opt-in")
 
 
 class TestReleaseBHybridPreflight(unittest.TestCase):
@@ -207,6 +249,26 @@ class TestReleaseBHybridPreflight(unittest.TestCase):
         msgs = modelctl.preflight_moe_cache(profile, capabilities=caps)
         warnings = [m for m in msgs if m[0] == "warning"]
         self.assertTrue(any("hybrid" in m[1].lower() for m in warnings))
+
+    def test_hybrid_errors_when_unsupported_manual(self):
+        """§2.5: manual mode blocks with an explicit reason when hybrid is
+        requested but the backend lacks moe_hybrid_cpu_miss."""
+        profile = {
+            "moe_cache": {
+                "mode": "manual",
+                "decode": {"miss_execution": "cpu"},
+            }
+        }
+        caps = {
+            "features": {
+                "moe_weight_transfer_cache": True,
+                "moe_hybrid_cpu_miss": False,
+            }
+        }
+        msgs = modelctl.preflight_moe_cache(profile, capabilities=caps)
+        errors = [m for m in msgs if m[0] == "error"]
+        self.assertTrue(any("hybrid" in m[1].lower() or
+                            "miss_execution" in m[1] for m in errors))
 
 
 class TestReleaseBHybridMetrics(unittest.TestCase):

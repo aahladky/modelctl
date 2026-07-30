@@ -248,3 +248,56 @@ class TestReleaseAImportLocal(unittest.TestCase):
         path.write_bytes(b"not a gguf")
         result = modelctl.import_local(str(path))
         self.assertIsNone(result)
+
+
+class TestReleaseAColdWarmSeparation(unittest.TestCase):
+    """Req (Task 6.2, §13): cold and warm measurements are persisted with
+    their cache state and never conflated in ranking observations."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        import modelctl_runtime
+        self.rdb = modelctl_runtime.RuntimeDB(
+            db_path=Path(self.tmp.name) / "runtime.db")
+
+    def _run(self, plan_id, cache_state, gen_tps, started):
+        return {"profile_name": "m", "plan_id": plan_id,
+                "hardware_fingerprint": "hw", "backend_fingerprint": "be",
+                "started_at": started, "finished_at": started + 1,
+                "success": True, "generation_tps": gen_tps,
+                "cache_state": cache_state}
+
+    def test_cache_state_persisted(self):
+        self.rdb.record_plan_run(self._run("p1", "warm", 42.0, 100))
+        rows = self.rdb.plan_runs_for("m")
+        self.assertEqual(rows[0]["cache_state"], "warm")
+
+    def test_legacy_rows_default_empty_state(self):
+        run = self._run("p1", "", 42.0, 100)
+        run.pop("cache_state")
+        self.rdb.record_plan_run(run)
+        rows = self.rdb.plan_runs_for("m")
+        self.assertEqual(rows[0]["cache_state"], "")
+
+    def test_observations_never_mix_cold_and_warm(self):
+        # Plan A only measured warm, plan B only measured cold: equal
+        # coverage, so the conservative (cold) state wins and plan A is
+        # untested rather than ranked on an incomparable warm number.
+        self.rdb.record_plan_run(self._run("a", "warm", 50.0, 100))
+        self.rdb.record_plan_run(self._run("b", "cold", 10.0, 101))
+        obs = self.rdb.observations_for_profile("m")
+        self.assertNotIn("a", obs)
+        self.assertIn("b", obs)
+        self.assertEqual(obs["b"]["cache_state"], "cold")
+
+    def test_observations_prefer_full_coverage_state(self):
+        # Both plans have warm observations; plan B also has a colder one.
+        # Warm has full coverage, so it is the comparison basis.
+        self.rdb.record_plan_run(self._run("a", "warm", 50.0, 100))
+        self.rdb.record_plan_run(self._run("b", "cold", 10.0, 101))
+        self.rdb.record_plan_run(self._run("b", "warm", 45.0, 102))
+        obs = self.rdb.observations_for_profile("m")
+        self.assertEqual(set(obs), {"a", "b"})
+        self.assertTrue(all(o["cache_state"] == "warm" for o in obs.values()))
+        self.assertEqual(obs["b"]["generation_tps"], 45.0)

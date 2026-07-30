@@ -87,6 +87,10 @@ _MIGRATIONS = [
     ("decision_json", "TEXT NOT NULL DEFAULT '{}'", "{}"),
     ("parent_job_id", "TEXT", None),
     ("fallback_ordinal", "INTEGER", None),
+    # Cold/warm separation (Task 6.2): measurements carry their cache
+    # state ("cold"/"warm"/"" for legacy rows) and ranking never compares
+    # across states.
+    ("cache_state", "TEXT NOT NULL DEFAULT ''", ""),
 ]
 
 
@@ -289,8 +293,9 @@ class RuntimeDB:
                 "peak_ram_bytes, actual_context, exit_code, log_path, details_json, "
                 "command_fingerprint, command_argv_json, binary_path, binary_fingerprint, "
                 "environment_fingerprint, capability_schema, capability_digest, "
-                "claim_json, decision_json, parent_job_id, fallback_ordinal) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "claim_json, decision_json, parent_job_id, fallback_ordinal, "
+                "cache_state) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (run["profile_name"], run["plan_id"],
                  run.get("hardware_fingerprint", ""), run.get("backend_fingerprint", ""),
                  run.get("started_at", time.time()), run.get("finished_at"),
@@ -311,7 +316,8 @@ class RuntimeDB:
                  json.dumps(run.get("claim", {})),
                  json.dumps(run.get("decision", {})),
                  run.get("parent_job_id"),
-                 run.get("fallback_ordinal")))
+                 run.get("fallback_ordinal"),
+                 run.get("cache_state", "")))
             return c.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     def plan_runs_for(self, profile_name, plan_id=None, limit=50):
@@ -326,23 +332,43 @@ class RuntimeDB:
                                  backend_fingerprint=""):
         """Latest successful measurement per plan, keyed by plan_id, shaped
         for rank_plans' `observations` argument. Includes a `stale` flag when
-        the run's fingerprints don't match the current environment."""
-        out = {}
+        the run's fingerprints don't match the current environment.
+
+        Cold and warm measurements are never conflated: a single cache_state
+        is chosen for the whole profile (the state with the widest plan
+        coverage, ties prefer the colder/conservative state), and only plans
+        with a successful run in that state get an observation. Legacy rows
+        and serving runs have cache_state "" — semantically "unknown" — and
+        are bucketed with "cold" (the conservative interpretation) rather
+        than forming a third state that could shadow real measurements."""
         with self._conn() as c:
             rows = c.execute(
                 "SELECT * FROM plan_runs WHERE profile_name=? AND success=1 "
                 "ORDER BY started_at DESC", (profile_name,)).fetchall()
+        # Newest successful run per (cache_state, plan_id); rows are
+        # newest-first so the first sighting of a plan wins.
+        by_state = {}
         for r in rows:
             d = dict(r)
-            if d["plan_id"] in out:
-                continue  # newest first
+            state = d.get("cache_state") or "cold"
+            plans_for_state = by_state.setdefault(state, {})
+            if d["plan_id"] not in plans_for_state:
+                plans_for_state[d["plan_id"]] = d
+        if not by_state:
+            return {}
+        chosen_state = sorted(
+            by_state,
+            key=lambda s: (-len(by_state[s]), 0 if s == "cold" else 1))[0]
+        out = {}
+        for plan_id, d in by_state[chosen_state].items():
             stale = ((hardware_fingerprint and d["hardware_fingerprint"] != hardware_fingerprint)
                      or (backend_fingerprint and d["backend_fingerprint"] != backend_fingerprint))
-            out[d["plan_id"]] = {
+            out[plan_id] = {
                 "generation_tps": d["generation_tps"],
                 "prompt_tps": d["prompt_tps"],
                 "load_seconds": d["load_seconds"],
                 "actual_context": d["actual_context"],
+                "cache_state": d.get("cache_state") or "cold",
                 "stale": bool(stale),
                 "run_id": d["id"],
                 "measured_at": d["started_at"],

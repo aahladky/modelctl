@@ -95,9 +95,11 @@ def resolve_backend(profile: dict, binary_override: str | None = None) -> Resolv
     # Resolve oneAPI environment for SYCL builds.
     env = dict(os.environ)
     profile_env = profile.get("env") or []
+    profile_env_vars = {}
     for entry in profile_env:
         if "=" in entry:
             k, v = entry.split("=", 1)
+            profile_env_vars[k] = v
             env[k] = v
 
     # If the binary is a SYCL build, it may need oneAPI env scripts.
@@ -114,10 +116,19 @@ def resolve_backend(profile: dict, binary_override: str | None = None) -> Resolv
             pass
 
     binary_fp = modelctl_vram.file_fingerprint(binary)
-    env_fp = _env_fingerprint(env)
+    # Fingerprint only the profile-declared environment, not the whole
+    # process env: unrelated shell changes (SSH vars, locale) must not
+    # mass-stale observations keyed to this fingerprint.
+    env_fp = _env_fingerprint(profile_env_vars)
 
-    # Probe capabilities.
-    caps = modelctl_capabilities.probe_backend(binary)
+    # Probe capabilities.  Only llama-cpp binaries speak
+    # --modelctl-capabilities; other backends get an empty (fail-closed)
+    # capability set.
+    if backend_name == "llama-cpp":
+        caps = modelctl_capabilities.probe_backend(binary)
+    else:
+        caps = {"schema": 0, "backend": backend_name, "build": "",
+                "features": {}, "cli": {}, "_probe_status": "unsupported"}
 
     return ResolvedBackend(
         name=backend_name,
@@ -148,25 +159,27 @@ def build_launch_command(
     warnings = []
     validation = []
 
-    # Run preflight checks.
-    ok, effective_bin, effective_env, preflight_msgs = modelctl.preflight(
-        profile, auto_fix=True)
+    if backend.name == "llama-cpp":
+        # Run preflight checks (llama-cpp specific: binary resolution,
+        # oneAPI env, model file presence).
+        ok, effective_bin, effective_env, preflight_msgs = modelctl.preflight(
+            profile, auto_fix=True)
 
-    # Validate cache configuration against capabilities.
-    cache_msgs = modelctl.preflight_moe_cache(
-        profile, capabilities=backend.capabilities)
-    validation.extend(from_preflight_tuples(cache_msgs))
+        # Validate cache configuration against capabilities.
+        cache_msgs = modelctl.preflight_moe_cache(
+            profile, capabilities=backend.capabilities)
+        validation.extend(from_preflight_tuples(cache_msgs))
 
-    # Convert legacy preflight messages.
-    for severity, summary in preflight_msgs:
-        if severity == "warning":
-            warnings.append(summary)
-        elif severity == "error":
-            validation.append(ValidationMessage(
-                code="backend_feature_missing",
-                severity="error",
-                summary=summary,
-            ))
+        # Convert legacy preflight messages.
+        for severity, summary in preflight_msgs:
+            if severity == "warning":
+                warnings.append(summary)
+            elif severity == "error":
+                validation.append(ValidationMessage(
+                    code="backend_feature_missing",
+                    severity="error",
+                    summary=summary,
+                ))
 
     # Build the command argv.
     from modelctl_backends import get_backend

@@ -365,11 +365,26 @@ def submit_matrix_apply(runner):
 
 
 def submit_moe_cache(runner, name, moe_cache):
-    """Save moe_cache section for a profile, regenerate artifacts, and sync."""
+    """Save moe_cache section for a profile, regenerate artifacts, and sync.
+
+    Validates against probed backend capabilities first (fail closed):
+    error-level results (e.g. manual mode on an incapable or unprobed
+    binary) reject the save instead of writing a profile whose flags the
+    backend cannot honor."""
     def fn(ctx):
         profile = modelctl.load_profile(name)
-        ctx.log(f"updating moe_cache for '{name}': mode={moe_cache.get('mode', 'off')}")
         profile["moe_cache"] = moe_cache
+        ctx.log(f"updating moe_cache for '{name}': mode={moe_cache.get('mode', 'off')}")
+        import modelctl_capabilities
+        binary = profile.get("binary") or modelctl.LLAMA_SERVER_BIN
+        caps = modelctl_capabilities.probe_backend(binary) if binary else None
+        msgs = modelctl.preflight_moe_cache(profile, capabilities=caps)
+        for lvl, msg in msgs:
+            if lvl == "warning":
+                ctx.log(f"warning: {msg}")
+        errors = [msg for lvl, msg in msgs if lvl == "error"]
+        if errors:
+            raise RuntimeError("moe_cache validation failed: " + "; ".join(errors))
         modelctl.save_profile(profile)
         modelctl.generate_artifacts(profile)
         modelctl.sync_all_backends(restart_router=True, restart_openarc=True)

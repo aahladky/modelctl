@@ -1294,7 +1294,8 @@ class TestCacheVariants(WebTestBase):
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
-        return modelctl_plans.compile_launch_plans(profile, self._mock_hardware())
+        return modelctl_plans.compile_launch_plans(profile, self._mock_hardware(),
+                                                   include_experimental=True)
 
     def test_variants_emit_single_structured_budget(self):
         plans = self._compile(self._profile())
@@ -1359,7 +1360,8 @@ class TestCacheVariants(WebTestBase):
              mock.patch("modelctl.get_gpu_inventory", return_value=[]), \
              mock.patch("modelctl_hardware.load_settings", return_value={}):
             plans = modelctl_plans.compile_launch_plans(self._profile(),
-                                                        self._mock_hardware())
+                                                        self._mock_hardware(),
+                                                        include_experimental=True)
         small = next(p for p in plans if p.source == "cache-small")
         i = list(small.argv).index("--moe-cache-bytes")
         # 50% limit, not the old hardcoded 0.9
@@ -1425,3 +1427,77 @@ class TestTierApplyCacheWriteback(WebTestBase):
         plan = dict(self.PLAN, cache_budgets=effective)
         saved = self._apply(plan)
         self.assertEqual(saved["moe_cache"]["gpu"]["budgets_bytes"], effective)
+
+
+class TestMoeCacheRouteValidation(WebTestBase):
+    """submit_moe_cache validates against probed capabilities (fail closed)
+    before saving the profile."""
+
+    def test_manual_cache_rejected_on_incapable_backend(self):
+        with mock.patch("modelctl_capabilities.probe_backend",
+                        return_value={"schema": 2, "features": {}, "cli": {}}), \
+             mock.patch.object(modelctl, "save_profile") as save, \
+             mock.patch.object(modelctl, "generate_artifacts"), \
+             mock.patch.object(modelctl, "sync_all_backends"):
+            resp = self.client.post("/profiles/m1/moe-cache", headers=self.auth,
+                                    data={"mode": "manual"},
+                                    follow_redirects=False)
+            job_id = resp.headers["location"].split("/jobs/")[1].split("?")[0]
+            job = self.wait_job(job_id)
+        self.assertEqual(job["status"], "failed")
+        save.assert_not_called()
+
+    def test_auto_cache_saves_despite_incapable_backend(self):
+        # auto mode omits the candidate with a warning, it does not block.
+        with mock.patch("modelctl_capabilities.probe_backend",
+                        return_value={"schema": 2, "features": {}, "cli": {}}), \
+             mock.patch.object(modelctl, "save_profile") as save, \
+             mock.patch.object(modelctl, "generate_artifacts"), \
+             mock.patch.object(modelctl, "sync_all_backends"):
+            resp = self.client.post("/profiles/m1/moe-cache", headers=self.auth,
+                                    data={"mode": "auto"},
+                                    follow_redirects=False)
+            job_id = resp.headers["location"].split("/jobs/")[1].split("?")[0]
+            job = self.wait_job(job_id)
+        self.assertEqual(job["status"], "done")
+        save.assert_called_once()
+
+
+class TestBaselinePlanCapabilities(WebTestBase):
+    """M1 regression: baseline plan argv is compiled against the same
+    probed capabilities that launch-time validation will see."""
+
+    def _mock_hardware(self):
+        from modelctl_hardware import HardwareSnapshot, GpuSnapshot
+        return HardwareSnapshot(
+            captured_at=1000.0, fingerprint="test",
+            gpus=(GpuSnapshot("SYCL0", "B70", 32 << 30, 30 << 30, 0, True,
+                              "primary", 608),),
+            ram_total_bytes=64 << 30, ram_available_bytes=50 << 30,
+            ram_reserve_bytes=0, storage=(), backend_fingerprints={})
+
+    def test_current_profile_plan_includes_cache_flags_when_capable(self):
+        import modelctl_plans
+        profile = {"name": "m1", "backend": "llama-cpp",
+                   "model_path": "/nonexistent",
+                   "config": {"device": "SYCL0", "split_mode": "",
+                              "tensor_split": "", "ctx": 32768,
+                              "cache_type_k": "q8_0", "cache_type_v": "q8_0",
+                              "fit": "on", "extra": "", "flash_attn": "auto",
+                              "ttl": 3600, "mtp": "off"},
+                   "moe_cache": {"mode": "manual",
+                                 "gpu": {"budgets_bytes": {"SYCL0": 4 << 30},
+                                         "policy": "slru",
+                                         "admission_misses": 2}}}
+        with mock.patch("modelctl_capabilities.probe_backend",
+                        return_value={"features":
+                                      {"moe_weight_transfer_cache": True}}), \
+             mock.patch("modelctl.load_defaults",
+                        return_value={"vram_limit_pct": 90,
+                                      "primary_gpu": "SYCL0"}), \
+             mock.patch("modelctl.get_gpu_inventory", return_value=[]), \
+             mock.patch("modelctl_hardware.load_settings", return_value={}):
+            plans = modelctl_plans.compile_launch_plans(
+                profile, self._mock_hardware())
+        base = next(p for p in plans if p.source == "current-profile")
+        self.assertEqual(list(base.argv).count("--moe-cache-bytes"), 1)

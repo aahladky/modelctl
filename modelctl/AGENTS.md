@@ -2,6 +2,10 @@
 
 Python CLI + optional TUI/web console for managing local GGUF models on multi-GPU Intel SYCL workstations.
 
+## Active Roadmap
+
+The current implementation plan is `modelctl-task-by-task-roadmap-2026-07-29.md`. Read the relevant phase/task before implementing. Key invariants: experimental features fail closed (§2.5), one canonical launch path (§2.2), cold/warm measurements never conflated, control plane stays in Python, tensor execution stays in the `../llama.cpp` fork.
+
 ## Setup
 
 ```bash

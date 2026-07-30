@@ -62,7 +62,10 @@ _DEFAULT_MOE_CACHE = {
     },
     "decode": {
         "admit_to_gpu_cache": True,
-        "miss_execution": "cpu",
+        # "gpu" = weight transfer on cache miss (works on any cache-capable
+        # fork).  "cpu" = hybrid CPU miss execution, which no shipping
+        # backend implements yet; opt in explicitly, never by default.
+        "miss_execution": "gpu",
     },
     "prefetch": {
         "enabled": False,

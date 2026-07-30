@@ -125,3 +125,75 @@ class TestResolveBackend(unittest.TestCase):
                            return_value=[]):
                 backend = modelctl_launch.resolve_backend(profile)
             self.assertTrue(backend.capabilities["features"]["moe_weight_transfer_cache"])
+
+
+class TestBuildLaunchCommandValidation(unittest.TestCase):
+    """The canonical launch object carries fail-closed validation that
+    workers and plan tests must enforce."""
+
+    def _profile(self, mode="manual"):
+        return {
+            "name": "m", "backend": "llama-cpp",
+            "model_path": "/m.gguf",
+            "config": {"device": "", "split_mode": "", "tensor_split": "",
+                       "ctx": 8192, "flash_attn": "auto", "fit": "on",
+                       "mtp": "off", "extra": "", "ttl": 3600},
+            "moe_cache": {"mode": mode,
+                          "gpu": {"budgets_bytes": {"SYCL0": 1 << 30}},
+                          "decode": {"miss_execution": "cpu"}},
+        }
+
+    def _backend(self, features):
+        return modelctl_launch.ResolvedBackend(
+            name="llama-cpp", binary="/bin/llama-server",
+            binary_fingerprint="abc", environment={},
+            environment_fingerprint="def",
+            capabilities={"schema": 2, "features": features, "cli": {}})
+
+    class _Plan:
+        id = "plan1"
+        env = {}
+
+    def test_manual_cache_on_incapable_backend_is_error(self):
+        import modelctl
+        backend = self._backend({"moe_weight_transfer_cache": False,
+                                 "moe_hybrid_cpu_miss": False})
+        with mock.patch.object(modelctl, "preflight",
+                               return_value=(True, "/bin/llama-server", {}, [])), \
+             mock.patch("modelctl_backends.get_backend") as gb:
+            gb.return_value.build_command.return_value = ["/bin/llama-server"]
+            cmd = modelctl_launch.build_launch_command(
+                self._profile("manual"), self._Plan(), backend=backend, port=8080)
+        errors = [v for v in cmd.validation if v.severity == "error"]
+        self.assertTrue(errors, "manual cache on incapable backend not blocked")
+
+    def test_auto_cache_on_incapable_backend_is_warning(self):
+        import modelctl
+        backend = self._backend({"moe_weight_transfer_cache": False,
+                                 "moe_hybrid_cpu_miss": False})
+        with mock.patch.object(modelctl, "preflight",
+                               return_value=(True, "/bin/llama-server", {}, [])), \
+             mock.patch("modelctl_backends.get_backend") as gb:
+            gb.return_value.build_command.return_value = ["/bin/llama-server"]
+            cmd = modelctl_launch.build_launch_command(
+                self._profile("auto"), self._Plan(), backend=backend, port=8080)
+        self.assertFalse([v for v in cmd.validation if v.severity == "error"])
+        self.assertTrue([v for v in cmd.validation if v.severity == "warning"])
+
+    def test_environment_fingerprint_ignores_process_env(self):
+        # Only profile-declared env feeds the fingerprint: unrelated shell
+        # changes must not mass-stale observations.
+        with mock.patch("modelctl_capabilities.probe_backend",
+                        return_value={"schema": 2, "features": {}, "cli": {}}), \
+             mock.patch("modelctl_vram.file_fingerprint", return_value="fp"), \
+             mock.patch("modelctl.find_env_script_candidates", return_value=[]), \
+             mock.patch.dict("os.environ", {"SSH_AUTH_SOCK": "/tmp/a"}):
+            b1 = modelctl_launch.resolve_backend(self._profile())
+        with mock.patch("modelctl_capabilities.probe_backend",
+                        return_value={"schema": 2, "features": {}, "cli": {}}), \
+             mock.patch("modelctl_vram.file_fingerprint", return_value="fp"), \
+             mock.patch("modelctl.find_env_script_candidates", return_value=[]), \
+             mock.patch.dict("os.environ", {"SSH_AUTH_SOCK": "/tmp/b",
+                                            "RANDOM_VAR": "x"}):
+            b2 = modelctl_launch.resolve_backend(self._profile())
+        self.assertEqual(b1.environment_fingerprint, b2.environment_fingerprint)

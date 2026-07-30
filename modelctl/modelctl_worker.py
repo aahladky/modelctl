@@ -227,17 +227,29 @@ def worker_main(profile_name, port):
                    profile.get("backend", "llama-cpp"), ""),
                "started_at": time.time(), "success": False}
         try:
-            cmd = backend.build_command(profile, plan, port)
+            # Canonical launch path: the same ResolvedBackend + LaunchCommand
+            # every other path derives from.  Validation errors (fail-closed
+            # cache/hybrid gates, preflight errors) block this plan and fall
+            # through to the fallback loop.
+            import modelctl_launch
+            launch = modelctl_launch.build_launch_command(profile, plan, port=port)
+            validation_errors = [v for v in launch.validation
+                                 if getattr(v, "severity", "") == "error"]
+            if validation_errors:
+                run["failure_class"] = "preflight_failed"
+                raise RuntimeError(
+                    "launch validation failed: "
+                    + "; ".join(v.summary for v in validation_errors))
+            cmd = list(launch.argv)
 
-            # Provenance: record the command and backend details so
-            # the history UI can explain "why this command?"
-            import modelctl_capabilities
-            binary = profile.get("binary") or modelctl.LLAMA_SERVER_BIN
-            caps = modelctl_capabilities.probe_backend(binary)
+            # Provenance from the canonical object: the recorded command,
+            # binary, and fingerprints are exactly what was launched.
             run["command_argv"] = cmd
-            run["binary_path"] = binary
-            run["binary_fingerprint"] = modelctl_vram.file_fingerprint(binary)
-            run["capability_schema"] = caps.get("schema", 0)
+            run["command_fingerprint"] = launch.command_fingerprint
+            run["binary_path"] = launch.backend.binary
+            run["binary_fingerprint"] = launch.backend.binary_fingerprint
+            run["environment_fingerprint"] = launch.backend.environment_fingerprint
+            run["capability_schema"] = launch.backend.capabilities.get("schema", 0)
             run["claim"] = {"vram_bytes": dict(plan.claim.vram_bytes),
                             "ram_bytes": plan.claim.ram_bytes,
                             "storage_mode": plan.claim.storage_mode}
@@ -248,7 +260,8 @@ def worker_main(profile_name, port):
 
             # Launch in a new process group for clean signal forwarding
             preexec = os.setpgrp if hasattr(os, "setpgrp") else None
-            child_env = backend.effective_environment(profile, plan)
+            child_env = dict(launch.environment)
+            child_env.update(plan.env or {})
             proc = subprocess.Popen(
                 cmd,
                 stdout=sys.stdout,

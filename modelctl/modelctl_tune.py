@@ -182,11 +182,31 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
     port = _free_port()
     proc = None
     try:
-        cmd = modelctl_worker._build_command(profile, plan, port, binary=binary)
+        # Canonical launch path: same ResolvedBackend + LaunchCommand as the
+        # managed worker, including fail-closed cache validation.
+        import modelctl_launch
+        resolved = modelctl_launch.resolve_backend(profile, binary_override=binary)
+        launch = modelctl_launch.build_launch_command(profile, plan,
+                                                      backend=resolved, port=port)
+        validation_errors = [v for v in launch.validation
+                             if getattr(v, "severity", "") == "error"]
+        if validation_errors:
+            run["failure_class"] = "preflight_failed"
+            run["details"] = {"validation": [v.summary for v in validation_errors]}
+            log("launch validation failed: "
+                + "; ".join(v.summary for v in validation_errors))
+            return run
+        cmd = list(launch.argv)
+        run["command_argv"] = cmd
+        run["command_fingerprint"] = launch.command_fingerprint
+        run["binary_path"] = launch.backend.binary
+        run["binary_fingerprint"] = launch.backend.binary_fingerprint
+        run["environment_fingerprint"] = launch.backend.environment_fingerprint
+        run["capability_schema"] = launch.backend.capabilities.get("schema", 0)
         log(f"launching: {' '.join(cmd[:6])} ...")
         log_path = modelctl.PROFILES_DIR / profile_name / f"plan-test-{plan_id[:8]}.log"
         run["log_path"] = str(log_path)
-        child_env = dict(os.environ)
+        child_env = dict(launch.environment)
         child_env.update(plan.env or {})
         logf = open(log_path, "w")
         preexec = os.setpgrp if hasattr(os, "setpgrp") else None
@@ -232,6 +252,11 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
                     log(f"warmup gen {run['warmup_generation_tps']} tok/s")
                 run["cache_state"] = "warm"
 
+            # Keep the warmup measurement separate from the measured TPS but
+            # not lost: persist it in details alongside the cache_state column.
+            run["details"] = {**run.get("details", {}),
+                              "warmup_generation_tps": run["warmup_generation_tps"]}
+
             prompt_tps, gen_tps, ttfts = [], [], []
             for i in range(runs):
                 if cancel_check and cancel_check():
@@ -266,8 +291,8 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
         run["peak_ram_bytes"] = sampler.peak_ram
         return run
     except Exception as e:
-        run["failure_class"] = "unknown"
-        run["details"] = {"error": str(e)}
+        run["failure_class"] = run.get("failure_class") or "unknown"
+        run["details"] = {**run.get("details", {}), "error": str(e)}
         raise
     finally:
         run["finished_at"] = time.time()

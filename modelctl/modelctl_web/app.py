@@ -260,7 +260,6 @@ def create_app(token=None, store=None, runner=None):
     @app.get("/profiles/{name}", response_class=HTMLResponse)
     def profile_edit(request: Request, name: str, saved: str = ""):
         p = modelctl.load_profile(name)
-        args = modelctl.build_server_args(p)
         caps = None
         binary = p.get("binary") or modelctl.LLAMA_SERVER_BIN
         if binary:
@@ -269,9 +268,13 @@ def create_app(token=None, store=None, runner=None):
                 caps = get_cached_capabilities(binary)
             except Exception:
                 pass
+        args = modelctl.build_server_args(p, capabilities=caps)
+        messages = [f"{lvl}: {msg}" for lvl, msg in
+                    modelctl.preflight_moe_cache(p, capabilities=caps)
+                    if lvl != "ok"]
         return templates.TemplateResponse(request=request, name="profile_edit.html", context=ctx(
             request, p=p, fields=EDIT_FIELDS, saved=saved,
-            run_sh=" \\\n  ".join(args), messages=[],
+            run_sh=" \\\n  ".join(args), messages=messages,
             capabilities=caps))
 
     @app.post("/profiles/{name}")

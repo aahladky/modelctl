@@ -254,7 +254,8 @@ class TestMoeCacheArgsIntegration(unittest.TestCase):
                 "storage": {"mode": "mmap"},
             }
         }
-        args = modelctl.build_moe_cache_args(profile)
+        caps = {"features": {"moe_weight_transfer_cache": True}}
+        args = modelctl.build_moe_cache_args(profile, capabilities=caps)
         self.assertIn("--moe-cache-bytes", args)
         self.assertIn("--moe-cache-policy", args)
         self.assertIn("slru", args)
@@ -271,7 +272,8 @@ class TestMoeCacheArgsIntegration(unittest.TestCase):
                                           "SYCL1": 4 * (1 << 30)}},
             }
         }
-        args = modelctl.build_moe_cache_args(profile)
+        caps = {"features": {"moe_weight_transfer_cache": True}}
+        args = modelctl.build_moe_cache_args(profile, capabilities=caps)
         self.assertEqual(args.count("--moe-cache-bytes"), 1)
         i = args.index("--moe-cache-bytes")
         self.assertEqual(args[i + 1], str(10 * (1 << 30)))
@@ -289,7 +291,8 @@ class TestMoeCacheArgsIntegration(unittest.TestCase):
             "moe_cache": {"mode": "auto",
                           "gpu": {"budgets_bytes": {"SYCL0": 10 * (1 << 30)}}},
         }
-        args = modelctl.build_server_args(profile)
+        caps = {"features": {"moe_weight_transfer_cache": True}}
+        args = modelctl.build_server_args(profile, capabilities=caps)
         self.assertEqual(args.count("--moe-cache-bytes"), 1)
         i = args.index("--moe-cache-bytes")
         self.assertEqual(args[i + 1], str(10 * (1 << 30)))
@@ -308,6 +311,7 @@ class TestMoeCacheArgsIntegration(unittest.TestCase):
             }
         }
         caps = {
+            "features": {"moe_weight_transfer_cache": True},
             "cli": {
                 "moe_cache_bytes": "--custom-cache-bytes",
                 "moe_cache_policy": "--custom-policy",
@@ -320,6 +324,75 @@ class TestMoeCacheArgsIntegration(unittest.TestCase):
         self.assertIn("--custom-policy", args)
         self.assertIn("--custom-admission", args)
         self.assertIn("--custom-prefill-admission", args)
+
+    def test_unprobed_backend_fails_closed(self):
+        # §2.5: an unprobed backend must never receive experimental cache
+        # flags.  No capabilities -> only the stock --metrics flag.
+        import modelctl
+        profile = {
+            "moe_cache": {
+                "mode": "auto",
+                "gpu": {"budgets_bytes": {"SYCL0": 10 * (1 << 30)}},
+                "decode": {"miss_execution": "cpu"},
+            }
+        }
+        args = modelctl.build_moe_cache_args(profile, capabilities=None)
+        self.assertEqual(args, ["--metrics"])
+
+    def test_incapable_backend_fails_closed(self):
+        import modelctl
+        profile = {
+            "moe_cache": {
+                "mode": "manual",
+                "gpu": {"budgets_bytes": {"SYCL0": 10 * (1 << 30)}},
+                "decode": {"miss_execution": "cpu"},
+            }
+        }
+        caps = {"features": {"moe_weight_transfer_cache": False,
+                             "moe_hybrid_cpu_miss": False}}
+        args = modelctl.build_moe_cache_args(profile, capabilities=caps)
+        self.assertEqual(args, ["--metrics"])
+
+    def test_hybrid_flag_only_with_real_capability(self):
+        import modelctl
+        profile = {
+            "moe_cache": {
+                "mode": "auto",
+                "gpu": {"budgets_bytes": {"SYCL0": 10 * (1 << 30)}},
+                "decode": {"miss_execution": "cpu"},
+            }
+        }
+        # Cache-capable but NOT hybrid-capable: cache flags yes, hybrid no.
+        caps = {"features": {"moe_weight_transfer_cache": True,
+                             "moe_hybrid_cpu_miss": False}}
+        args = modelctl.build_moe_cache_args(profile, capabilities=caps)
+        self.assertIn("--moe-cache-bytes", args)
+        self.assertNotIn("--moe-hybrid-mode", args)
+        # Hybrid-capable: flag emitted.
+        caps["features"]["moe_hybrid_cpu_miss"] = True
+        args = modelctl.build_moe_cache_args(profile, capabilities=caps)
+        self.assertIn("--moe-hybrid-mode", args)
+
+    def test_stock_binary_never_gets_cache_flags(self):
+        # Task 1.4: stock llama.cpp plus cache-enabled profile never
+        # receives a cache argument through build_server_args.
+        import modelctl
+        profile = {
+            "model_path": "/x.gguf",
+            "binary": "/nonexistent/llama-server",  # unprobed
+            "config": {"device": "", "split_mode": "", "tensor_split": "",
+                       "ctx": 8192, "flash_attn": "auto", "fit": "on",
+                       "mtp": "off", "extra": ""},
+            "moe_cache": {"mode": "manual",
+                          "gpu": {"budgets_bytes": {"SYCL0": 10 * (1 << 30)}},
+                          "decode": {"miss_execution": "cpu"}},
+        }
+        args = modelctl.build_server_args(profile)
+        self.assertFalse(any(a.startswith("--moe-") for a in args), args)
+        # An explicit incapable capability set gives the same result.
+        args = modelctl.build_server_args(
+            profile, capabilities={"features": {}, "cli": {}})
+        self.assertFalse(any(a.startswith("--moe-") for a in args), args)
 
 
 class TestPreflightMoeCache(unittest.TestCase):
@@ -335,6 +408,15 @@ class TestPreflightMoeCache(unittest.TestCase):
         msgs = modelctl.preflight_moe_cache(profile, capabilities=None)
         self.assertEqual(len(msgs), 1)
         self.assertEqual(msgs[0][0], "warning")
+
+    def test_no_capabilities_errors_for_manual(self):
+        # §2.5: manual mode against an unprobed backend blocks with an
+        # explicit reason instead of emitting unvalidated flags.
+        import modelctl
+        profile = {"moe_cache": {"mode": "manual"}}
+        msgs = modelctl.preflight_moe_cache(profile, capabilities=None)
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0][0], "error")
 
     def test_unsupported_binary_error_for_manual(self):
         import modelctl
@@ -469,11 +551,16 @@ class TestBuildServerArgsMoeCache(unittest.TestCase):
                 "storage": {"mode": "mmap"},
             },
         }
-        args = modelctl.build_server_args(profile)
+        caps = {"features": {"moe_weight_transfer_cache": True}}
+        args = modelctl.build_server_args(profile, capabilities=caps)
         self.assertIn("--moe-cache-bytes", args)
         self.assertIn("--moe-cache-policy", args)
         # cache telemetry needs the Prometheus endpoint up
         self.assertIn("--metrics", args)
+        # hybrid CPU miss is not claimed by these capabilities, so the
+        # experimental flag must not be emitted even though the profile
+        # asks for cpu miss execution
+        self.assertNotIn("--moe-hybrid-mode", args)
 
     def test_moe_cache_off_no_flags(self):
         import modelctl

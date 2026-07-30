@@ -301,10 +301,12 @@ def _make_claim(profile, config, hardware):
     )
 
 
-def _make_plan(profile, config, source, hardware, extra_warnings=(), decision=None):
+def _make_plan(profile, config, source, hardware, extra_warnings=(), decision=None,
+               capabilities=None):
     """Build a LaunchPlan from profile + config overrides."""
     merged = {**profile.get("config", {}), **config}
-    args = modelctl.build_server_args({**profile, "config": merged})
+    args = modelctl.build_server_args({**profile, "config": merged},
+                                      capabilities=capabilities)
     env = {k: v for e in profile.get("env", []) for k, v in [e.split("=", 1)]} if profile.get("env") else {}
 
     gpu_names = []
@@ -411,6 +413,11 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
 
     Returns 3-12 plans depending on hardware configuration.
     Plans are deterministic and side-effect free.
+
+    Experimental variants (MoE transfer-cache, hybrid CPU-miss) are only
+    generated when include_experimental is True or the profile's runtime
+    section sets allow_experimental_plans (roadmap Task 5.8: the variant
+    stays disabled by default unless the user opts in).
     """
     if profile.get("backend", "llama-cpp") == "ovms":
         if not hardware:
@@ -453,8 +460,23 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
             plans.append(plan)
             seen_ids.add(plan.id)
 
+    # Probe once when the profile uses moe_cache so every plan's argv is
+    # compiled against the same capabilities the launch-time validation
+    # will see (probe result is session/disk-cached).  Without this, a
+    # cold probe cache would compile cache-less argv that launch-time
+    # validation then approves -- silently under-delivering manual mode.
+    caps_for_args = None
+    if profile.get("moe_cache", {}).get("mode", "off") != "off":
+        try:
+            import modelctl_capabilities
+            binary = profile.get("binary") or modelctl.LLAMA_SERVER_BIN
+            caps_for_args = modelctl_capabilities.probe_backend(binary)
+        except Exception:
+            caps_for_args = None
+
     # A. Current profile baseline
-    add(_make_plan(profile, {}, "current-profile", hardware))
+    add(_make_plan(profile, {}, "current-profile", hardware,
+                   capabilities=caps_for_args))
 
     # B. Tier planner output
     try:
@@ -470,20 +492,23 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
             add(_make_plan(profile, tc, "tier-planner", hardware,
                            extra_warnings=tuple(tier.get("warnings", [])),
                            decision={"tier": tier.get("tier"),
-                                     "analysis": tier.get("analysis")}))
+                                     "analysis": tier.get("analysis")},
+                           capabilities=caps_for_args))
     except Exception:
         pass
 
-    # F/G/H. MoE cache variants (small/balanced/large) — only when the
-    # profile has moe_cache enabled and the binary supports it.
+    # F/G/H. MoE cache variants (small/balanced/large) — experimental:
+    # only when the user opted in, the profile has moe_cache enabled, and
+    # the binary supports it.
+    experimental = include_experimental or bool(
+        (profile.get("runtime") or {}).get("allow_experimental_plans"))
     mc = profile.get("moe_cache", {})
-    if mc.get("mode", "off") != "off":
+    if experimental and mc.get("mode", "off") != "off":
         try:
             import modelctl_capabilities
             import modelctl_hardware
-            binary = profile.get("binary") or modelctl.LLAMA_SERVER_BIN
-            caps = modelctl_capabilities.probe_backend(binary)
-            if modelctl_capabilities.is_cache_capable(caps):
+            caps = caps_for_args
+            if caps and modelctl_capabilities.is_cache_capable(caps):
                 d = modelctl.load_defaults()
                 limit_pct = d.get("vram_limit_pct", 90)
                 try:
@@ -540,20 +565,31 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
                         }
                         plan = _make_plan({**profile, "moe_cache": variant_mc},
                                           cache_cfg, label_suffix, hardware,
-                                          decision={"moe_cache": variant_mc})
+                                          decision={"moe_cache": variant_mc},
+                                          capabilities=caps)
                         add(plan)
         except Exception:
             pass
 
     # I. Hybrid plans (GPU cache hit + CPU miss execution) — only when
-    # the backend supports moe_hybrid_cpu_miss and the model is oversized.
-    if mc.get("mode", "off") != "off" and mc.get("decode", {}).get("miss_execution") == "cpu":
+    # the user opted into experimental plans, the backend supports
+    # moe_hybrid_cpu_miss, and the model is oversized.
+    if (experimental and mc.get("mode", "off") != "off"
+            and mc.get("decode", {}).get("miss_execution") == "cpu"):
         try:
             import modelctl_capabilities
-            binary = profile.get("binary") or modelctl.LLAMA_SERVER_BIN
-            caps = modelctl_capabilities.probe_backend(binary)
-            if (modelctl_capabilities.supports_hybrid_miss(caps)
+            import modelctl_hardware
+            caps = caps_for_args
+            if (caps
+                    and modelctl_capabilities.supports_hybrid_miss(caps)
                     and modelctl_capabilities.is_cache_capable(caps)):
+                d = modelctl.load_defaults()
+                limit_pct = d.get("vram_limit_pct", 90)
+                try:
+                    hw_settings = modelctl_hardware.load_settings()
+                except Exception:
+                    hw_settings = {}
+                dev_cfg = hw_settings.get("devices", {})
                 gpus_enabled = [g for g in hardware.gpus if g.enabled]
                 cfg0 = profile.get("config", {})
                 weights_h = 0
@@ -576,12 +612,6 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
                     for frac, label_suffix in ((0.30, "hybrid-balanced"),
                                                  (0.60, "hybrid-large")):
                         for g in gpus_enabled:
-                            limit_pct = d.get("vram_limit_pct", 90) if 'd' in dir() else 90
-                            try:
-                                hw_settings = modelctl_hardware.load_settings()
-                            except Exception:
-                                hw_settings = {}
-                            dev_cfg = hw_settings.get("devices", {})
                             usable = (g.total_bytes * limit_pct / 100.0
                                       - dev_cfg.get(g.device, {}).get("reserve_bytes", 0))
                             budget = int(usable * frac)
@@ -604,7 +634,8 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
                                 hybrid_cfg, label_suffix, hardware,
                                 extra_warnings=("hybrid: CPU miss execution",),
                                 decision={"moe_cache": variant_mc,
-                                          "hybrid": True})
+                                          "hybrid": True},
+                                capabilities=caps)
                             add(plan)
         except Exception:
             pass
@@ -630,7 +661,8 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
             add(_make_plan(profile, {"device": gpu.device, "split_mode": "",
                                      "tensor_split": ""},
                            "single-gpu", hardware,
-                           decision={"gpu": gpu.device, "budget": budget}))
+                           decision={"gpu": gpu.device, "budget": budget},
+                           capabilities=caps_for_args))
 
     # D. Multi-GPU split plans (capacity-ratio variants)
     if len(gpus) >= 2:
@@ -648,7 +680,8 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
                                      "extra": f"--device {dev_list}"},
                            "multi-gpu", hardware,
                            decision={"ratio": ratio, "combined_budget": combined,
-                                     "device_list": dev_list}))
+                                     "device_list": dev_list},
+                           capabilities=caps_for_args))
 
             # Biased variants: favor primary, then secondary
             if len(gpus) == 2 and sum(gib) > 3:
@@ -664,7 +697,8 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
                                                  "extra": f"--device {dev_list}"},
                                        "multi-gpu", hardware,
                                        decision={"ratio": b_ratio, "bias": gpus[bias_idx].device,
-                                                 "device_list": dev_list}))
+                                                 "device_list": dev_list},
+                                       capabilities=caps_for_args))
 
     # E. CPU-spill plans
     if total_need > 0 and gpus:
@@ -687,7 +721,8 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
                                          "extra": spill_extra},
                                "cpu-spill", hardware,
                                extra_warnings=("partial GPU offload",),
-                               decision={"ngl": ngl, "gpu": primary_gpu.device}))
+                               decision={"ngl": ngl, "gpu": primary_gpu.device},
+                               capabilities=caps_for_args))
 
     return plans
 
