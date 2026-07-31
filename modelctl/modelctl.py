@@ -550,7 +550,7 @@ def _sync_hermes_locked(dry_run: bool):
     # port as everything else.
     swap_url = LLAMA_SWAP_BASE_URL
 
-    all_profiles = _read_all_profiles()
+    all_profiles = [normalize_profile(p) for p in _read_all_profiles()]
     enabled = [p for p in all_profiles if p.get("name") and p.get("enabled", True)]
     managed_profiles = [p for p in enabled if p.get("backend", "llama-cpp") in ("llama-cpp", "ovms")]
 
@@ -2118,58 +2118,17 @@ def _read_all_profiles():
 # profile_version: 1 = original schema, 2 = adds moe_cache support.
 # Missing profile_version is treated as 1; migration is additive and lazy.
 
-# Single source of truth for moe_cache defaults lives in modelctl_profiles
-# (imported lazily to keep module-import cost down); do not fork a second
-# copy here.
-def _default_moe_cache():
-    from modelctl_profiles import _DEFAULT_MOE_CACHE, _deep_copy_dict as _dcd
-    return _dcd(_DEFAULT_MOE_CACHE)
-
-
 def normalize_profile(profile: dict) -> dict:
-    """Normalize a loaded profile into the canonical schema. Idempotent,
-    non-destructive: unknown fields are preserved, legacy ones are mapped
-    (kv_quant -> cache_type_k/v, string ctx/ttl -> int), and moe_cache
-    defaults are filled for profiles that lack them."""
-    p = dict(profile)
-    p.setdefault("enabled", True)
-    p.setdefault("backend", "llama-cpp")
-    p.setdefault("env", [])
-    cfg = p.setdefault("config", {})
-    legacy = cfg.get("kv_quant")
-    if legacy and not cfg.get("cache_type_k"):
-        cfg["cache_type_k"] = legacy
-    if legacy and not cfg.get("cache_type_v"):
-        cfg["cache_type_v"] = legacy
-    for key in ("ctx", "ttl"):
-        if key in cfg:
-            try:
-                cfg[key] = int(cfg[key])
-            except (TypeError, ValueError):
-                pass
-    # moe_cache: fill defaults for profiles that predate the feature.
-    # Profiles without moe_cache or profile_version are treated as v1 with
-    # cache off.  Existing moe_cache blocks are left untouched so hand-edits
-    # survive round-trips.
-    if "moe_cache" not in p:
-        p["moe_cache"] = _default_moe_cache()
-    else:
-        mc = p["moe_cache"]
-        for section, defaults in _default_moe_cache().items():
-            if section not in mc:
-                mc[section] = _deep_copy_dict(defaults)
-            elif isinstance(defaults, dict):
-                for k, v in defaults.items():
-                    mc[section].setdefault(k, v)
-    return p
+    """Normalize a loaded profile into the canonical v2 schema.
 
-
-def _deep_copy_dict(d):
-    """Minimal recursive dict copy (no import of copy module)."""
-    out = {}
-    for k, v in d.items():
-        out[k] = _deep_copy_dict(v) if isinstance(v, dict) else v
-    return out
+    Delegates to modelctl_profiles.normalize_profile -- the single owner
+    of the schema. This module used to carry a second, weaker normalizer
+    (no profile_version stamp, no config defaults), so CLI-saved and
+    web-saved profiles differed on disk and hand-edited profiles missing
+    a config key crashed downstream consumers with KeyError.
+    """
+    import modelctl_profiles
+    return modelctl_profiles.normalize_profile(profile)
 
 
 def load_profile(name):
@@ -2771,7 +2730,9 @@ def sync_llama_swap_config(restart: bool = True) -> int:
 
 
 def _sync_llama_swap_config_locked(restart: bool) -> int:
-    all_profiles = _read_all_profiles()
+    # Normalized, not raw: one hand-edited profile missing flash_attn or
+    # ttl used to abort the entire sync for every profile with KeyError.
+    all_profiles = [normalize_profile(p) for p in _read_all_profiles()]
     profiles = [p for p in all_profiles
                 if p.get("enabled", True) and p.get("backend", "llama-cpp") in ("llama-cpp", "ovms")]
 
@@ -3131,6 +3092,33 @@ def cmd_place_tiers(args, inventory, defaults, primary, names):
         print("Re-run with --apply to rewrite placements to these plans.")
 
 
+
+def _hardware_reserve_map():
+    """Per-device reserve_bytes from hardware.json, {} when unavailable.
+    Passed to recommend_placement so the estimate path admits against the
+    same usable budgets as the worker and the tier planner."""
+    try:
+        import modelctl_hardware
+        snap = modelctl_hardware.capture_hardware_snapshot()
+        return {g.device: g.reserve_bytes for g in snap.gpus}
+    except Exception:
+        return {}
+
+
+def _profile_cache_reserve_map(profile):
+    """The uniform cache reservation per named device (see the collapse
+    comment in modelctl_plans._make_claim), for placement estimates."""
+    mc = (profile or {}).get("moe_cache", {})
+    if mc.get("mode", "off") == "off":
+        return {}
+    declared = {d: b for d, b in mc.get("gpu", {}).get("budgets_bytes", {}).items()
+                if b > 0}
+    if not declared:
+        return {}
+    uniform = max(declared.values())
+    return {d: uniform for d in declared}
+
+
 def cmd_place(args):
     """Report (and with --apply, rewrite) each profile's GPU placement from
     its VRAM footprint estimate: fits the primary card -> pin to it; too
@@ -3170,7 +3158,9 @@ def cmd_place(args):
                   f"{_format_placement(cfg):<22} -")
             continue
         rec = modelctl_vram.recommend_placement(
-            est["total"], inventory, d["vram_limit_pct"], primary)
+            est["total"], inventory, d["vram_limit_pct"], primary,
+            reserve_bytes_map=_hardware_reserve_map(),
+            cache_bytes_map=_profile_cache_reserve_map(profile))
         est_col = f"~{_format_size(est['total'])} ({est['quality']})"
         rec_col = _format_placement(rec) if rec else "?"
         if rec and not rec["fits"]:
@@ -3403,7 +3393,8 @@ def compute_pull_placement_hint(weights_bytes):
         cache_type_v=d["cache_type_v"])
     rec = modelctl_vram.recommend_placement(
         est["total"], inventory, d["vram_limit_pct"],
-        resolve_primary_gpu(inventory, d))
+        resolve_primary_gpu(inventory, d),
+        reserve_bytes_map=_hardware_reserve_map())
     if rec:
         print(f"Estimated footprint at ctx={d['ctx']}: "
               f"~{_format_size(est['total'])} (heuristic) "

@@ -104,7 +104,7 @@ def auto_ctx(model_path, budget_bytes, cache_type_k="q8_0", cache_type_v=None,
             weights_bytes = modelctl_vram.weights_bytes_on_disk(model_path)
         except OSError:
             return None
-    overhead = max(1 << 30, int(weights_bytes * 0.10))
+    overhead = modelctl_vram.compute_overhead_bytes(weights_bytes)
     ctv = cache_type_v or cache_type_k
 
     def kv_for(ctx):
@@ -146,7 +146,7 @@ def recommend_quant_group(groups, budget_bytes, ctx, kv_per_token=None):
 
     def footprint(g):
         w = g["total_size"]
-        return w + ctx * kv_per_token + max(1 << 30, int(w * 0.10))
+        return w + ctx * kv_per_token + modelctl_vram.compute_overhead_bytes(w)
 
     fitting = [g for g in candidates if footprint(g) <= budget_bytes]
     if fitting:
@@ -305,7 +305,11 @@ def plan_tiers(profile, inventory, limit_pct, primary, ram_available=None,
 
     meta = layout.get("meta") or {}
     kv_params = modelctl_vram.gguf_kv_params(meta)
-    ctx = int(cfg.get("ctx", 32768))
+    # 8192, matching the schema default (modelctl_profiles._DEFAULT_CONFIG)
+    # and every other planner fallback: this one used to assume 32768, so
+    # the tier plan was sized for a 4x bigger KV cache than the claim
+    # admitted or the launch used.
+    ctx = int(cfg.get("ctx", 8192))
     ctk = cfg.get("cache_type_k") or "f16"
     ctv = cfg.get("cache_type_v") or ctk
     if kv_params:
@@ -341,7 +345,7 @@ def plan_tiers(profile, inventory, limit_pct, primary, ram_available=None,
               for d in devs}
 
     weights = layout["weight_bytes"]
-    overhead = max(1 << 30, int(weights * 0.10))
+    overhead = modelctl_vram.compute_overhead_bytes(weights)
     total = weights + kv + overhead
     warnings = []
     _, other_flags = split_extra_flags(cfg.get("extra", ""))
@@ -511,7 +515,7 @@ def _plan_moe_spill(tier, layout, devs, usable, primary, kv, ram_budget,
     # -- pinning the fixed set to the primary in the math while it splits at
     # runtime is how you get a load-time VRAM OOM on the small card.
     fixed = non_expert + kv
-    gpu_overhead = max(1 << 30, int(fixed * 0.10))
+    gpu_overhead = modelctl_vram.compute_overhead_bytes(fixed)
     fixed_total = fixed + gpu_overhead
     cap_sum = sum(d["total_bytes"] for d in devs)
     budgets = {}
@@ -604,7 +608,7 @@ def _plan_dense_spill(tier, layout, devs, usable, primary, kv, ram_budget,
     per_layer = layer_total / block_count if block_count else layer_total
 
     gpu_budget = sum(usable.values())
-    fixed = other_bytes + kv + max(1 << 30, int(weights * 0.05))
+    fixed = other_bytes + kv + modelctl_vram.compute_overhead_bytes(weights)
     n_gpu = int(max(0, min(block_count,
                            math.floor((gpu_budget - fixed) / per_layer))))
     if n_gpu < block_count * 0.2:

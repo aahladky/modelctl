@@ -414,7 +414,7 @@ def _make_claim(profile, config, hardware):
     else:
         # GPU-resident total: non-expert + unpinned experts + KV + overhead
         base_gpu = non_expert + default_gpu_experts
-        overhead = max(1 << 30, int(base_gpu * 0.10))
+        overhead = modelctl_vram.compute_overhead_bytes(base_gpu)
         shared_gpu = base_gpu + kv + overhead + aux_gpu
         shared_static, shared_kv, shared_overhead = base_gpu + aux_gpu, kv, overhead
 
@@ -883,7 +883,8 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
                     cfg0.get("cache_type_k", "q8_0"),
                     cache_type_v=cfg0.get("cache_type_v", "q8_0"))
                 total_gpu_budget = sum(
-                    g.total_bytes - g.reserve_bytes for g in gpus_enabled)
+                    int(g.total_bytes * limit_pct / 100.0) - g.reserve_bytes
+                    for g in gpus_enabled)
                 if total_est.get("total", 0) > total_gpu_budget:
                     # Use a moderate cache budget — the miss path handles
                     # the overflow, so we don't need to fill the GPU.
@@ -919,6 +920,14 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
             pass
 
     # C. Single-GPU plans
+    # Sections C and D admit against the same usable budget as the tier
+    # planner and the worker: limit_pct applied, reserves subtracted.
+    # Raw total-minus-reserve quietly bypassed the configured capacity
+    # margin for exactly these plan families.
+    try:
+        _limit_frac = modelctl.load_defaults().get("vram_limit_pct", 90) / 100.0
+    except Exception:
+        _limit_frac = 0.90
     gpus = [g for g in hardware.gpus if g.enabled]
     weights = 0
     model_path = profile.get("model_path", "")
@@ -934,7 +943,7 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
     total_need = est.get("total", 0)
 
     for gpu in gpus:
-        budget = gpu.total_bytes - gpu.reserve_bytes
+        budget = int(gpu.total_bytes * _limit_frac) - gpu.reserve_bytes
         if total_need <= budget:
             add(_make_plan(profile, {"device": gpu.device, "split_mode": "",
                                      "tensor_split": ""},
@@ -944,10 +953,13 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
 
     # D. Multi-GPU split plans (capacity-ratio variants)
     if len(gpus) >= 2:
-        combined = sum(g.total_bytes - g.reserve_bytes for g in gpus)
+        combined = sum(int(g.total_bytes * _limit_frac) - g.reserve_bytes
+                       for g in gpus)
         if total_need <= combined:
-            # Capacity-ratio split
-            caps = [g.total_bytes - g.reserve_bytes for g in gpus]
+            # Usable-budget-ratio split (see the tier-2 rationale in
+            # modelctl_tiers: llama.cpp distributes by these weights)
+            caps = [int(g.total_bytes * _limit_frac) - g.reserve_bytes
+                    for g in gpus]
             gib = [max(1, round(c / (1 << 30))) for c in caps]
             divisor = math.gcd(*gib)
             ratio = ",".join(str(g // divisor) for g in gib)
@@ -1028,7 +1040,8 @@ def _compute_ngl(weights_bytes, gpu_budget, profile, hardware):
     params = modelctl_vram.gguf_kv_params(layout.get("meta") or {})
     kv = (modelctl_vram.kv_cache_bytes(params, ctx, cache_k, cache_v) if params
           else ctx * modelctl_vram.HEURISTIC_KV_BYTES_PER_TOKEN)
-    fixed = layout["other_bytes"] + kv + max(1 << 30, int(layout["weight_bytes"] * 0.05))
+    fixed = (layout["other_bytes"] + kv
+             + modelctl_vram.compute_overhead_bytes(layout["weight_bytes"]))
     if per_layer <= 0 or fixed >= gpu_budget:
         return 0
     return max(0, min(n_layers - 1, int((gpu_budget - fixed) / per_layer)))
