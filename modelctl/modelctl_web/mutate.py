@@ -288,7 +288,8 @@ def submit_plan_test(runner, name, plan_id):
             raise RuntimeError(f"plan test failed: {run.get('failure_class')}")
         return run
     return runner.submit("benchmark", f"plan test {name}/{plan_id[:8]}", fn,
-                         payload={"name": name, "plan_id": plan_id})
+                         payload={"name": name, "plan_id": plan_id},
+                         lane="benchmark")
 
 
 def submit_autotune(runner, name, objective="balanced", candidate_ids=None):
@@ -299,8 +300,13 @@ def submit_autotune(runner, name, objective="balanced", candidate_ids=None):
             log=ctx.log, proc_register=ctx.register_process,
             cancel_check=ctx.is_cancelled)
         return res
+    # lane="benchmark", not the default mutation lane: a multi-minute
+    # autotune launches real servers, and on the serialized mutation lane
+    # it blocked every profile save, config edit and sync for its whole
+    # duration -- the head-of-line blocking the lanes exist to prevent.
     return runner.submit("benchmark", f"autotune {name}", fn,
-                         payload={"name": name, "objective": objective})
+                         payload={"name": name, "objective": objective},
+                         lane="benchmark")
 
 
 def submit_calibrate_storage(runner):

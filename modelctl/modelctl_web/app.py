@@ -11,6 +11,7 @@ import secrets
 import time
 import urllib.request
 from dataclasses import asdict
+from urllib.parse import quote
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
@@ -71,6 +72,19 @@ def _caps_for(profile):
         return modelctl_capabilities.probe_backend(binary)
     except Exception:
         return None
+
+
+def _safe_back(target):
+    """An internal path to return to, or "/".
+
+    `back` is reflected into an <a href> and into the polling URL; a
+    "javascript:..." value there executes in the console's origin, with
+    the session cookie attached, able to drive any mutating API.
+    """
+    target = str(target or "/")
+    if not target.startswith("/") or target.startswith("//"):
+        return "/"
+    return target
 
 
 def _fetch_json(url, timeout=2):
@@ -177,19 +191,25 @@ def create_app(token=None, store=None, runner=None):
     # Readiness for the nav banner, on every page. Cached briefly because
     # it runs on every render and the underlying state (a directory
     # appearing, llama-swap coming up) does not change per request.
-    _setup_cache = {"at": 0.0, "blocking": ()}
+    _setup_cache = {"at": 0.0, "blocking": (), "first_run": False}
 
-    def _setup_banner():
+    def _refresh_setup_cache():
         now = time.time()
         if now - _setup_cache["at"] > 30:
             try:
                 import modelctl_setup
                 # probe_backend=False: no subprocess on a page render.
-                _setup_cache["blocking"] = modelctl_setup.probe_setup().blocking
+                status = modelctl_setup.probe_setup()
+                _setup_cache["blocking"] = status.blocking
+                _setup_cache["first_run"] = status.first_run
             except Exception:
                 _setup_cache["blocking"] = ()
+                _setup_cache["first_run"] = False
             _setup_cache["at"] = now
-        return _setup_cache["blocking"]
+        return _setup_cache
+
+    def _setup_banner():
+        return _refresh_setup_cache()["blocking"]
 
     # ---- template filters ------------------------------------------------
     def _fmt_elapsed(start_ts):
@@ -307,9 +327,11 @@ def create_app(token=None, store=None, runner=None):
         # dashboard -- send them where the work actually starts. Only on a
         # genuine first run: an established install with llama-swap down
         # keeps its dashboard.
-        import modelctl_setup
-        if modelctl_setup.probe_setup().first_run:
-            return RedirectResponse("/setup", status_code=307)
+        # Reuses the 30s-cached probe the nav banner already runs on
+        # every render; a second uncached probe here meant five HTTP
+        # calls with 2s timeouts each whenever llama-swap was down.
+        if _refresh_setup_cache()["first_run"]:
+            return RedirectResponse("/setup", status_code=303)
         loaded, registered = live_state()
         runtime = _runtime_state()
         inventory = modelctl.get_gpu_inventory()
@@ -835,6 +857,25 @@ def create_app(token=None, store=None, runner=None):
         state = store_wiz.load(wizard_id)
         if not state:
             return RedirectResponse("/add", status_code=303)
+        # "Run Smoke Test" and "Continue to Registration" both POST here.
+        # Submitting unconditionally queued a SECOND real llama-server
+        # benchmark when the user clicked continue after a test -- two
+        # servers for the same model, racing for VRAM.
+        from .wizard import outcome_from_job
+        if state.test_job_id:
+            outcome = outcome_from_job(store, state.test_job_id)
+            state.record_outcome("test", outcome.get("ok", False),
+                                 job_id=state.test_job_id,
+                                 status=outcome.get("status", ""),
+                                 error=outcome.get("error", ""))
+            if outcome.get("status") in ("queued", "running"):
+                # Still running: stay put rather than advancing over it.
+                store_wiz.save(state)
+                return RedirectResponse(f"/add/{wizard_id}/test", status_code=303)
+            state.advance("register")
+            store_wiz.save(state)
+            return RedirectResponse(f"/add/{wizard_id}/register", status_code=303)
+
         # Test the specific plan the user picked on the previous step (real
         # launch + measured throughput), not just a generic smoke test of
         # whatever the profile's default config happened to be.
@@ -843,9 +884,9 @@ def create_app(token=None, store=None, runner=None):
         else:
             job_id = mutate.submit_smoke_test(runner, state.profile_name)
         state.test_job_id = job_id
-        state.advance("register")
+        state.clear_outcome("test")
         store_wiz.save(state)
-        return RedirectResponse(f"/add/{wizard_id}/register", status_code=303)
+        return RedirectResponse(f"/add/{wizard_id}/test", status_code=303)
 
     @app.get("/add/{wizard_id}/register", response_class=HTMLResponse)
     def wizard_register(request: Request, wizard_id: str):
@@ -874,6 +915,22 @@ def create_app(token=None, store=None, runner=None):
             state.set_error("no profile to register")
             store_wiz.save(state)
             return RedirectResponse(f"/add/{wizard_id}/register", status_code=303)
+
+        # A plan whose test failed (or never ran) must not be registered
+        # and reported as verified on the done page. The wizard already
+        # records structured step outcomes; this is the gate that reads
+        # them. `register_untested` is the explicit opt-out.
+        blocking = state.blocking_reason("test")
+        if blocking and not state.registration_complete:
+            import urllib.parse as _urlparse
+            qs = _urlparse.parse_qs(request.url.query or "")
+            if "1" not in qs.get("register_untested", []):
+                state.set_error(
+                    f"not registering: {blocking}. Re-run the test, or "
+                    "confirm registering it untested.")
+                store_wiz.save(state)
+                return RedirectResponse(f"/add/{wizard_id}/register",
+                                        status_code=303)
 
         # Apply the plan the user compared/tested so the profile actually
         # launches with it, not whatever config import_local() or the pull
@@ -960,13 +1017,13 @@ def create_app(token=None, store=None, runner=None):
     def job_detail(request: Request, job_id: str, back: str = "/"):
         job = store.get(job_id)
         return templates.TemplateResponse(request=request, name="job_detail.html", context=ctx(
-            request, job=job, back=back))
+            request, job=job, back=_safe_back(back)))
 
     @app.get("/jobs/{job_id}/fragment", response_class=HTMLResponse)
     def job_fragment(request: Request, job_id: str, back: str = "/"):
         job = store.get(job_id)
         return templates.TemplateResponse(request=request, name="job_fragment.html", context=ctx(
-            request, job=job, back=back))
+            request, job=job, back=_safe_back(back)))
 
     @app.post("/jobs/{job_id}/cancel")
     def job_cancel(job_id: str):
@@ -1016,7 +1073,9 @@ def create_app(token=None, store=None, runner=None):
             if stats:
                 cache_stats[mid] = stats
         return templates.TemplateResponse(request=request, name="runtime.html", context=ctx(
-            request, runtime=state, cache_stats=cache_stats))
+            request, runtime=state, cache_stats=cache_stats,
+            reset_ok=request.query_params.get("reset_ok", ""),
+            reset_error=request.query_params.get("reset_error", "")))
 
     @app.get("/api/runtime")
     def api_runtime():
@@ -1067,15 +1126,25 @@ def create_app(token=None, store=None, runner=None):
     def model_cache_reset(name: str):
         rt = _runtime_state().get(name, {})
         port = rt.get("port")
-        if port:
-            try:
-                import urllib.request
-                req = urllib.request.Request(
-                    f"http://127.0.0.1:{port}/cache/reset", method="POST")
-                urllib.request.urlopen(req, timeout=5)
-            except Exception:
-                pass
-        return RedirectResponse("/runtime", status_code=303)
+        # Report the outcome instead of always 303-ing: a failed or
+        # skipped reset was indistinguishable from a successful one, so
+        # a measurement taken right after could be on a cache that was
+        # never actually cleared.
+        if not port:
+            return RedirectResponse(
+                "/runtime?reset_error=" + quote(f"{name} is not running"),
+                status_code=303)
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/cache/reset", method="POST")
+            urllib.request.urlopen(req, timeout=5)
+        except Exception as e:
+            return RedirectResponse(
+                "/runtime?reset_error=" + quote(f"{name}: {e}"),
+                status_code=303)
+        return RedirectResponse("/runtime?reset_ok=" + quote(name),
+                                status_code=303)
 
     @app.post("/runtime/unload-all")
     def runtime_unload_all():

@@ -149,7 +149,9 @@ class TestSetupPage(SetupBase):
     def test_first_run_redirects_dashboard_to_setup(self):
         client, auth = self.web()
         resp = client.get("/", headers=auth, follow_redirects=False)
-        self.assertEqual(resp.status_code, 307)
+        # 303, matching every other redirect in the app: 307 preserves
+        # the method, which is never what a navigation redirect wants.
+        self.assertEqual(resp.status_code, 303)
         self.assertEqual(resp.headers["location"], "/setup")
 
     def test_configured_machine_keeps_its_dashboard(self):
