@@ -346,5 +346,83 @@ class TestDonePage(WizardWebBase):
         self.assertIn("not measured", page)
 
 
+class TestAcquisitionIsConsolidatedOnAdd(WizardWebBase):
+    """P1: /add owns acquisition. The legacy /pull and /import routes are
+    compatibility shims that land the user inside a pre-populated add
+    wizard -- there is no second path with its own validation, job state,
+    or registration."""
+
+    def test_pull_redirects_to_add(self):
+        resp = self.client.get("/pull", headers=self.auth,
+                               follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
+        self.assertEqual(resp.headers["location"], "/add")
+
+    def test_pull_search_lands_on_add_search(self):
+        resp = self.client.get("/pull?q=qwen", headers=self.auth,
+                               follow_redirects=False)
+        self.assertEqual(resp.headers["location"], "/add?q=qwen")
+
+    def test_pull_repo_becomes_a_prepopulated_wizard(self):
+        resp = self.client.get("/pull/unsloth/Some-GGUF", headers=self.auth,
+                               follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
+        loc = resp.headers["location"]
+        self.assertRegex(loc, r"^/add/[0-9a-f]+/inspect$")
+        wid = loc.split("/")[2]
+        state = wiz.WizardStore().load(wid)
+        self.assertEqual(state.repo_id, "unsloth/Some-GGUF")
+        self.assertEqual(state.source_type, "hf_repo")
+        self.assertEqual(state.step, "inspect")
+
+    def test_search_result_start_link_prepopulates_a_wizard(self):
+        resp = self.client.get("/add/start/unsloth/Some-GGUF",
+                               headers=self.auth, follow_redirects=False)
+        loc = resp.headers["location"]
+        wid = loc.split("/")[2]
+        state = wiz.WizardStore().load(wid)
+        self.assertEqual(state.repo_id, "unsloth/Some-GGUF")
+        self.assertEqual(state.step, "inspect")
+
+    def test_import_get_redirects_to_add(self):
+        resp = self.client.get("/import", headers=self.auth,
+                               follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
+        self.assertEqual(resp.headers["location"], "/add")
+
+    def test_import_post_becomes_a_prepopulated_wizard(self):
+        resp = self.client.post("/import", headers=self.auth,
+                                data={"file_path": "/models/x.gguf"},
+                                follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
+        loc = resp.headers["location"]
+        self.assertRegex(loc, r"^/add/[0-9a-f]+/source$")
+        wid = loc.split("/")[2]
+        state = wiz.WizardStore().load(wid)
+        self.assertEqual(state.local_path, "/models/x.gguf")
+        self.assertEqual(state.source_type, "local_file")
+        # Deliberately NOT advanced past source: the source step re-runs
+        # local-file verification on submit, so the legacy path cannot
+        # skip the checks the wizard exists to enforce.
+        self.assertEqual(state.step, "source")
+
+    def test_primary_nav_has_one_acquisition_entry(self):
+        page = self.client.get("/add", headers=self.auth).text
+        nav = page.split("</nav>")[0]
+        self.assertIn('href="/add"', nav)
+        self.assertNotIn('href="/pull"', nav)
+        self.assertNotIn('href="/import"', nav)
+
+    def test_add_page_offers_search(self):
+        with mock.patch.object(modelctl, "search_models",
+                               return_value=[{"repo_id": "org/m-GGUF",
+                                              "downloads": 5, "is_gguf": True,
+                                              "has_mtp": False}]) as sm:
+            page = self.client.get("/add?q=m-GGUF", headers=self.auth).text
+        sm.assert_called_once_with("m-GGUF")
+        self.assertIn("org/m-GGUF", page)
+        self.assertIn("/add/start/org/m-GGUF", page)
+
+
 if __name__ == "__main__":
     unittest.main()

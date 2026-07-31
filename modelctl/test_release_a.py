@@ -166,14 +166,18 @@ class TestReleaseAWebRoutes(unittest.TestCase):
         r = client.get("/", headers={"Authorization": "Bearer test-token"})
         self.assertEqual(r.status_code, 200)
 
-    def test_import_page_accessible(self):
+    def test_import_redirects_into_the_add_workflow(self):
+        # P1 consolidation: /import is a compatibility shim, not a second
+        # acquisition path.
         from fastapi.testclient import TestClient
         from modelctl_web.app import create_app
         app = create_app(token="test-token", store=mock.MagicMock(),
                         runner=mock.MagicMock())
         client = TestClient(app)
-        r = client.get("/import", headers={"Authorization": "Bearer test-token"})
-        self.assertEqual(r.status_code, 200)
+        r = client.get("/import", headers={"Authorization": "Bearer test-token"},
+                       follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.headers["location"], "/add")
 
     def test_settings_page_accessible(self):
         from fastapi.testclient import TestClient

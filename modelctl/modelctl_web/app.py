@@ -398,56 +398,79 @@ def create_app(token=None, store=None, runner=None):
         return templates.TemplateResponse(request=request, name="tiers_all.html", context=ctx(
             request, plans=plans))
 
-    # ---- pull wizard ----------------------------------------------------
+    # ---- legacy acquisition routes --------------------------------------
+    # /add is the ONE acquisition workflow: it owns validation, job state,
+    # local-file verification, analysis, plan generation, and registration.
+    # These routes exist only for old bookmarks and muscle memory -- they
+    # create a pre-populated wizard and redirect into it, so there is no
+    # second path that half-owns acquisition.
+
+    def _wizard_for_repo(repo_id: str):
+        from .wizard import WizardState, WizardStore
+        state = WizardState()
+        state.source_type = "hf_repo"
+        state.repo_id = repo_id
+        state.advance("inspect")
+        WizardStore().save(state)
+        return state
+
     @app.get("/pull", response_class=HTMLResponse)
-    def pull_form(request: Request, q: str = ""):
-        results = modelctl.search_models(q) if q else []
-        return templates.TemplateResponse(request=request, name="pull.html", context=ctx(
-            request, q=q, results=results))
+    def pull_form(q: str = ""):
+        # Search now lives on the wizard's source step.
+        target = f"/add?q={q}" if q else "/add"
+        return RedirectResponse(target, status_code=303)
 
     @app.get("/pull/{repo_id:path}", response_class=HTMLResponse)
-    def pull_repo(request: Request, repo_id: str):
-        import modelctl_tiers
-        contents = modelctl.get_repo_contents(repo_id)
-        inventory = modelctl.get_gpu_inventory()
-        d = modelctl.load_defaults()
-        budget = 0
-        if inventory:
-            primary = modelctl.resolve_primary_gpu(inventory, d)
-            prim = next((g for g in inventory if g["device"] == primary), inventory[0])
-            budget = prim["total_bytes"] * d["vram_limit_pct"] / 100.0
-        rec = modelctl_tiers.recommend_quant_group(
-            contents["quant_groups"], budget, int(d["ctx"]))
-        return templates.TemplateResponse(request=request, name="pull_repo.html", context=ctx(
-            request, repo_id=repo_id, contents=contents, rec=rec,
-            budget=budget))
+    def pull_repo(repo_id: str):
+        state = _wizard_for_repo(repo_id)
+        return RedirectResponse(f"/add/{state.wizard_id}/inspect",
+                                status_code=303)
 
     @app.post("/pull/{repo_id:path}")
     def pull_start(repo_id: str, quant: str = Form("")):
-        job_id = mutate.submit_pull(runner, repo_id, quant_label=quant or None)
-        return RedirectResponse(f"/jobs/{job_id}?back=/pull", status_code=303)
+        # Quant selection happens on the wizard's inspect step, where the
+        # recommendation logic lives.
+        state = _wizard_for_repo(repo_id)
+        return RedirectResponse(f"/add/{state.wizard_id}/inspect",
+                                status_code=303)
 
-    # ---- local import ---------------------------------------------------
     @app.get("/import", response_class=HTMLResponse)
-    def import_form(request: Request):
-        return templates.TemplateResponse(request=request, name="import.html", context=ctx(
-            request))
+    def import_form():
+        return RedirectResponse("/add", status_code=303)
 
     @app.post("/import")
     def import_start(file_path: str = Form(...), name: str = Form(""),
                      copy: bool = Form(False)):
-        job_id = mutate.submit_import_local(runner, file_path,
-                                            name=name or None, copy=copy)
-        return RedirectResponse(f"/jobs/{job_id}?back=/import", status_code=303)
+        from .wizard import WizardState, WizardStore
+        state = WizardState()
+        state.source_type = "local_file"
+        state.local_path = file_path
+        WizardStore().save(state)
+        # The source step re-verifies on submit, so a bad path becomes a
+        # form error instead of a background-job failure.
+        return RedirectResponse(f"/add/{state.wizard_id}/source",
+                                status_code=303)
 
     # ---- add-model wizard -----------------------------------------------
     @app.get("/add", response_class=HTMLResponse)
-    def wizard_list(request: Request):
+    def wizard_list(request: Request, q: str = ""):
         from .wizard import WizardStore
         store_wiz = WizardStore()
         active = store_wiz.list_active()
+        # Hugging Face search lives here now (it used to be the separate
+        # /pull page): searching and starting the acquisition are one
+        # workflow, not two.
+        results = modelctl.search_models(q) if q else []
         return templates.TemplateResponse(request=request, name="wizard_list.html",
-                                          context=ctx(request, wizards=active))
+                                          context=ctx(request, wizards=active,
+                                                      q=q, results=results))
+
+    @app.get("/add/start/{repo_id:path}")
+    def wizard_start_from_repo(repo_id: str):
+        """One click from a search result into the wizard's inspect step."""
+        state = _wizard_for_repo(repo_id)
+        return RedirectResponse(f"/add/{state.wizard_id}/inspect",
+                                status_code=303)
 
     @app.post("/add")
     def wizard_create():
@@ -1379,6 +1402,11 @@ def create_app(token=None, store=None, runner=None):
 
     @app.post("/api/pull/{repo_id:path}")
     def api_pull(repo_id: str, quant: str = ""):
+        # Advanced/automation shortcut: a zero-config pull as one job, for
+        # scripts that do not want the step-by-step wizard. It goes through
+        # the same submit_pull service as everything else -- it owns no
+        # validation or registration logic of its own. Browser users go
+        # through /add.
         return {"job": mutate.submit_pull(runner, repo_id, quant_label=quant or None)}
 
     @app.get("/api/jobs")

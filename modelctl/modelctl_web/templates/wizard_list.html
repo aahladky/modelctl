@@ -24,4 +24,27 @@
 <form method="post" action="/add" style="margin-top:1rem">
   <button type="submit" class="btn btn-primary">Start New Add-Model Wizard</button>
 </form>
+
+<h2 style="margin-top:1.5rem">Find a Model on Hugging Face</h2>
+<form method="get" action="/add" class="card">
+  <input name="q" value="{{ q }}" placeholder="search hugging face (e.g. Qwen3.6-27B-GGUF)" style="width:70%">
+  <button type="submit" class="btn">search</button>
+</form>
+{% if results %}
+<table>
+  <thead><tr><th>repo</th><th>downloads</th><th></th><th></th></tr></thead>
+  <tbody>
+  {% for r in results %}
+  {% if r.is_gguf %}
+  <tr>
+    <td>{{ r.repo_id }}</td>
+    <td class="muted">{{ r.downloads }}</td>
+    <td>{% if r.has_mtp %}<span class="ok">MTP</span>{% endif %}</td>
+    <td><a href="/add/start/{{ r.repo_id }}" class="btn">add this model</a></td>
+  </tr>
+  {% endif %}
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
 {% endblock %}
