@@ -94,11 +94,9 @@ class PlanEvidence:
         return self.category
 
 
-def _is_experimental(plan) -> bool:
-    """Does this plan depend on the fork's experimental MoE features?"""
-    if (getattr(plan.claim, "cache_bytes", 0) or 0) > 0:
-        return True
-    return bool((plan.decision_data or {}).get("hybrid"))
+# Defined in modelctl_plans because ranking needs the same predicate for
+# Task H2's guardrail, and this module already imports that one.
+_is_experimental = modelctl_plans.is_experimental_plan
 
 
 def _observed_values(obs) -> dict:
@@ -161,7 +159,7 @@ def build_plan_evidence(profile, plans, observations=None, failures=None,
                     "this build does not report moe_hybrid_cpu_miss")
 
         blocked = bool(blocked_reasons)
-        is_baseline = plan.source == "current-profile"
+        is_baseline = modelctl_plans.is_baseline_plan(plan)
 
         # Precedence: a plan that cannot run is never advertised as tested
         # or safe, and an experimental plan stays labelled experimental

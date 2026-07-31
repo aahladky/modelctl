@@ -517,6 +517,11 @@ class RuntimeDB:
                 "prompt_tps": d["prompt_tps"],
                 "load_seconds": d["load_seconds"],
                 "actual_context": d["actual_context"],
+                # Task H2 ranks on these directly: interactive latency is
+                # TTFT, not load time, and storage traffic is the bytes the
+                # run actually read rather than whether mmap was configured.
+                "ttft_seconds": d.get("ttft_seconds"),
+                "read_bytes": d.get("read_bytes"),
                 "cache_state": d.get("cache_state") or "cold",
                 "stale": bool(reasons),
                 "stale_reasons": list(reasons),

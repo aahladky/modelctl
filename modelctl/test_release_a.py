@@ -380,3 +380,114 @@ class TestReleaseAColdWarmSeparation(unittest.TestCase):
         self.assertEqual(set(obs), {"a", "b"})
         self.assertTrue(all(o["cache_state"] == "warm" for o in obs.values()))
         self.assertEqual(obs["b"]["generation_tps"], 45.0)
+
+
+class TestExperimentalGuardrail(unittest.TestCase):
+    """Task H2: an experimental plan outranks a safe baseline only on
+    evidence -- a current measurement that clears a configurable margin."""
+
+    def _plan(self, pid, cache_bytes=0, source="test", ram=0, ctx=32768):
+        from modelctl_plans import LaunchPlan, ResourceClaim
+        return LaunchPlan(
+            id=pid, profile_name="m", backend="llama-cpp", label=pid,
+            argv=(), env={},
+            claim=ResourceClaim({"S0": 8 << 30}, ram, "none", ctx,
+                                cache_bytes=cache_bytes),
+            estimated={}, source=source, warnings=(), decision_data={})
+
+    def _policy(self, objective="fastest_generation", margin=0.10):
+        from modelctl_plans import RuntimePolicy
+        return RuntimePolicy(objective, None, True, True, 8192, None, 3,
+                             experimental_margin=margin)
+
+    def setUp(self):
+        import modelctl_plans
+        self.mp = modelctl_plans
+        self.safe = self._plan("safe", source="current-profile")
+        self.exp = self._plan("exp", cache_bytes=2 << 30)
+
+    def test_experimental_leads_when_it_clears_the_margin(self):
+        obs = {"safe": {"generation_tps": 10.0},
+               "exp": {"generation_tps": 12.0}}       # +20% vs 10% required
+        ranked = self.mp.rank_plans([self.safe, self.exp], self._policy(), obs)
+        self.assertEqual(ranked[0][0].id, "exp")
+
+    def test_experimental_is_demoted_when_it_only_ties(self):
+        # Equal performance is not worth the risk of an experimental path.
+        obs = {"safe": {"generation_tps": 10.0},
+               "exp": {"generation_tps": 10.4}}       # +4%, under the margin
+        explain = {}
+        ranked = self.mp.rank_plans([self.safe, self.exp], self._policy(),
+                                    obs, explain=explain)
+        self.assertEqual(ranked[0][0].id, "safe")
+        self.assertIn("exp", explain)
+        self.assertIn("margin", explain["exp"])
+
+    def test_demoted_experimental_is_still_available(self):
+        # Demotion is an ordering, not a removal: the user can still pick it.
+        obs = {"safe": {"generation_tps": 10.0}, "exp": {"generation_tps": 10.1}}
+        ranked = self.mp.rank_plans([self.safe, self.exp], self._policy(), obs)
+        self.assertEqual({p.id for p, _ in ranked}, {"safe", "exp"})
+
+    def test_stale_measurement_cannot_promote_an_experimental_plan(self):
+        obs = {"safe": {"generation_tps": 10.0},
+               "exp": {"generation_tps": 99.0, "stale": True,
+                       "stale_reasons": ["environment changed since this was measured"]}}
+        explain = {}
+        ranked = self.mp.rank_plans([self.safe, self.exp], self._policy(),
+                                    obs, explain=explain)
+        self.assertEqual(ranked[0][0].id, "safe")
+        self.assertIn("stale", explain["exp"])
+        # H3 needs the specific cause, not just the word "stale".
+        self.assertIn("environment changed", explain["exp"])
+
+    def test_unmeasured_experimental_never_leads(self):
+        obs = {"safe": {"generation_tps": 10.0}}
+        explain = {}
+        ranked = self.mp.rank_plans([self.safe, self.exp], self._policy(),
+                                    obs, explain=explain)
+        self.assertEqual(ranked[0][0].id, "safe")
+        self.assertIn("no measurement", explain["exp"])
+
+    def test_margin_zero_ranks_experimental_on_score_alone(self):
+        obs = {"safe": {"generation_tps": 10.0}, "exp": {"generation_tps": 10.1}}
+        ranked = self.mp.rank_plans([self.safe, self.exp],
+                                    self._policy(margin=0.0), obs)
+        self.assertEqual(ranked[0][0].id, "exp")
+
+    def test_no_measured_safe_plan_means_no_baseline_to_protect(self):
+        # Nothing to be safer than: the objective score decides.
+        obs = {"exp": {"generation_tps": 5.0}}
+        ranked = self.mp.rank_plans([self.safe, self.exp], self._policy(), obs)
+        self.assertEqual(ranked[0][0].id, "exp")
+
+    def test_pinning_overrides_the_guardrail(self):
+        from modelctl_plans import RuntimePolicy
+        obs = {"safe": {"generation_tps": 10.0}, "exp": {"generation_tps": 1.0}}
+        policy = RuntimePolicy("fastest_generation", "exp", True, True,
+                               8192, None, 3)
+        ranked = self.mp.rank_plans([self.safe, self.exp], policy, obs)
+        self.assertEqual(ranked[0][0].id, "exp")
+
+    def test_interactive_latency_ranks_on_ttft_not_load_time(self):
+        a = self._plan("a")
+        b = self._plan("b")
+        obs = {"a": {"ttft_seconds": 2.0, "load_seconds": 1.0},
+               "b": {"ttft_seconds": 0.5, "load_seconds": 60.0}}
+        ranked = self.mp.rank_plans([a, b], self._policy("interactive_latency"), obs)
+        self.assertEqual(ranked[0][0].id, "b")
+
+    def test_lowest_storage_ranks_on_bytes_actually_read(self):
+        a = self._plan("a")
+        b = self._plan("b")
+        obs = {"a": {"read_bytes": 40 << 30}, "b": {"read_bytes": 1 << 30}}
+        ranked = self.mp.rank_plans([a, b], self._policy("lowest_storage"), obs)
+        self.assertEqual(ranked[0][0].id, "b")
+
+    def test_unmeasured_plans_lose_to_measured_ones_on_new_objectives(self):
+        # A plan with no TTFT must not win by having no latency to report.
+        a = self._plan("a")
+        b = self._plan("b")
+        obs = {"a": {"ttft_seconds": 5.0}}
+        ranked = self.mp.rank_plans([a, b], self._policy("interactive_latency"), obs)
+        self.assertEqual(ranked[0][0].id, "a")

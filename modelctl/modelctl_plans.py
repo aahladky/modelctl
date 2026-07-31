@@ -135,6 +135,12 @@ class RuntimePolicy:
     minimum_context: int | None
     maximum_cpu_bytes: int | None
     maximum_storage_tier: int  # 1=gpu, 2=gpu+ram, 3=gpu+ram+storage
+    # How much better an experimental plan must measure than the best safe
+    # baseline before it is allowed to outrank it, as a fraction (0.10 =
+    # 10%). Task H2: an experimental path that is merely equal is not worth
+    # its risk, and one that wins by noise is not winning. Set to 0 to rank
+    # experimental plans purely on score.
+    experimental_margin: float = 0.10
 
 
 # Default policy
@@ -147,6 +153,23 @@ DEFAULT_POLICY = RuntimePolicy(
     maximum_cpu_bytes=None,
     maximum_storage_tier=3,
 )
+
+
+def is_experimental_plan(plan) -> bool:
+    """Does this plan depend on the fork's experimental MoE features?
+
+    Lives here rather than in modelctl_evidence because ranking needs it
+    too (Task H2's guardrail) and evidence already imports this module, so
+    the other direction would be circular.
+    """
+    if (getattr(plan.claim, "cache_bytes", 0) or 0) > 0:
+        return True
+    return bool((getattr(plan, "decision_data", None) or {}).get("hybrid"))
+
+
+def is_baseline_plan(plan) -> bool:
+    """The profile's own configuration -- the plan a user already trusts."""
+    return getattr(plan, "source", "") == "current-profile"
 
 
 def _plan_id(normalized):
@@ -972,7 +995,8 @@ def policy_for_profile(profile):
     )
 
 
-def rank_plans(plans, policy=None, observations=None, failures=None):
+def rank_plans(plans, policy=None, observations=None, failures=None,
+               explain=None):
     """Filter and rank plans by policy constraints.
 
     Enforces every RuntimePolicy field:
@@ -985,6 +1009,13 @@ def rank_plans(plans, policy=None, observations=None, failures=None):
     - pinned_plan_id: promoted to the front (not exclusive) -- fallback to
       the remaining ranked plans stays available unless the caller filters
       (worker only filters when allow_fallback is False).
+    - experimental_margin: an experimental plan sorts below every safe one
+      unless it has a current measurement beating the best measured safe
+      plan by that fraction (Task H2).
+
+    `explain` is an optional dict, populated with plan_id -> reason for
+    every plan the guardrail demoted. Opt-in so the return shape is
+    unchanged for existing callers; Task H3 renders it.
 
     Returns list of (plan, score) tuples, sorted best-first.
     """
@@ -1025,20 +1056,117 @@ def rank_plans(plans, policy=None, observations=None, failures=None):
     # not merely scored down -- they must never be attempted.
     ranked = [(p, sc) for p, sc in ranked if sc != float("-inf")]
 
+    # An experimental plan sorts below the safe ones unless it has earned
+    # its place. Demotion is a sort tier rather than a score change: the
+    # score still reports what was measured, which is what the plan card
+    # shows, and only the ordering reflects the guardrail.
+    demoted = _experimental_demotions(ranked, policy, observations, explain)
+
+    def order(entry):
+        plan, score = entry
+        return (plan.id in demoted, -score)
+
     # Pinned plan promotes to the front but never deletes alternatives.
+    # An explicit pin is the user overriding the guardrail on purpose.
     if policy.pinned_plan_id:
         pinned = [(p, s) for p, s in ranked if p.id == policy.pinned_plan_id]
         rest = [(p, s) for p, s in ranked if p.id != policy.pinned_plan_id]
-        rest.sort(key=lambda x: -x[1])
+        rest.sort(key=order)
         return [(p, float("inf")) for p, s in pinned] + rest
 
-    ranked.sort(key=lambda x: -x[1])
+    ranked.sort(key=order)
     return ranked
 
 
 # Failure classes that permanently disqualify a plan for a backend build
 # (re-testing them is pointless until the backend changes).
 _SUPPRESS_FAILURES = {"unsupported_architecture", "invalid_argument"}
+
+
+def _objective_value(plan, policy, observations):
+    """Higher-is-better magnitude for the active objective.
+
+    Used only for margin comparisons, which is why it is not the score:
+    scores are on arbitrary per-objective scales and several are negative,
+    so "10% better than" is not meaningful on them. These are all positive
+    quantities where larger is genuinely better, so a ratio means something.
+
+    Zero when the plan has no measurement for the objective, which fails
+    any positive margin -- that is how "a current observation exists"
+    becomes a precondition rather than a separate check.
+    """
+    obs = observations.get(plan.id, {}) or {}
+
+    def inverse(x):
+        return 1.0 / x if x else 0.0
+
+    if policy.objective == "fastest_prompt":
+        return obs.get("prompt_tps") or 0
+    if policy.objective == "interactive_latency":
+        return inverse(obs.get("ttft_seconds") or 0)
+    if policy.objective == "fastest_load":
+        return inverse(obs.get("load_seconds") or 0)
+    if policy.objective == "lowest_storage":
+        return inverse((obs.get("read_bytes") or 0) / float(1 << 30))
+    if policy.objective == "lowest_ram":
+        # A claim, not a measurement, so it is always available -- the
+        # non-stale observation check in the guardrail still applies.
+        return inverse(plan.claim.ram_bytes / float(1 << 30))
+    if policy.objective == "largest_context":
+        return plan.claim.expected_context or 0
+    # fastest_generation and balanced both turn on generation throughput.
+    return obs.get("generation_tps") or 0
+
+
+def _experimental_demotions(ranked, policy, observations, explain=None):
+    """Which experimental plans have not earned the right to outrank a
+    safe baseline (Task H2).
+
+    An experimental plan may lead only when it has a current, non-stale
+    measurement and beats the best measured safe plan by
+    policy.experimental_margin. Failing that it is demoted, not dropped:
+    it stays selectable and stays visible with its numbers, but an
+    automatic choice will not land on it.
+
+    With no measured safe plan to compare against there is no baseline to
+    protect, so the margin does not apply and the objective score decides.
+    """
+    if policy.experimental_margin is None:
+        return set()
+
+    experimental = [(p, s) for p, s in ranked if is_experimental_plan(p)]
+    if not experimental:
+        return set()
+
+    safe_values = [_objective_value(p, policy, observations)
+                   for p, _s in ranked if not is_experimental_plan(p)
+                   and (observations.get(p.id) or {}).get("generation_tps") is not None
+                   and not (observations.get(p.id) or {}).get("stale")]
+    best_safe = max(safe_values, default=0.0)
+    if best_safe <= 0:
+        return set()
+
+    required = best_safe * (1.0 + policy.experimental_margin)
+    demoted = set()
+    for plan, _score in experimental:
+        obs = observations.get(plan.id) or {}
+        value = _objective_value(plan, policy, observations)
+        if not obs:
+            reason = "no measurement of its own"
+        elif obs.get("stale"):
+            reasons = obs.get("stale_reasons") or []
+            reason = "measurement is stale" + (
+                f" ({'; '.join(reasons)})" if reasons else "")
+        elif value < required:
+            pct = policy.experimental_margin * 100
+            reason = (f"{value:.4g} does not clear the {pct:.0f}% margin over "
+                      f"the best safe plan's {best_safe:.4g}")
+        else:
+            continue
+        demoted.add(plan.id)
+        if explain is not None:
+            explain[plan.id] = f"experimental plan ranked below safe plans: {reason}"
+    return demoted
 
 
 def _score_plan(plan, policy, observations, failures=None):
@@ -1058,9 +1186,24 @@ def _score_plan(plan, policy, observations, failures=None):
     gen_tps = obs.get("generation_tps", 0) or 0
     prompt_tps = obs.get("prompt_tps", 0) or 0
     load_time = obs.get("load_seconds", 0) or 0
+    ttft = obs.get("ttft_seconds", 0) or 0
+    read_bytes = obs.get("read_bytes", 0) or 0
     ctx = plan.claim.expected_context or 0
 
-    if policy.objective == "fastest_generation":
+    if policy.objective == "interactive_latency":
+        # Time to first token, which is what a user waiting at a prompt
+        # feels -- distinct from fastest_load, which is a one-off cost paid
+        # before any request. Unmeasured plans score below every measured
+        # one rather than winning by having no latency to report.
+        return (-ttft * 100 if ttft else -1e6) - fail_penalty
+    elif policy.objective == "lowest_storage":
+        # Bytes actually read during the run. Never inferred from mmap being
+        # configured: a fully page-cached mmap plan reads nothing, and a
+        # resident plan still pays to load once (Task D2's rule).
+        if not read_bytes:
+            return -1e6 - fail_penalty
+        return -(read_bytes / float(1 << 30)) - fail_penalty
+    elif policy.objective == "fastest_generation":
         return (gen_tps * 10 if gen_tps else -1) - fail_penalty
     elif policy.objective == "fastest_prompt":
         return (prompt_tps * 10 if prompt_tps else -1) - fail_penalty
