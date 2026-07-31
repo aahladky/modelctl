@@ -26,7 +26,7 @@ QUICK=0
 FAILURES=0
 pass() { printf '  \033[32mPASS\033[0m  %s\n' "$1"; }
 fail() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
-head() { printf '\n\033[1m%s\033[0m\n' "$1"; }
+section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 VENV="$REPO/modelctl/.venv/bin/python"
 [ -x "$VENV" ] || VENV=python3
@@ -36,7 +36,7 @@ VENV="$REPO/modelctl/.venv/bin/python"
 # its own pin for a day, so a clone built a runtime the docs did not
 # describe, and the drift check that should have caught it was reading the
 # checked-out commit under the name of the pinned one.
-head "submodule pin"
+section "submodule pin"
 PINNED=$(git -C "$REPO" rev-parse HEAD:llama.cpp 2>/dev/null)
 CHECKED=$(git -C "$REPO/llama.cpp" rev-parse HEAD 2>/dev/null)
 if [ -z "$PINNED" ]; then
@@ -69,7 +69,7 @@ else
 fi
 
 # --- 2. static import / compile --------------------------------------
-head "static checks"
+section "static checks"
 if "$VENV" -m compileall -q "$REPO/modelctl" > /tmp/ci-compileall.log 2>&1; then
     pass "compileall"
 else
@@ -91,13 +91,13 @@ if bad:
 " > /tmp/ci-imports.log 2>&1); then
     pass "every modelctl module imports"
 else
-    fail "import failure -- $(head -1 /tmp/ci-imports.log)"
+    fail "import failure -- $(command head -1 /tmp/ci-imports.log)"
 fi
 
 # --- 3. test suite ----------------------------------------------------
 # Covers the golden command/provenance and transaction rollback
 # jobs, which already live in the suite rather than as separate CI steps.
-head "test suite"
+section "test suite"
 if (cd "$REPO/modelctl" && "$VENV" -m unittest discover -s . -p "test_*.py" \
         > /tmp/ci-tests.log 2>&1); then
     pass "$(grep -oE '^Ran [0-9]+ tests' /tmp/ci-tests.log | tail -1)"
@@ -110,7 +110,7 @@ fi
 # be enforced on every push". A CPU-only build claiming a SYCL feature
 # would let modelctl generate cache flags for a binary that cannot honour
 # them.
-head "CPU-only build and capability truthfulness"
+section "CPU-only build and capability truthfulness"
 if [ "$QUICK" = "1" ]; then
     printf '  \033[33mSKIP\033[0m  build (--quick)\n'
 else
@@ -158,7 +158,7 @@ fi
 # corrupts silently (the 2026-07 use-after-free shipped green through
 # every functional test). ASan/UBSan turns that whole class into a
 # deterministic red test, with no GPU required.
-head "sanitizer pass (ASan/UBSan, host-only tests)"
+section "sanitizer pass (ASan/UBSan, host-only tests)"
 if [ "$QUICK" = "1" ]; then
     printf '  \033[33mSKIP\033[0m  sanitizers (--quick)\n'
 else
@@ -202,7 +202,44 @@ else
     fi
 fi
 
-head "result"
+
+# --- 6. layering: leaf modules must not import the CLI hub ------------
+# modelctl.py is a 4.4k-line CLI hub. When low-level modules import it
+# back, CLI process semantics (sys.exit, print, argparse) leak into
+# long-lived callers -- that inversion is what let a missing profile
+# kill a web job-lane worker thread. These modules stay leaves so the
+# class cannot come back.
+section "layering (leaf modules do not import modelctl)"
+LEAF_VIOLATIONS=$(cd "$REPO/modelctl" && "$VENV" -c "
+import ast, pathlib, sys
+LEAVES = ['modelctl_paths.py', 'modelctl_fsutil.py', 'modelctl_errors.py',
+          'modelctl_profiles.py', 'modelctl_vram.py', 'modelctl_tiers.py',
+          'modelctl_capabilities.py', 'modelctl_hardware.py',
+          'modelctl_storage.py', 'modelctl_backends.py']
+bad = []
+for name in LEAVES:
+    path = pathlib.Path(name)
+    if not path.exists():
+        continue
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+        # Module level only: a lazy import inside a function is the
+        # documented escape hatch for genuinely optional callbacks.
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            col = getattr(node, 'col_offset', 0)
+            names = ([a.name for a in node.names] if isinstance(node, ast.Import)
+                     else [node.module or ''])
+            if col == 0 and any(n == 'modelctl' for n in names):
+                bad.append(f'{name}:{node.lineno}')
+print(' '.join(bad))
+")
+if [ -z "$LEAF_VIOLATIONS" ]; then
+    pass "no leaf module imports modelctl at module level"
+else
+    fail "leaf modules import the CLI hub: $LEAF_VIOLATIONS"
+fi
+
+section "result"
 if [ "$FAILURES" -eq 0 ]; then
     printf '  \033[32mall checks passed\033[0m\n\n'
     exit 0
