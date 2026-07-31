@@ -128,13 +128,17 @@ def manifest_status() -> ManifestStatus:
     status.modelctl_commit = _git(["rev-parse", "HEAD"])
     status.working_tree_dirty = bool(_git(["status", "--porcelain"]))
 
-    # The *pinned* commit is what the umbrella repo's index records, which
+    # The *pinned* commit is what the umbrella repo records at HEAD, which
     # is not necessarily what is checked out in the submodule working tree.
     # Both matter, and for different reasons, so report both.
-    sub = _git(["submodule", "status", "llama.cpp"])
-    if sub:
-        first = sub.split()[0] if sub.split() else ""
-        status.submodule_pinned = first[-40:] if len(first) >= 40 else first
+    #
+    # Read the pin out of the commit tree. `git submodule status` cannot
+    # supply it: that command prints the *checked-out* commit, flagging it
+    # with a leading '+' when it differs from the pin. Parsing its SHA
+    # yields the working-tree commit wearing the pinned commit's name,
+    # which makes the two identical by construction and leaves the drift
+    # check below unable to fire in the one situation it exists for.
+    status.submodule_pinned = _git(["rev-parse", "HEAD:llama.cpp"])
     status.submodule_checked_out = _git(["rev-parse", "HEAD"],
                                         cwd=REPO_ROOT / "llama.cpp")
 

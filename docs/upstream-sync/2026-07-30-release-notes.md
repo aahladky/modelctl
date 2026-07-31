@@ -1,6 +1,6 @@
 # Release notes — llama.cpp runtime synced to upstream 2026-07-30
 
-**Pinned commit:** `2dbf9480 15d3476ce94e3fe0c3b38b941a32a685` (branch `feature/sycl-moe-expert-cache`, based on upstream `origin/master@9b2a08881`)
+**Pinned commit:** `2dbf948015d3476ce94e3fe0c3b38b941a32a685` (branch `feature/sycl-moe-expert-cache`, based on upstream `origin/master@9b2a08881`)
 **Previous pinned state:** `e7af6cf1996cb3d850963213b043d876ffe959ea`, preserved as tag `moe-cache-pre-upstream-2026-07-30`
 **Release channel:** experimental
 
