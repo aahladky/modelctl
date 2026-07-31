@@ -3,7 +3,7 @@
 Defines explicit cold and warm benchmark modes so the UI cannot
 label a page-cache-warm run as an SSD-cold benchmark.
 
-Task D3 turns the modes from labels into controlled procedures. The part
+The modes are controlled procedures, not labels. The part
 that matters is verification: a "storage-cold" run that did not actually
 evict anything is reported as `cold_unverified`, because a cold label on
 a warm measurement corrupts every later comparison that trusts it.

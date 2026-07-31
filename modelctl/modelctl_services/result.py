@@ -1,4 +1,4 @@
-"""The one result type every service operation returns (roadmap Task C5).
+"""The one result type every service operation returns.
 
 Before this, each service had its own result dataclass with its own
 subset of fields, so a caller handling several services had to know five

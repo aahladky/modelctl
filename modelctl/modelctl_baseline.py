@@ -1,4 +1,4 @@
-"""Release A baseline candidate set (roadmap Task E1).
+"""Baseline candidate set for acceptance comparisons.
 
 Acceptance needs four named, directly comparable ways of serving the same
 oversized sparse MoE:

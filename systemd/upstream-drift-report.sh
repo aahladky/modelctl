@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Task 0.10 -- weekly upstream drift report for the llama.cpp runtime fork.
+# Weekly upstream drift report for the llama.cpp runtime fork.
 # Purely informational: fetches upstream, reports drift, never touches the
 # pinned submodule commit, feature/sycl-moe-expert-cache, or any branch.
 set -euo pipefail

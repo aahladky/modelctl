@@ -1,6 +1,6 @@
 """Diagnostics: integration manifest, capability report, support bundle.
 
-Roadmap Task C4. The settings page has to answer "what exactly is this
+The settings page has to answer "what exactly is this
 install running?" without the user shelling into the box: which runtime
 commit, which schema contract, whether the checkout matches the manifest,
 what the backend actually reported, and a bundle they can hand to someone

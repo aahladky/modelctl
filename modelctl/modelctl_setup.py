@@ -1,6 +1,6 @@
 """First-run readiness checks for modelctl.
 
-Roadmap Task C1: the browser is the product entry point, so it has to be
+The browser is the product entry point, so it has to be
 able to say what this machine is still missing *before* the user starts a
 download that will fail inside a job twenty minutes later.
 
@@ -260,8 +260,7 @@ def _check_network_exposure() -> SetupCheck:
     """The console can launch processes and rewrite runtime config, so its
     reach must always be visible: loopback-only or LAN-accessible, and on
     what address. LAN over plain HTTP is an acceptable personal default on
-    a trusted home network; exposure to untrusted networks is unsupported
-    (roadmap: local-first re-review, P1)."""
+    a trusted home network; exposure to untrusted networks is unsupported."""
     exposure = modelctl.web_exposure()
     if exposure["mode"] == "loopback-only":
         return SetupCheck(

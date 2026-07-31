@@ -1,4 +1,4 @@
-"""Release A target-hardware matrix (roadmap Task E3).
+"""Target-hardware acceptance matrix.
 
 Defines the hardware/placement combinations Release A has to pass, works
 out which of them this machine can actually run, executes them against
@@ -13,7 +13,7 @@ Every cell also states its own moe_cache state. Inheriting the fixture
 profile's cache configuration made cells fail for a reason that had
 nothing to do with what they were testing: a profile requesting
 decode.miss_execution=cpu is correctly refused by the fail-closed launch
-gate, which is a Phase B success, not a matrix result.
+gate, which is a launch-gate success, not a matrix result.
 
 Public API:
     CELLS

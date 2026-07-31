@@ -326,7 +326,7 @@ def submit_matrix_apply(runner):
     """Apply the managed routing matrix.
 
     The backup/write/restart/health-check/rollback sequence lives in
-    routing_service (Task C5); this only submits it and translates the
+    routing_service; this only submits it and translates the
     result into the job outcome. The rollback_status is preserved in the
     payload, because "the apply failed" and "the apply failed and the old
     config could not be restored" need different responses.

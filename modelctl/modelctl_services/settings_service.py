@@ -1,6 +1,6 @@
 """Settings service: defaults, and the diagnostics the console reports.
 
-Roadmap Task C5. `modelctl defaults` (CLI) and the settings page (web)
+`modelctl defaults` (CLI) and the settings page (web)
 both mutated the defaults file directly; this is the one implementation,
 and it validates rather than silently discarding a bad value the way the
 route's try/except ValueError did.

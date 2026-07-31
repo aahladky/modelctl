@@ -1,6 +1,6 @@
 """Model acquisition service: pull from Hugging Face, import from disk.
 
-Roadmap Task C5. The web layer previously coordinated acquisition inline
+The web layer previously coordinated acquisition inline
 in mutate.py, so the wizard's pre-flight checks lived in route code and
 the CLI path had none of them.
 
@@ -27,7 +27,7 @@ GGUF_MAGIC = b"GGUF"
 def verify_local_gguf(path) -> ServiceResult:
     """Check a local file really is a usable GGUF before it becomes a profile.
 
-    Task C2 asks the wizard to verify before profile creation. Doing it
+    The wizard verifies before profile creation. Doing it
     here rather than in the wizard means the CLI import path gets the same
     checks.
     """

@@ -240,7 +240,7 @@ def normalize_capabilities(raw_caps: dict) -> dict:
         "moe_cache_metrics": bool(features.get("moe_cache_metrics")),
         "moe_cache_prefill_policy": bool(features.get("moe_cache_prefill_policy")),
         "moe_cache_reset": bool(features.get("moe_cache_reset")),
-        "moe_cache_prefetch": False,  # Not implemented until Phase 9
+        "moe_cache_prefetch": False,  # not implemented; forced false
         # Routed MoE ops honour their own offload minimum. Passed
         # through from the backend rather than defaulted, because the
         # acceptance matrix gates its offload sweep on it: dropping the
@@ -251,8 +251,8 @@ def normalize_capabilities(raw_caps: dict) -> dict:
             features.get("moe_offload_threshold_control")),
     }
 
-    # Force prefetch false until implemented. Hybrid is now allowed through
-    # when the backend reports it (Phase 7 implements the control plane).
+    # Force prefetch false until implemented. Hybrid is allowed through
+    # when the backend reports it.
     raw_features = dict(features)
 
     constraints = raw_caps.get("constraints", {})
@@ -477,7 +477,7 @@ def supports_metrics(caps: dict) -> bool:
 def supports_prefetch(caps: dict) -> bool:
     """True if the backend supports expert prefetching.
 
-    Always false until Phase 9 implements prefetch.
+    Always false; prefetch is not implemented and normalization forces it off.
     """
     return bool(caps.get("features", {}).get("moe_cache_prefetch"))
 

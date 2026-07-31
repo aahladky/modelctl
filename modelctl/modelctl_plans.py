@@ -31,11 +31,16 @@ import modelctl_vram
 
 @dataclass(frozen=True)
 class ResourceClaim:
-    vram_bytes: dict          # {device: bytes} -- TOTAL reservation per device
-    # CPU-side model bytes. This is the reservation figure the worker and
-    # matrix use, and it is NOT a promise of residency: when storage_mode
-    # is "mmap" most of it is addressed rather than copied. Use
-    # ram_resident_bytes for "how much RAM will this actually hold".
+    # {device: bytes} -- the STATIC reservation per device (weights + KV
+    # + overhead). NOT the peak: the dynamic expert-cache budget is an
+    # additional allocation on top. Admission goes through
+    # vram_admission_bytes(), never this field alone.
+    vram_bytes: dict
+    # CPU-addressed model bytes. NOT a promise of residency: when
+    # storage_mode is "mmap" most of it is addressed rather than copied,
+    # and it is not what admission charges -- ram_admission_bytes()
+    # defines that. Use ram_resident_bytes for "how much RAM this will
+    # actually hold".
     ram_bytes: int
     storage_mode: str         # "none", "mmap", "direct"
     expected_context: int | None
@@ -44,7 +49,7 @@ class ResourceClaim:
     model_bytes: int = 0      # total model weight bytes
     cache_bytes: int = 0      # dynamic cache budget separate from static VRAM
 
-    # --- per-device VRAM decomposition (Task D1) ---------------------
+    # --- per-device VRAM decomposition -------------------------------
     # Reported separately because "12 GiB on SYCL0" answers nothing about
     # whether raising the context or the cache budget will still fit.
     # static + kv + overhead sum to vram_bytes[device].
@@ -56,7 +61,7 @@ class ResourceClaim:
     # before placing static experts, not a slice of the static claim.
     vram_cache_bytes: dict = field(default_factory=dict)
 
-    # --- RAM and storage (Task D1) -----------------------------------
+    # --- RAM and storage ---------------------------------------------
     # Bytes that really will be resident: the non-mmap portion. An mmap
     # plan's model bytes are NOT counted here -- presenting mmap size as
     # guaranteed resident RAM is the specific error this split exists to
@@ -83,8 +88,8 @@ class ResourceClaim:
     # {"vram": {"SYCL0": {"static": N, "kv": N, "overhead": N, "cache": N}},
     #  "ram": {"resident": N, "mmap": N, "page_cache_working_set": N,
     #          "staging": N}}
-    # It does NOT affect vram_bytes, which remains the total reservation
-    # used by the worker and matrix logic.
+    # It is display data only; admission reads vram_admission_bytes()
+    # and ram_admission_bytes(), never this dict.
 
     def vram_total(self) -> int:
         return sum(self.vram_bytes.values())
@@ -171,7 +176,7 @@ class RuntimePolicy:
     maximum_storage_tier: int  # 1=gpu, 2=gpu+ram, 3=gpu+ram+storage
     # How much better an experimental plan must measure than the best safe
     # baseline before it is allowed to outrank it, as a fraction (0.10 =
-    # 10%). Task H2: an experimental path that is merely equal is not worth
+    # 10%). An experimental path that is merely equal is not worth
     # its risk, and one that wins by noise is not winning. Set to 0 to rank
     # experimental plans purely on score.
     experimental_margin: float = 0.10
@@ -192,8 +197,9 @@ DEFAULT_POLICY = RuntimePolicy(
 def is_experimental_plan(plan) -> bool:
     """Does this plan depend on the fork's experimental MoE features?
 
-    Lives here rather than in modelctl_evidence because ranking needs it
-    too (Task H2's guardrail) and evidence already imports this module, so
+    Lives here rather than in modelctl_evidence because ranking (the
+    experimental-margin guardrail) needs it too and evidence already
+    imports this module, so
     the other direction would be circular.
     """
     if (getattr(plan.claim, "cache_bytes", 0) or 0) > 0:
@@ -267,7 +273,7 @@ def _parse_ot_rules(extra):
 # Fraction of CPU-side MoE expert weights expected to stay hot in the page
 # cache. Only the experts a request actually routes to are touched, so the
 # working set is far smaller than the offloaded bytes. A rough constant is
-# honest here in a way that "all of it" is not; D4's calibration and D2's
+# honest here in a way that "all of it" is not; storage calibration and
 # measured page faults are what refine it.
 _MOE_PAGE_CACHE_FRACTION = 0.25
 
@@ -466,14 +472,16 @@ def _make_claim(profile, config, hardware):
         # under-reserve by 2 GiB against what the runtime allocates, and
         # the cache would collide with statically placed experts.
         #
-        # Reserve the uniform figure on every device the profile names, so
-        # the claim describes what will actually be allocated rather than
-        # what was asked for. modelctl.build_server_args() already collapses
-        # the flag to the same max; this is the planner's half of that.
+        # Reserve the uniform figure on every device the profile's budget
+        # map names -- the planner's half of the collapse that
+        # modelctl.build_server_args() applies to the flag. Known limit:
+        # the runtime allocates on every device that CREATES a cache,
+        # which placement decides; a participating device the budget map
+        # does not name is still unreserved here.
         cache_budget = max(declared.values(), default=0)
         cache_map = {d: cache_budget for d in declared}
 
-    # ---- RAM vs mmap (Task D1) -----------------------------------------
+    # ---- RAM vs mmap ---------------------------------------------------
     # CPU-side weights are only *resident* when mmap is off. With mmap on
     # they are addressed, and residency is the page cache's decision --
     # reporting them as RAM is what makes an oversized MoE look like it
@@ -555,7 +563,7 @@ def _make_plan(profile, config, source, hardware, extra_warnings=(), decision=No
         "binary": merged.get("binary", "") or profile.get("binary", ""),
         "binary_fp": modelctl_vram.file_fingerprint(backend_bin),
         # Every shard, not just the named file: swapping shard 2 of 3 has to
-        # produce a different plan (Task H1). Identical to file_fingerprint
+        # produce a different plan. Identical to file_fingerprint
         # for unsharded models, so single-file plan IDs are unchanged.
         "model_fp": modelctl_vram.model_fingerprint(profile.get("model_path")),
         "mmproj_fp": modelctl_vram.file_fingerprint(profile.get("mmproj_path")),
@@ -671,7 +679,7 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
 
     Experimental variants (MoE transfer-cache, hybrid CPU-miss) are only
     generated when include_experimental is True or the profile's runtime
-    section sets allow_experimental_plans (roadmap Task 5.8: the variant
+    section sets allow_experimental_plans (the variant
     stays disabled by default unless the user opts in).
     """
     if profile.get("backend", "llama-cpp") == "ovms":
@@ -1063,11 +1071,11 @@ def rank_plans(plans, policy=None, observations=None, failures=None,
       (worker only filters when allow_fallback is False).
     - experimental_margin: an experimental plan sorts below every safe one
       unless it has a current measurement beating the best measured safe
-      plan by that fraction (Task H2).
+      plan by that fraction.
 
     `explain` is an optional dict, populated with plan_id -> reason for
     every plan the guardrail demoted. Opt-in so the return shape is
-    unchanged for existing callers; Task H3 renders it.
+    unchanged for existing callers; the decision-trace renderer uses it.
 
     Returns list of (plan, score) tuples, sorted best-first.
     """
@@ -1172,7 +1180,7 @@ def _objective_value(plan, policy, observations):
 
 def _experimental_demotions(ranked, policy, observations, explain=None):
     """Which experimental plans have not earned the right to outrank a
-    safe baseline (Task H2).
+    safe baseline.
 
     An experimental plan may lead only when it has a current, non-stale
     measurement and beats the best measured safe plan by
@@ -1251,7 +1259,7 @@ def _score_plan(plan, policy, observations, failures=None):
     elif policy.objective == "lowest_storage":
         # Bytes actually read during the run. Never inferred from mmap being
         # configured: a fully page-cached mmap plan reads nothing, and a
-        # resident plan still pays to load once (Task D2's rule).
+        # resident plan still pays to load once.
         if not read_bytes:
             return -1e6 - fail_penalty
         return -(read_bytes / float(1 << 30)) - fail_penalty

@@ -598,7 +598,7 @@ _FP_CACHE = {}
 
 
 def model_fingerprint(model_path):
-    """Identity of a model, covering every shard (roadmap Task H1).
+    """Identity of a model, covering every shard.
 
     file_fingerprint() covers the file it is handed, which for a sharded
     GGUF is only the shard that was named. Replacing shard 2 of 3 leaves it

@@ -79,7 +79,7 @@ _STATES = {"pending", "starting", "active", "releasing", "stale"}
 class ObservationIdentity:
     """What must still hold for a past measurement to describe this setup.
 
-    Roadmap Task H1. The task lists nine identities, but most of them are
+    Most of the identities that matter are
     already load-bearing in the plan ID itself: _plan_id() hashes the model
     fingerprint, binary fingerprint, device, split, context, cache types,
     fit, extra args, moe_cache config and env. Change any of those and the
@@ -137,8 +137,9 @@ class ObservationIdentity:
     def stale_reasons(self, row) -> tuple:
         """Why `row` no longer describes this setup; empty when it still does.
 
-        Reasons rather than a bare bool because Task H3 has to explain
-        automatic choices, and "rejected: stale" is not an explanation.
+        Reasons rather than a bare bool because the decision trace has to
+        explain automatic choices, and "rejected: stale" is not an
+        explanation.
         """
         checks = (
             ("hardware", self.hardware_fingerprint, row.get("hardware_fingerprint")),
@@ -155,7 +156,7 @@ class ObservationIdentity:
                 out.append(f"{label} changed since this was measured")
         return tuple(out)
 
-# Additive migrations for plan_runs provenance columns (Task 1.6).
+# Additive migrations for plan_runs provenance columns.
 # Each tuple is (column_name, column_type, default).
 _MIGRATIONS = [
     ("command_fingerprint", "TEXT NOT NULL DEFAULT ''", ""),
@@ -169,11 +170,11 @@ _MIGRATIONS = [
     ("decision_json", "TEXT NOT NULL DEFAULT '{}'", "{}"),
     ("parent_job_id", "TEXT", None),
     ("fallback_ordinal", "INTEGER", None),
-    # Cold/warm separation (Task 6.2): measurements carry their cache
+    # Cold/warm separation: measurements carry their cache
     # state ("cold"/"warm"/"" for legacy rows) and ranking never compares
     # across states.
     ("cache_state", "TEXT NOT NULL DEFAULT ''", ""),
-    # Process I/O and page-fault sampling (Task 3.3): distinguishes compute
+    # Process I/O and page-fault sampling: distinguishes compute
     # speed from active storage reads. read_bytes_warmup/_generation split
     # /proc/<pid>/io's read_bytes at the warmup/measured-run boundary;
     # read_bytes is the run total. NULL for rows recorded before this
@@ -183,7 +184,7 @@ _MIGRATIONS = [
     ("read_bytes_generation", "INTEGER", None),
     ("major_faults", "INTEGER", None),
     ("minor_faults", "INTEGER", None),
-    # Task D2. PSS divides shared pages by their sharers, so a main model
+    # PSS divides shared pages by their sharers, so a main model
     # and a draft sharing mmap'd pages are not double-counted; it is not
     # always readable, and NULL means unknown rather than zero.
     ("peak_pss_bytes", "INTEGER", None),
@@ -530,7 +531,7 @@ class RuntimeDB:
                 "prompt_tps": d["prompt_tps"],
                 "load_seconds": d["load_seconds"],
                 "actual_context": d["actual_context"],
-                # Task H2 ranks on these directly: interactive latency is
+                # Ranking reads these directly: interactive latency is
                 # TTFT, not load time, and storage traffic is the bytes the
                 # run actually read rather than whether mmap was configured.
                 "ttft_seconds": d.get("ttft_seconds"),

@@ -171,7 +171,7 @@ def classify_storage_activity(read_bytes, major_faults, storage_mode,
 def classify_bottleneck(run):
     """What limited this run: storage, CPU, H2D transfer, or GPU compute?
 
-    Task D5. Every branch is justified by a counter the run actually
+    Every branch is justified by a counter the run actually
     recorded, and the answer is "unknown" whenever the evidence does not
     support one -- a confident wrong answer here sends someone off to
     optimise the wrong thing.
@@ -240,7 +240,7 @@ def classify_bottleneck(run):
 class _Sampler:
     """1 Hz peak sampler: per-device VRAM free, child RSS, system RAM
     available, and cumulative storage read bytes / page faults across the
-    launched process group (Task 3.3) -- distinguishes compute speed from
+    launched process group -- distinguishes compute speed from
     active storage reads."""
 
     def __init__(self, pid, storage_device=""):
@@ -486,7 +486,7 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
       warmup_generation_tps: speed during the warmup phase (if any)
 
     profile_override supplies the profile dict directly instead of loading
-    it by name. The Release A hardware matrix (Task E3) varies config per
+    it by name. The hardware acceptance matrix varies config per
     cell over one fixture model, and saving a dozen throwaway profiles to
     do that would pollute the user's profile store.
     """

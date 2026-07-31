@@ -44,7 +44,7 @@ class ResolvedBackend:
     capabilities: dict           # normalized schema-2 capabilities
     # Digest of `capabilities`. Recorded with every observation so a
     # rebuilt runtime that reports different features stales measurements
-    # taken under the old contract (roadmap Task B3).
+    # taken under the old contract.
     capability_fingerprint: str = ""
     # Just the vars this profile adds on top of the ambient environment.
     # Rendered artifacts (run.sh exports, llama-swap `env:`) must use this,
@@ -93,7 +93,7 @@ class LaunchCommand:
         """False when this command must not be launched or written out.
 
         Every path that starts a process, writes an artifact, or syncs a
-        llama-swap entry has to consult this (roadmap Task B2).  A command
+        llama-swap entry has to consult this.  A command
         that failed validation is still returned rather than raised on, so
         the browser and CLI can show the user exactly what was rejected and
         why -- but it is not launchable.
@@ -190,8 +190,7 @@ def resolve_backend(profile: dict, binary_override: str | None = None) -> Resolv
     resolution, and capability probing happen.  All launch paths must
     call this instead of doing their own resolution.
 
-    The pipeline runs in one fixed order and exactly once (roadmap Task
-    B4)::
+    The pipeline runs in one fixed order and exactly once::
 
         resolve candidate binary + effective environment (preflight)
         -> fingerprint binary and environment
@@ -199,12 +198,9 @@ def resolve_backend(profile: dict, binary_override: str | None = None) -> Resolv
         -> return an immutable ResolvedBackend
 
     build_launch_command() consumes the preflight result recorded here
-    instead of running preflight a second time.  The two calls used to
-    disagree: preflight's auto-fix could land on a different binary than
-    the one the command was built around, and resolve_backend sourced an
-    oneAPI env script for *every* llama-cpp profile while preflight only
-    sourced one for SYCL profiles missing LD_LIBRARY_PATH -- so a worker
-    launched with an environment the generated run.sh never exported.
+    instead of running preflight a second time -- a second run's
+    auto-fix could land on a different binary or environment than the
+    one this object was built around.
     """
     backend_name = profile.get("backend", "llama-cpp")
 
@@ -306,15 +302,12 @@ def build_launch_command(
             profile, capabilities=backend.capabilities)
         validation.extend(from_preflight_tuples(cache_msgs))
 
-        # preflight() already ran once, inside resolve_backend(); reuse its
-        # messages rather than running it again (roadmap Task B4).  It
-        # returns plain message strings with the severity as a text prefix
-        # ("ERROR: ..."/"WARNING: ...", or no prefix at all for
-        # informational auto-fix notes) -- NOT (severity, summary) tuples
-        # like preflight_moe_cache() above.  Every test mocking preflight()
-        # passes an empty message list, so unpacking these as tuples here
-        # crashed on every real profile that has anything to report (which
-        # is nearly all of them).
+        # preflight() already ran once, inside resolve_backend(); reuse
+        # its messages rather than running it again.  They are plain
+        # strings with the severity as a text prefix ("ERROR: ..."/
+        # "WARNING: ...", unprefixed for informational notes) -- NOT
+        # (severity, summary) tuples like preflight_moe_cache() above.
+        # Normalize them into structured validation messages here.
         for msg in backend.preflight_messages:
             if msg.startswith("ERROR:"):
                 validation.append(ValidationMessage(
@@ -367,13 +360,9 @@ def launch_command_for_profile(
 ) -> LaunchCommand:
     """The canonical LaunchCommand for a profile exactly as it is saved.
 
-    Surfaces that render or launch "what this profile means right now" --
-    the browser command preview, the generated run.sh, the llama-swap
-    entry, and the smoke test -- have no plan of their own.  They used to
-    each call preflight() plus build_server_args() directly, which meant
-    four independent reconstructions of the command after validation, all
-    free to drift from what the worker actually launches (roadmap Task
-    B1).  They call this instead.
+    Used by every fixed-profile surface with no plan of its own: the
+    browser command preview, the generated run.sh, the llama-swap entry,
+    and the smoke test.
 
     Pass port=None for rendering: the argv then carries no --port at all,
     leaving the caller to substitute its own placeholder (``${PORT}``).

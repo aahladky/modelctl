@@ -1,6 +1,6 @@
 """Benchmark service: run a labelled measurement and record it.
 
-Roadmap Task C5. cache_service already owned metric scraping and
+cache_service already owned metric scraping and
 calibration; what was missing was the operation that runs a benchmark,
 labels it with the mode that was actually achieved, and records it.
 

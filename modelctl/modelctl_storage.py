@@ -27,7 +27,7 @@ class StorageInfo:
     total_bytes: int
     free_bytes: int
     allow_mmap: bool
-    # Mount options as /proc/mounts reports them. Task D4: `noatime`,
+    # Mount options as /proc/mounts reports them: `noatime`,
     # `discard`, a `compress=` setting or a read-only mount all change what
     # a storage measurement means, so calibration records them alongside
     # the numbers.

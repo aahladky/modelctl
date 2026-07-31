@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Integration-repository checks (roadmap Task A3).
+# Integration-repository checks.
 #
 # Written as a script rather than only as a CI workflow because this gitea
 # has Actions disabled and no runner, so a workflow file alone would never
@@ -95,7 +95,7 @@ else
 fi
 
 # --- 3. test suite ----------------------------------------------------
-# Covers the roadmap's golden command/provenance and transaction rollback
+# Covers the golden command/provenance and transaction rollback
 # jobs, which already live in the suite rather than as separate CI steps.
 head "test suite"
 if (cd "$REPO/modelctl" && "$VENV" -m unittest discover -s . -p "test_*.py" \
@@ -106,7 +106,7 @@ else
 fi
 
 # --- 4. CPU-only build and capability truthfulness --------------------
-# The roadmap's one non-negotiable: "CPU-only capability truthfulness must
+# One non-negotiable: "CPU-only capability truthfulness must
 # be enforced on every push". A CPU-only build claiming a SYCL feature
 # would let modelctl generate cache flags for a binary that cannot honour
 # them.

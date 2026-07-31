@@ -1,7 +1,7 @@
 """llama-swap routing service: config sync, matrix apply, rollback.
 
-Roadmap Task C5. The matrix apply was the clearest example of what this
-phase is about: a multi-step mutation (back up, rewrite config, restart a
+The matrix apply was the clearest example of what this service layer
+is for: a multi-step mutation (back up, rewrite config, restart a
 service, health-check, roll back on failure) coordinated inline in a web
 route closure, so the CLI had no equivalent and nothing could report what
 the rollback actually did.

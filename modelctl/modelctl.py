@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-modelctl - search, pull, and configure local GGUF models from Hugging Face.
+modelctl - the control plane for this machine's local model serving.
 
-Backend-agnostic: generates a run.sh (raw llama-server command) and an
-Ollama-style Modelfile from one saved profile, and syncs the profile
-into the live llama-swap config.yaml. Profiles are plain JSON so
-they're easy to inspect, edit by hand, or regenerate later.
+CLI core behind the web console: profile lifecycle (search, pull,
+import, verify), hardware-aware placement, launch preview and
+validation, and llama-swap router management. From one saved profile it
+generates a run.sh (raw llama-server command) and an Ollama-style
+Modelfile, and syncs the profile into the live llama-swap config.yaml.
+Profiles are plain JSON so they're easy to inspect, edit by hand, or
+regenerate later.
 """
 import functools
 import hashlib
@@ -69,8 +72,7 @@ LLAMA_SERVER_RESOLVED = _resolved is not None
 # those snippets into this file.
 LLAMA_SWAP_CONFIG_PATH = Path(os.environ.get("MODELCTL_LLAMA_SWAP_CONFIG", Path.home() / "services" / "llama-swap" / "config.yaml"))
 # The systemd --user unit running llama-swap. restart_llama_swap_service()
-# reload-or-restarts this after writing a changed config.yaml, mirroring
-# restart_router_service()/restart_openarc_service().
+# reload-or-restarts this after writing a changed config.yaml.
 LLAMA_SWAP_SERVICE_NAME = os.environ.get("MODELCTL_LLAMA_SWAP_SERVICE", "llama-swap.service")
 # llama-swap's own OpenAI-compatible base URL -- what sync_hermes_custom_providers()
 # points its modelctl-managed GGUF provider bucket at (distinct from
@@ -80,11 +82,10 @@ LLAMA_SWAP_BASE_URL = os.environ.get("MODELCTL_LLAMA_SWAP_BASE_URL", "http://127
 
 # `modelctl test --evals ...` shells out to these rather than reimplementing
 # lm-evaluation-harness invocation a second time -- bench.sh/speed.py already
-# carry the debugged-live logic (reasoning-model stop-sequence fix, sane
-# token budgets, thinking-disabled-by-default) documented in
-# ~/services/llama-swap/README.md, and fixing a bug there (e.g. the missing
-# langdetect/immutabledict deps ifeval needed) fixes both call paths at
-# once. Deliberately NOT reimplemented as profile-only: bench.sh/speed.py
+# carry the debugged-live logic (reasoning-model stop sequences, sane
+# token budgets, thinking disabled by default), so a fix there fixes both
+# call paths at once. Deliberately NOT reimplemented as profile-only:
+# bench.sh/speed.py
 # take any llama-swap model id, including hand-authored (non-modelctl)
 # entries like fast-7b, so they stay useful standalone too.
 LLAMA_SWAP_DIR = Path(os.environ.get("MODELCTL_LLAMA_SWAP_DIR", Path.home() / "services" / "llama-swap"))
@@ -93,45 +94,35 @@ SPEED_PY = Path(os.environ.get("MODELCTL_SPEED_PY", LLAMA_SWAP_DIR / "speed.py")
 # Substring-matched, not an exact set -- covers instruct/plus/infilling
 # variants (humaneval_instruct, mbpp_plus, ...) without needing to enumerate
 # every lm-eval task name. These execute model-generated code unsandboxed on
-# this host (see README) -- modelctl requires an explicit --confirm-unsafe-code
-# flag before running any of them, same two-gate opt-in bench.sh's README
-# documents (--confirm_run_unsafe_code + HF_ALLOW_CODE_EVAL=1).
+# this host -- modelctl requires an explicit --confirm-unsafe-code flag
+# before running any of them, on top of lm-eval's own two-gate opt-in
+# (--confirm_run_unsafe_code + HF_ALLOW_CODE_EVAL=1).
 CODE_EVAL_TASK_PREFIXES = ("humaneval", "mbpp")
 
-# --- OVMS backend (OpenVINO IR models, served via Docker + ovms-proxy.py --
-# see that script's docstring in ~/services/llama-swap/ for why a plain `docker run`
-# isn't enough). Each profile becomes one llama-swap `models:` entry, synced
-# into LLAMA_SWAP_CONFIG_PATH by sync_llama_swap_config() the exact same way
-# llama-cpp-backend profiles are -- unlike the retired OpenArc backend (one
-# shared process, its own JSON registry, its own load/unload REST API),
-# there's no separate "backend process" to manage here: llama-swap already
-# does on-demand start/stop/eviction for OVMS models the same way it does
-# for GGUF ones, via `docker run`/`docker stop` under the hood.
-#
-# 2026-07-09: replaces the OpenArc backend (retired -- openarc.service is
-# stopped, and its 3 profiles were migrated to this backend, renamed to
-# match the llama-swap model IDs they were already hand-authored under:
-# qwen3-6-27b-int4-ov -> big-qwen, gemma-4-31b-it-int4-ov -> big-gemma,
-# qwen3.6-35b-ov -> big-qwen-moe). See unified-llama-swap-serving memory.
+# --- OVMS backend (OpenVINO IR models, served via Docker behind the
+# ovms-proxy.py script at OVMS_PROXY_SCRIPT -- its docstring explains why
+# a plain `docker run` isn't enough). Each profile becomes one llama-swap
+# `models:` entry, synced into LLAMA_SWAP_CONFIG_PATH by
+# sync_llama_swap_config() the exact same way llama-cpp-backend profiles
+# are. There is no separate backend process to manage: llama-swap owns
+# on-demand start/stop/eviction for OVMS models the same way it does for
+# GGUF ones, via `docker run`/`docker stop` under the hood.
 OVMS_MODEL_REPOSITORY = Path(os.environ.get("MODELCTL_OVMS_MODELS_DIR", Path.home() / "services" / "ovms" / "models"))
 OVMS_PROXY_SCRIPT = Path(os.environ.get("MODELCTL_OVMS_PROXY_SCRIPT", Path.home() / "services" / "llama-swap" / "ovms-proxy.py"))
 OVMS_DEFAULT_TASK = os.environ.get("MODELCTL_OVMS_TASK", "text_generation")
 OVMS_DEFAULT_DEVICE = os.environ.get("MODELCTL_OVMS_DEVICE", "GPU.0")
 OVMS_DEFAULT_TOOL_PARSER = os.environ.get("MODELCTL_OVMS_TOOL_PARSER", "hermes3")
-# Blank by default: only reasoning/"thinking" models (currently just Qwen3-family
-# -- OVMS only implements a "qwen3" reasoning parser as of 2026-07) need this.
-# Setting tool_parser without reasoning_parser on a thinking model crashes OVMS's
-# guided tool-call decoding the moment the model closes a <think> block -- see
-# the unified-llama-swap-serving memory for the incident that found this.
+# Blank by default: only reasoning/"thinking" models need this (OVMS
+# implements only a "qwen3" reasoning parser as of 2026-07). Rule: never
+# set tool_parser without reasoning_parser on a thinking model -- OVMS's
+# guided tool-call decoding crashes the moment the model closes a
+# <think> block.
 OVMS_DEFAULT_REASONING_PARSER = os.environ.get("MODELCTL_OVMS_REASONING_PARSER", "")
 OVMS_DEFAULT_TTL = int(os.environ.get("MODELCTL_OVMS_TTL", "1800"))
 # optimum-cli (from optimum-intel) does the actual PyTorch -> OpenVINO IR
-# conversion + NNCF quantization. Not a modelctl dependency itself -- resolve
-# it the same way LLAMA_SERVER_BIN is resolved: an env var override, else
-# whatever's on PATH, else OpenArc's venv as a last-resort default (this
-# machine's actual convention for where optimum-intel happens to be
-# installed, a leftover from OpenArc being the first thing here that needed
-# it -- nothing OpenArc-specific about the tool itself).
+# conversion + NNCF quantization. Not a modelctl dependency itself.
+# Resolution order: env var override, then PATH, then the venv where
+# optimum-intel happens to be installed on this machine.
 _resolved_optimum_cli = (os.environ.get("MODELCTL_OPTIMUM_CLI") or shutil.which("optimum-cli")
                           or str(Path.home() / "OpenArc" / ".venv" / "bin" / "optimum-cli"))
 OPTIMUM_CLI_BIN = _resolved_optimum_cli
@@ -507,16 +498,13 @@ def check_vram_for_load(profile, evict=False):
 def sync_hermes_custom_providers(dry_run: bool = False):
     """Rebuild Hermes' provider entries from all saved modelctl profiles.
 
-    2026-07-09: llama-router.service and openarc.service were both retired
-    in favor of a single llama-swap front door (:9292). Both modelctl-backed
-    model types (llama-cpp GGUF and OVMS) fold into ONE provider,
-    'local-swap-managed', forced to that exact name (bypassing the
-    URL-reuse matching below) so it never collides with and overwrites
-    'local-swap' -- the separate, hand-authored bucket for entries modelctl
-    doesn't know about (config.yaml's `matrix:` section, or any model added
-    directly to config.yaml per the "experiment convention" in
-    ~/services/llama-swap/README.md) -- even though both providers point at the same
-    :9292 URL.
+    Both modelctl-backed model types (llama-cpp GGUF and OVMS) fold into
+    ONE provider, 'local-swap-managed', forced to that exact name
+    (bypassing the URL-reuse matching below) so it never collides with
+    and overwrites 'local-swap' -- the separate, hand-authored bucket for
+    entries modelctl doesn't know about (config.yaml's `matrix:` section,
+    or any model added directly to config.yaml) -- even though both
+    providers point at the same :9292 URL.
 
     Hermes's own config format for this has moved at least twice already: a
     `custom_providers:` list initially, now a `providers:` dict keyed by name
@@ -538,9 +526,9 @@ def sync_hermes_custom_providers(dry_run: bool = False):
         return False
 
     cfg = read_hermes_config()
-    # NOT get_router_base_url() (still 127.0.0.1:7071, llama-router.service,
-    # retired 2026-07-09) -- every modelctl-managed profile now runs behind
-    # llama-swap on the same port as everything else.
+    # NOT get_router_base_url() (the retired llama-router endpoint) --
+    # every modelctl-managed profile runs behind llama-swap on the same
+    # port as everything else.
     swap_url = LLAMA_SWAP_BASE_URL
 
     all_profiles = [json.loads(p.read_text()) for p in sorted(PROFILES_DIR.glob("*.json"))]
@@ -551,7 +539,7 @@ def sync_hermes_custom_providers(dry_run: bool = False):
     for profile in managed_profiles:
         # llama-cpp profiles know a static context_length up front; OVMS
         # profiles don't (llama-swap's /v1/models doesn't report one for
-        # them either -- see the unified-llama-swap-serving memory).
+        # them either).
         ctx = profile.get("config", {}).get("ctx")
         models_map[profile["name"]] = {"context_length": int(ctx)} if ctx else {}
 
@@ -2195,11 +2183,9 @@ def canonical_launch_command(profile, port=None):
 
     Every surface that renders or launches "this profile as saved" -- the
     llama-swap entry, the generated run.sh, the smoke test, and the
-    browser preview -- goes through here.  Each of them used to call
-    preflight() and build_server_args() itself, which is four independent
-    reconstructions of the command *after* validation and four chances to
-    disagree with what the managed worker actually launches (roadmap Task
-    B1).  cmd.argv[0] is the resolved binary; cmd.backend carries the
+    browser preview -- goes through here, so none can drift from what the
+    managed worker actually launches.
+    cmd.argv[0] is the resolved binary; cmd.backend carries the
     capabilities the argv was compiled against and the environment
     overrides artifacts should export.
 
@@ -2352,7 +2338,7 @@ def build_moe_cache_args(profile, plan=None, capabilities=None):
     # when the cache itself must fail closed.
     metrics_args = ["--metrics"]
 
-    # Fail closed (roadmap §2.5): an unprobed, stale, or incapable backend
+    # Fail closed: an unprobed, stale, or incapable backend
     # must never receive experimental cache flags.
     if not features.get("moe_weight_transfer_cache"):
         return metrics_args
@@ -2410,7 +2396,7 @@ def build_moe_cache_args(profile, plan=None, capabilities=None):
 def preflight_moe_cache(profile, capabilities=None):
     """Validate moe_cache settings against backend capabilities.
 
-    Fail closed (roadmap §2.5): an unsupported, unprobed, stale, or
+    Fail closed: an unsupported, unprobed, stale, or
     contradictory backend must never receive experimental cache flags.
     Automatic mode omits the candidate (warning); manual mode blocks with
     an explicit reason (error).
@@ -2523,7 +2509,7 @@ def render_llama_swap_entry(profile):
 
     cmd, ok, messages = canonical_launch_command(profile)
     # A command validation rejected must not be published to the router as
-    # if it were runnable (roadmap Task B2). `ok=False` is the existing
+    # if it were runnable. `ok=False` is the existing
     # "unresolved" signal sync_all_backends() already reports on.
     ok = ok and cmd.is_valid
     effective_bin, args = cmd.argv[0], cmd.argv[1:]
@@ -2739,8 +2725,8 @@ def sync_llama_swap_config(restart: bool = True) -> int:
     writes were never merged into a real config.yaml anywhere in the
     codebase. That merge is what this function does.
 
-    ovms-backend profiles were added 2026-07-09, replacing the retired
-    OpenArc backend -- see render_ovms_llama_swap_entry()/preflight_ovms().
+    ovms-backend profiles sync through the same merge -- see
+    render_ovms_llama_swap_entry()/preflight_ovms().
     """
     if yaml is None:
         print("WARNING: pyyaml not installed -- cannot sync llama-swap config.yaml. "
@@ -2860,8 +2846,8 @@ def sync_all_backends(restart_router: bool = True, restart_openarc: bool = True)
     """Regenerate the real llama-swap config.yaml from the current
     llama-cpp-backend profiles and push it live via reload-or-restart.
 
-    2026-07-09: llama-router.service and openarc.service were both retired
-    in favor of a single llama-swap front door -- sync_router_preset()/
+    llama-router.service and openarc.service are retired in favor of the
+    single llama-swap front door -- sync_router_preset()/
     restart_router_service() and sync_openarc_config()/restart_openarc_service()
     still exist below (unused from here, not deleted, in case either backend
     comes back) but are no longer called as part of a normal sync. The
@@ -3807,7 +3793,7 @@ def cmd_doctor(args):
     optionally write a support bundle.
 
     The console's settings/setup pages show the same thing -- this is the
-    headless and recovery path (roadmap Tasks C1/C4).
+    headless and recovery path.
     """
     import modelctl_diagnostics
     import modelctl_setup
@@ -3875,7 +3861,7 @@ def cmd_web_install(args):
     """Install and start the console as a systemd user service, then print
     the URL and token.
 
-    This is the single command Task C1 asks for: the browser is the
+    This is the single bootstrap command: the browser is the
     product entry point, so getting to a working browser must not require
     reading a docs page about unit files.
     """

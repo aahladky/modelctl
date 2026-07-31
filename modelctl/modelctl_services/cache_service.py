@@ -22,7 +22,7 @@ class CacheMetrics:
     cache_bytes_used: int = 0
     devices: list = field(default_factory=list)
     raw: dict = field(default_factory=dict)
-    # Hybrid-specific metrics (Phase 7.8)
+    # Hybrid-specific metrics
     hit_rows: int = 0
     miss_rows: int = 0
     cpu_miss_time_ms: float = 0.0
@@ -108,7 +108,7 @@ def scrape_cache_metrics(port: int) -> CacheMetrics | None:
 
 @dataclass
 class CalibrationResult:
-    """Result of a storage calibration run (Task D4)."""
+    """Result of a storage calibration run."""
     ok: bool
     sequential_read_bps: int = 0
     random_read_bps: int = 0

@@ -285,7 +285,7 @@ def create_app(token=None, store=None, runner=None):
         # The preview is the canonical command, not a re-derivation of it:
         # this page used to probe whatever binary the profile *named*, which
         # is frequently not the one preflight's auto-fix search resolves and
-        # actually launches (roadmap Task B1).
+        # actually launches.
         cmd, _ok, messages = modelctl.canonical_launch_command(p)
         caps = cmd.backend.capabilities
         return templates.TemplateResponse(request=request, name="profile_edit.html", context=ctx(
@@ -506,7 +506,7 @@ def create_app(token=None, store=None, runner=None):
             state.advance("inspect")
         elif source_type == "local_file":
             state.local_path = form.get("local_path", "")
-            # Verify the file BEFORE a profile exists (Task C2): GGUF
+            # Verify the file BEFORE a profile exists: GGUF
             # magic, truncation, shard completeness, readability, duplicate
             # identity. A bad path caught here is a form error; caught
             # later it is a broken profile that fails at load time.
@@ -622,7 +622,7 @@ def create_app(token=None, store=None, runner=None):
 
     @app.post("/add/{wizard_id}/retry/{step}")
     def wizard_retry(wizard_id: str, step: str):
-        """Retry one failed step without restarting the wizard (Task C2)."""
+        """Retry one failed step without restarting the wizard."""
         from .wizard import WizardStore, STEPS
         store_wiz = WizardStore()
         state = store_wiz.load(wizard_id)
@@ -799,7 +799,7 @@ def create_app(token=None, store=None, runner=None):
                 # Registration failed, but the profile itself is still
                 # saved and valid -- say so, and stay on the register step
                 # with a retry rather than reporting success on the done
-                # page (Task C2). This previously set
+                # page. This previously set
                 # registration_complete=True regardless and walked on.
                 state.registration_error = (
                     result.messages[0] if result.messages
@@ -844,7 +844,7 @@ def create_app(token=None, store=None, runner=None):
             return RedirectResponse("/add", status_code=303)
         # The done page answers "what did I actually get?": endpoint,
         # selected plan, command fingerprint, and the measured result the
-        # choice was based on (Task C2).
+        # choice was based on.
         plan_label = ""
         try:
             if state.selected_plan_id and state.profile_name:
@@ -1126,7 +1126,7 @@ def create_app(token=None, store=None, runner=None):
 
     @app.post("/settings/save")
     async def settings_save(request: Request):
-        # Validation and coercion live in settings_service (Task C5). The
+        # Validation and coercion live in settings_service. The
         # route used to swallow a bad integer with `except ValueError:
         # pass`, so a mistyped context length silently kept the old value
         # with no indication anything had been rejected.
@@ -1158,7 +1158,7 @@ def create_app(token=None, store=None, runner=None):
         # Resolving the backend here is what lets a plan card name the build
         # its claims and cache eligibility belong to. Without it the page
         # shows the same estimate for a stock binary and the fork, which is
-        # exactly the confusion Task C3 exists to remove.
+        # exactly the confusion the evidence module exists to remove.
         try:
             backend = modelctl_launch.resolve_backend(p)
         except Exception:
@@ -1166,8 +1166,8 @@ def create_app(token=None, store=None, runner=None):
 
         # Resolved before the observations, so staleness can be judged on the
         # effective launch environment and the capabilities the binary
-        # actually reported -- not only on hardware and backend identity
-        # (Task H1). When resolution fails the identity degrades to exactly
+        # actually reported -- not only on hardware and backend identity.
+        # When resolution fails the identity degrades to exactly
         # the two checks this page did before.
         observations = rdb.observations_for_profile(
             name, identity=modelctl_runtime.ObservationIdentity.current(
@@ -1311,7 +1311,7 @@ def create_app(token=None, store=None, runner=None):
         import modelctl_runtime
         import modelctl_tune
         runs = modelctl_runtime.RuntimeDB().plan_runs_for(name)
-        # Task D5: the page has to answer "what limited this run?", which
+        # The page has to answer "what limited this run?", which
         # is a judgement over several counters. Making it here keeps the
         # template free of the reasoning and gives one definition of the
         # answer.

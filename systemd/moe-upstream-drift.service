@@ -1,5 +1,5 @@
 [Unit]
-Description=Weekly llama.cpp upstream drift report (Task 0.10)
+Description=Weekly llama.cpp upstream drift report
 
 [Service]
 Type=oneshot

@@ -236,8 +236,8 @@ class VisionMtpScreen(Screen):
 
 # preflight() reports these two exact prefixes when a model/mmproj file
 # doesn't exist on disk yet. At the ConfigureScreen stage of the wizard,
-# probe_profile's paths are bare repo filenames (download happens later, in
-# Task 9's DownloadScreen), so these are guaranteed false positives here --
+# probe_profile's paths are bare repo filenames (download happens later,
+# in DownloadScreen), so these are guaranteed false positives here --
 # filtered out at the ConfigureScreen call site only, not inside preflight()
 # itself, since preflight() is also used post-download where these checks
 # are meaningful.
@@ -334,7 +334,7 @@ class ConfigureScreen(Screen):
         ok, _, _, messages = modelctl.preflight(probe_profile, auto_fix=True)
         # Filter out file-existence errors -- probe_profile's model_path/mmproj_path
         # are bare repo filenames at this point in the wizard (download hasn't
-        # happened yet, that's DownloadScreen's job in Task 9), so these two
+        # happened yet, that's DownloadScreen's job), so these two
         # specific messages are guaranteed false positives here, not real signal.
         # Everything else preflight() reports (binary resolution, SYCL env
         # warnings) IS meaningful at this stage and should still surface.
@@ -350,8 +350,8 @@ class ConfigureScreen(Screen):
 class NameScreen(Screen):
     """Fifth wizard screen: profile name and download directory. dest_dir
     is folded into this screen rather than getting its own -- it's
-    pre-filled from DEFAULT_MODELS_DIR (via WizardState.dest_dir, set in
-    Task 1) and almost always accepted as-is, so it doesn't warrant a
+    pre-filled from DEFAULT_MODELS_DIR (via WizardState.dest_dir) and
+    almost always accepted as-is, so it doesn't warrant a
     dedicated step. No network/disk I/O here, just reads self.app.state
     and generates a default string, so no background worker is needed."""
     STEP = "name"
@@ -454,7 +454,7 @@ class SummaryScreen(Screen):
     pattern), NOT synchronously in on_mount like ConfigureScreen's
     preflight() call. The two look superficially similar (both call into
     modelctl.py from a screen's on_mount/submit handler) but they differ in
-    a way that matters: preflight() (Task 7) only does local filesystem
+    a way that matters: preflight() only does local filesystem
     existence checks and, at most, a fast `--list-devices` probe. This
     screen's sync_all_backends() -> sync_router_preset() calls
     restart_router_service() -- a real `subprocess.run(["systemctl",
@@ -466,10 +466,10 @@ class SummaryScreen(Screen):
     probe does; the code itself budgets up to 30 seconds before giving up.
     Running that synchronously on Textual's event-loop thread would freeze
     the whole UI for however long systemctl takes, which is exactly the
-    class of latency that got SearchScreen's HTTP calls (Task 4) and
-    DownloadScreen's multi-GB transfers (Task 9) worker treatment. Using
+    class of latency that got SearchScreen's HTTP calls and
+    DownloadScreen's multi-GB transfers worker treatment. Using
     exclusive=True from the start here (rather than adding it in a
-    follow-up review, as happened for DownloadScreen in Task 9) since
+    follow-up review, as happened for DownloadScreen) since
     there's no legitimate reason for two sync sequences to ever race on
     this screen."""
     STEP = "summary"

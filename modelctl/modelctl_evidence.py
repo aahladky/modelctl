@@ -1,4 +1,4 @@
-"""Evidence-first plan comparison (roadmap Task C3).
+"""Evidence-first plan comparison.
 
 A plan table that shows only estimates invites the user to pick the
 biggest number. This module turns each candidate into a record that
@@ -98,7 +98,7 @@ class PlanEvidence:
 
 
 # Defined in modelctl_plans because ranking needs the same predicate for
-# Task H2's guardrail, and this module already imports that one.
+# the experimental-margin guardrail, and this module already imports that one.
 _is_experimental = modelctl_plans.is_experimental_plan
 
 
@@ -117,7 +117,7 @@ def build_plan_evidence(profile, plans, observations=None, failures=None,
     backend: a modelctl_launch.ResolvedBackend. Supplying it is what makes
     the card able to say *which build* the claims and cache eligibility
     belong to -- without it the card would repeat the same estimate for a
-    stock binary and the fork, which is the confusion Task C3 exists to
+    stock binary and the fork, which is the confusion this module exists to
     remove.
 
     ranked_ids: plan ids in the order the current policy would try them,
@@ -229,7 +229,7 @@ def build_plan_evidence(profile, plans, observations=None, failures=None,
 
 @dataclass
 class DecisionTrace:
-    """Why the automatic choice is what it is (roadmap Task H3).
+    """Why the automatic choice is what it is.
 
     Every field is allowed to be empty, and an empty one is simply not
     rendered. A trace that invents a reason it does not have is worse than
@@ -378,7 +378,7 @@ def build_decision_trace(evidence, ranked=None, policy=None, observations=None,
 
 
 def group_evidence(evidence):
-    """Group evidence into the display sections Task C3 asks for.
+    """Group evidence into the plan-comparison display sections.
 
     Empty sections are dropped, so a profile with no experimental plans
     does not show an empty "experimental" heading.
