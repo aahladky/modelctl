@@ -79,7 +79,7 @@ geometry is logged at finalization.
 
 - SYCL backend only; requires the fork (probe with
   `llama-server --modelctl-capabilities`, see
-  [backend-capability-schema-v2.md](backend-capability-schema-v2.md)).
+  [backend-capability-schema.md](backend-capability-schema.md)).
 - Uniform per-device budget (no per-device sizing).
 - Whether the cache helps is model-, quant-, and placement-specific;
   measured results ranged from a 48% decode gain to a net loss on the

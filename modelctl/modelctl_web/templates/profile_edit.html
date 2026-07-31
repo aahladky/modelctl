@@ -69,8 +69,14 @@
       </label>
       {% endfor %}
       <label>add device<br>
-        <input name="gpu.budgets_bytes._new_device" placeholder="SYCL2" >
+        <input name="gpu.budgets_bytes._new_device" placeholder="SYCL2">
+        <input name="gpu.budgets_bytes._new_budget" placeholder="bytes, e.g. 4294967296">
       </label>
+      <p class="muted">Clear a device's box to remove its budget. Backends
+      reporting <code>moe_cache_per_device_budgets</code> (capability schema 3+)
+      honour these per device and give unnamed devices no cache; older
+      backends take one uniform budget, so the largest value here is applied
+      to every GPU.</p>
     </details>
     <p><button type="submit">save cache config</button></p>
   </form>

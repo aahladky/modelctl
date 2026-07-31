@@ -2342,17 +2342,21 @@ def build_moe_cache_args(profile, plan=None, capabilities=None):
 
     args = []
 
-    # Per-device cache budgets.  The fork's --moe-cache-bytes is a single
-    # UNIFORM per-GPU budget: server.cpp copies it into one global
-    # (g_moe_cache_budget_bytes) and ggml-sycl lazy-init applies that same
-    # value to EVERY device's cache instance.  There is no per-device flag,
-    # so per-device budgets collapse to their max -- summing would hand each
-    # card MORE cache than the tier planner reserved there, letting the
-    # cache collide with statically placed experts (OOM).
-    budgets = gpu_section.get("budgets_bytes", {})
+    # Per-device cache budgets. Schema 3 backends take a device map, so
+    # each card gets exactly the budget the planner reserved for it and
+    # unnamed devices get none. Older backends have only ONE global
+    # budget applied to every device that creates a cache, so the map
+    # must collapse to its max -- summing, or sending a smaller device's
+    # figure, would hand some card more cache than was reserved there and
+    # collide with statically placed experts (OOM).
+    budgets = {d: b for d, b in gpu_section.get("budgets_bytes", {}).items()
+               if b > 0}
     if budgets:
-        per_gpu_budget = max((b for b in budgets.values() if b > 0), default=0)
-        if per_gpu_budget > 0:
+        if features.get("moe_cache_per_device_budgets"):
+            spec = ",".join(f"{dev}={int(b)}" for dev, b in sorted(budgets.items()))
+            args.extend([cache_bytes_flag, spec])
+        else:
+            per_gpu_budget = max(budgets.values())
             args.extend([cache_bytes_flag, str(per_gpu_budget)])
 
     policy = gpu_section.get("policy", "slru")
@@ -3047,10 +3051,20 @@ def cmd_place_tiers(args, inventory, defaults, primary, names):
         if not profile.get("model_path"):
             print(f"{name}: skipped (no local GGUF model_path)\n")
             continue
+        # Capabilities decide how the cache budget map is reserved:
+        # schema 3+ honours it per device, older backends collapse it to
+        # one uniform figure.
+        try:
+            import modelctl_capabilities
+            caps = modelctl_capabilities.probe_backend(
+                profile.get("binary") or LLAMA_SERVER_BIN)
+        except Exception:
+            caps = None
         plan = modelctl_tiers.plan_tiers(
             profile, inventory, defaults["vram_limit_pct"], primary,
             ram_available=ram_available,
-            cache_request=profile.get("moe_cache"))
+            cache_request=profile.get("moe_cache"),
+            capabilities=caps)
         if plan is None:
             print(f"{name}: couldn't analyze model layout "
                   f"({profile.get('model_path')})\n")

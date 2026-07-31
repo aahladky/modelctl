@@ -38,7 +38,8 @@ class TestClassifyProbeFailure(unittest.TestCase):
     def test_returns_unsupported_status(self):
         caps = modelctl_capabilities._classify_probe_failure("/usr/bin/llama-server")
         self.assertEqual(caps["_probe_status"], "unsupported")
-        self.assertEqual(caps["schema"], 2)
+        self.assertEqual(caps["schema"],
+                         modelctl_capabilities.CAPABILITY_SCHEMA_VERSION)
         self.assertFalse(caps["features"]["moe_weight_transfer_cache"])
 
 
@@ -611,7 +612,8 @@ class TestNormalizeCapabilities(unittest.TestCase):
     def test_schema0_unsupported(self):
         raw = {"schema": 0, "_probe_status": "unsupported", "features": {}}
         norm = modelctl_capabilities.normalize_capabilities(raw)
-        self.assertEqual(norm["schema"], 2)
+        self.assertEqual(norm["schema"],
+                         modelctl_capabilities.CAPABILITY_SCHEMA_VERSION)
         self.assertFalse(norm["features"]["moe_weight_transfer_cache"])
         self.assertFalse(norm["features"]["moe_hybrid_cpu_miss"])
         self.assertEqual(norm["_probe_status"], "unsupported")
@@ -637,7 +639,8 @@ class TestNormalizeCapabilities(unittest.TestCase):
             },
         }
         norm = modelctl_capabilities.normalize_capabilities(raw)
-        self.assertEqual(norm["schema"], 2)
+        self.assertEqual(norm["schema"],
+                         modelctl_capabilities.CAPABILITY_SCHEMA_VERSION)
         self.assertTrue(norm["features"]["moe_weight_transfer_cache"])
         # hybrid is allowed through from schema 1 when both flags are true
         self.assertTrue(norm["features"]["moe_hybrid_cpu_miss"])
@@ -717,7 +720,8 @@ class TestNormalizeCapabilities(unittest.TestCase):
             },
         }
         norm = modelctl_capabilities.normalize_capabilities(raw)
-        self.assertEqual(norm["schema"], 2)
+        self.assertEqual(norm["schema"],
+                         modelctl_capabilities.CAPABILITY_SCHEMA_VERSION)
         self.assertTrue(norm["features"]["moe_weight_transfer_cache"])
         self.assertEqual(norm["constraints"]["moe_cache_backend"], "SYCL")
         self.assertEqual(norm["constraints"]["moe_cache_min_batch"], 32)

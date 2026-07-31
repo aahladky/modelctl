@@ -12,12 +12,15 @@ result accordingly.
 Schema versions:
   0 — stock binary that rejects the probe (no cache support)
   1 — early fork response (moe_expert_cache, moe_cache_sycl, etc.)
-  2 — canonical schema with moe_weight_transfer_cache, device features,
-      constraints, and cli flag declarations
+  2 — moe_weight_transfer_cache, device features, constraints, and cli
+      flag declarations; one uniform per-GPU cache budget
+  3 — adds moe_cache_per_device_budgets: --moe-cache-bytes accepts a
+      device map (SYCL0=N,SYCL1=N), so each card gets the budget the
+      planner reserved for it
 
-normalize_capabilities() converts schema 0/1 to the internal canonical
-form so all consumers see a consistent representation.  The raw probe
-output is preserved in _raw_probe for debugging.
+normalize_capabilities() converts every schema to the current canonical
+form so all consumers see a consistent representation; features absent
+from an older schema normalize to false, never to an assumption.
 
 Public API:
     probe_backend(binary_path) -> dict
@@ -46,13 +49,13 @@ CAPABILITIES_DIR = STATE_DIR / "backend_capabilities"
 # The canonical schema every consumer sees after normalization. One
 # constant, not six scattered literals: a schema-3 migration must not
 # have to hunt for magic numbers.
-CAPABILITY_SCHEMA_VERSION = 2
+CAPABILITY_SCHEMA_VERSION = 3
 
 # Bumped whenever normalize_capabilities() changes meaning. Cache entries
 # store the RAW probe output and are re-normalized on every read, so a
 # normalizer fix reaches even the pinned, never-rebuilt binary; this
 # stamp exists for observability, not gating.
-NORMALIZER_VERSION = 2
+NORMALIZER_VERSION = 3
 
 # SYCL driver init under load can exceed the old 10s. Overridable for
 # slow machines without patching code.
@@ -187,6 +190,7 @@ def _classify_probe_failure(binary_path: str, status: str = "unsupported") -> di
             "moe_cache_reset": False,
             "moe_cache_prefetch": False,
             "moe_offload_threshold_control": False,
+            "moe_cache_per_device_budgets": False,
         },
         "constraints": {
             "moe_cache_backend": "",
@@ -235,6 +239,9 @@ def normalize_capabilities(raw_caps: dict) -> dict:
             "moe_cache_prefetch": False,
             # Schema 1 predates a per-op-type offload threshold.
             "moe_offload_threshold_control": False,
+            # Schema 1/2 backends take a single uniform budget; the
+            # per-device map form arrived with schema 3.
+            "moe_cache_per_device_budgets": False,
         }
 
         # Map schema 1 CLI names to canonical names.
@@ -300,6 +307,11 @@ def normalize_capabilities(raw_caps: dict) -> dict:
         # to prevent but just as misleading.
         "moe_offload_threshold_control": bool(
             features.get("moe_offload_threshold_control")),
+        # Schema 3: --moe-cache-bytes accepts SYCL0=N,SYCL1=N. Absent on
+        # schema 1/2 backends, which take one uniform budget -- the
+        # planner and build_moe_cache_args collapse the map for those.
+        "moe_cache_per_device_budgets": bool(
+            features.get("moe_cache_per_device_budgets")),
     }
 
     # Force prefetch false until implemented. Hybrid is allowed through

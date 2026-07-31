@@ -57,6 +57,22 @@ def load_or_create_token():
     return token
 
 
+def _caps_for(profile):
+    """Backend capabilities for a profile's binary, or None.
+
+    The tier planner needs them to know whether this backend honours a
+    per-device cache budget map (schema 3+) or collapses it to one
+    uniform figure -- reserving the wrong one is how the runtime cache
+    collides with statically placed experts.
+    """
+    try:
+        import modelctl_capabilities
+        binary = profile.get("binary") or modelctl.LLAMA_SERVER_BIN
+        return modelctl_capabilities.probe_backend(binary)
+    except Exception:
+        return None
+
+
 def _fetch_json(url, timeout=2):
     try:
         with urllib.request.urlopen(url, timeout=timeout) as r:
@@ -357,19 +373,28 @@ def create_app(token=None, store=None, runner=None):
     @app.post("/profiles/{name}/moe-cache")
     async def profile_moe_cache_save(request: Request, name: str):
         form = await request.form()
-        # Parse flat form fields into nested moe_cache dict.
-        mc = {"gpu": {"budgets_bytes": {}}, "ram": {}, "storage": {},
-              "prefill": {}, "decode": {}, "prefetch": {}}
+        # Start from the profile's existing moe_cache, not a fresh skeleton:
+        # rebuilding from scratch silently dropped every section this form
+        # does not render (ram, prefetch, storage details, and `mode` when
+        # the select was absent), so a CLI-set option vanished on any save.
+        existing = modelctl.load_profile(name).get("moe_cache", {})
+        mc = json.loads(json.dumps(existing)) if existing else {}
+        mc.setdefault("gpu", {}).setdefault("budgets_bytes", {})
+        for section in ("ram", "storage", "prefill", "decode", "prefetch"):
+            mc.setdefault(section, {})
+        budgets = {}
+        new_device = str(form.get("gpu.budgets_bytes._new_device", "")).strip()
+        new_budget = str(form.get("gpu.budgets_bytes._new_budget", "")).strip()
         for key, val in form.items():
             val = str(val)
             if key == "mode":
                 mc["mode"] = val
             elif key.startswith("gpu.budgets_bytes."):
                 dev = key.split(".", 2)[2]
-                if dev == "_new_device":
-                    continue
+                if dev.startswith("_"):
+                    continue  # the add-device inputs, handled below
                 try:
-                    mc["gpu"]["budgets_bytes"][dev] = int(val)
+                    budgets[dev] = int(val)
                 except ValueError:
                     pass
             elif key == "gpu.policy":
@@ -385,8 +410,16 @@ def create_app(token=None, store=None, runner=None):
                 mc["prefill"]["admit_to_gpu_cache"] = val == "true"
             elif key == "storage.mode":
                 mc["storage"]["mode"] = val
-        # Strip empty budgets.
-        mc["gpu"]["budgets_bytes"] = {k: v for k, v in mc["gpu"]["budgets_bytes"].items() if v > 0}
+        # The add-device row: previously the device name was read and
+        # discarded and there was no field for its value at all, so a new
+        # per-GPU budget could never be set from the console.
+        if new_device and new_budget:
+            try:
+                budgets[new_device] = int(new_budget)
+            except ValueError:
+                pass
+        # Strip empty budgets (also how a device is removed: clear its box).
+        mc["gpu"]["budgets_bytes"] = {k: v for k, v in budgets.items() if v > 0}
         job_id = mutate.submit_moe_cache(runner, name, mc)
         return RedirectResponse(f"/jobs/{job_id}?back=/profiles/{name}", status_code=303)
 
@@ -418,7 +451,8 @@ def create_app(token=None, store=None, runner=None):
         # cache_request keeps the preview identical to what submit_tier_apply
         # will actually compute and apply.
         plan = modelctl_tiers.plan_tiers(p, inventory, d["vram_limit_pct"], primary,
-                                         cache_request=p.get("moe_cache"))
+                                         cache_request=p.get("moe_cache"),
+                                         capabilities=_caps_for(p))
         return p, plan
 
     @app.get("/profiles/{name}/tiers", response_class=HTMLResponse)
@@ -444,7 +478,8 @@ def create_app(token=None, store=None, runner=None):
             if not p.get("model_path"):
                 continue
             plan = modelctl_tiers.plan_tiers(p, inventory, d["vram_limit_pct"], primary,
-                                             cache_request=p.get("moe_cache"))
+                                             cache_request=p.get("moe_cache"),
+                                             capabilities=_caps_for(p))
             plans.append({"name": p["name"], "plan": plan})
         return templates.TemplateResponse(request=request, name="tiers_all.html", context=ctx(
             request, plans=plans))

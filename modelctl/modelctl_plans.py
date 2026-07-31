@@ -296,7 +296,7 @@ def _block_device_for(path):
         return ""
 
 
-def _make_claim(profile, config, hardware):
+def _make_claim(profile, config, hardware, capabilities=None):
     """Placement-aware resource claim.
 
     Uses the GGUF tensor layout (exact per-layer/expert bytes) plus the
@@ -478,6 +478,8 @@ def _make_claim(profile, config, hardware):
     if mc.get("mode", "off") != "off":
         budgets = mc.get("gpu", {}).get("budgets_bytes", {})
         declared = {d: b for d, b in budgets.items() if b > 0}
+        per_device_caps = bool((capabilities or {}).get("features", {})
+                               .get("moe_cache_per_device_budgets"))
         # The runtime's --moe-cache-bytes is a single UNIFORM per-GPU
         # budget: server.cpp stores one global and ggml-sycl's lazy init
         # gives that same value to every device that creates a cache. So a
@@ -492,8 +494,15 @@ def _make_claim(profile, config, hardware):
         # the runtime allocates on every device that CREATES a cache,
         # which placement decides; a participating device the budget map
         # does not name is still unreserved here.
-        cache_budget = max(declared.values(), default=0)
-        cache_map = {d: cache_budget for d in declared}
+        if per_device_caps:
+            # Schema 3+: the runtime honours the map literally, so the
+            # claim charges each named device its own budget and nothing
+            # to the devices the map omits (they get no cache).
+            cache_map = dict(declared)
+            cache_budget = max(declared.values(), default=0)
+        else:
+            cache_budget = max(declared.values(), default=0)
+            cache_map = {d: cache_budget for d in declared}
 
     # ---- RAM vs mmap ---------------------------------------------------
     # CPU-side weights are only *resident* when mmap is off. With mmap on
@@ -597,7 +606,7 @@ def _make_plan(profile, config, source, hardware, extra_warnings=(), decision=No
     }
     pid = _plan_id(normalized)
     label = _plan_label(merged, source, gpu_names)
-    claim = _make_claim(profile, merged, hardware)
+    claim = _make_claim(profile, merged, hardware, capabilities)
 
     return LaunchPlan(
         id=pid,
@@ -763,7 +772,8 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
         primary = modelctl.resolve_primary_gpu(inventory, d)
         tier = modelctl_tiers.plan_tiers(
             profile, inventory, d["vram_limit_pct"], primary,
-            cache_request=profile.get("moe_cache"))
+            cache_request=profile.get("moe_cache"),
+            capabilities=caps_for_args)
         if tier and tier.get("config"):
             tc = dict(tier["config"])
             tc["_tier"] = tier.get("tier", "?")

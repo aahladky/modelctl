@@ -16,6 +16,7 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 import modelctl
+import modelctl_capabilities
 import modelctl_diagnostics as diag
 from modelctl_web.app import create_app
 from modelctl_web.jobs import JobStore, JobRunner
@@ -90,7 +91,7 @@ class ManifestBase(unittest.TestCase):
         data = {
             "modelctl_commit": self.head,
             "llama_cpp_commit": "a" * 40,
-            "capability_schema": 2,
+            "capability_schema": modelctl_capabilities.CAPABILITY_SCHEMA_VERSION,
             "profile_schema": 2,
             "release_channel": "experimental",
         }
@@ -153,7 +154,7 @@ class TestManifestStatus(ManifestBase):
         (self.root / diag.MANIFEST_NAME).write_text(json.dumps({
             "validated_modelctl_commit": self.head,
             "validated_llama_commit": "a" * 40,
-            "capability_schema": 2, "profile_schema": 2,
+            "capability_schema": modelctl_capabilities.CAPABILITY_SCHEMA_VERSION, "profile_schema": 2,
         }))
         status = diag.manifest_status()
         self.assertFalse(status.newer_than_validated)
@@ -236,7 +237,7 @@ class TestSubmodulePinDrift(unittest.TestCase):
         (self.root / diag.MANIFEST_NAME).write_text(json.dumps({
             "modelctl_commit": "0" * 40,   # a note, not a mismatch
             "llama_cpp_commit": self.promoted,
-            "capability_schema": 2,
+            "capability_schema": modelctl_capabilities.CAPABILITY_SCHEMA_VERSION,
             "profile_schema": 2,
         }))
         self.head = self._commit(self.root, "pin the promoted runtime")
@@ -282,7 +283,7 @@ class TestSubmodulePinDrift(unittest.TestCase):
         stale.write_text(json.dumps({
             "modelctl_commit": "0" * 40,
             "llama_cpp_commit": self.newer,   # never promoted
-            "capability_schema": 2,
+            "capability_schema": modelctl_capabilities.CAPABILITY_SCHEMA_VERSION,
             "profile_schema": 2,
         }))
         self._commit(self.root, "stale manifest")

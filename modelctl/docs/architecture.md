@@ -26,7 +26,7 @@ exactly two interfaces:
 
 1. the capability probe
    (`llama-server --modelctl-capabilities`, schema in
-   [runtime/backend-capability-schema-v2.md](runtime/backend-capability-schema-v2.md));
+   [runtime/backend-capability-schema.md](runtime/backend-capability-schema.md));
 2. the launched command line plus environment, plus Prometheus
    `/metrics` and `/cache/reset` at runtime.
 
