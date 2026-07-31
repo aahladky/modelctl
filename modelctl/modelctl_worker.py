@@ -39,10 +39,18 @@ def _readiness_url(port):
     return f"http://127.0.0.1:{port}/health"
 
 
-def _wait_ready(url, timeout=120):
-    """Poll the backend readiness URL until 200 or timeout."""
+def _wait_ready(url, timeout=120, proc=None):
+    """Poll the backend readiness URL until 200, the child dies, or timeout.
+
+    proc is the backend process: a binary that exits in two seconds
+    (loader error, bad flag) used to burn the whole 120s health timeout
+    per plan and then be misreported as "health_timeout" rather than a
+    crash -- four infeasible plans meant eight minutes of polling a dead
+    port during a llama-swap load."""
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            return False
         try:
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=5) as r:
@@ -243,7 +251,12 @@ def worker_main(profile_name, port):
                "hardware_fingerprint": snap.fingerprint,
                "backend_fingerprint": snap.backend_fingerprints.get(
                    profile.get("backend", "llama-cpp"), ""),
-               "started_at": time.time(), "success": False}
+               "started_at": time.time(), "success": False,
+               # This is a real llama-swap serving session, not a
+               # measurement: no throughput, and its duration is the
+               # user's, not the plan's. The observation store filters
+               # on this so a serving row cannot shadow a benchmark.
+               "run_kind": "serving"}
         try:
             # Canonical launch path: the same ResolvedBackend + LaunchCommand
             # every other path derives from.  Validation errors (fail-closed
@@ -290,11 +303,12 @@ def worker_main(profile_name, port):
                 except OSError:
                     proc.pgid = proc.pid
 
-            rdb.update_reservation(reservation["id"], state="starting")
-            rdb.record_event("backend_started", profile_name,
-                             {"plan_id": plan.id, "pid": proc.pid})
-
-            # Set up signal forwarding
+            # Signal forwarding FIRST, before any bookkeeping. The child
+            # is in its own process group, so a SIGTERM arriving in the
+            # window between Popen and this (llama-swap unloading while
+            # the reservation write blocks on a locked runtime.db) killed
+            # the worker with the default handler and left llama-server
+            # running detached, holding its port and VRAM.
             def _handle_term(signum, frame):
                 _forward_signal(proc, signum)
 
@@ -303,13 +317,17 @@ def worker_main(profile_name, port):
             signal.signal(signal.SIGTERM, _handle_term)
             signal.signal(signal.SIGINT, _handle_term)
 
+            rdb.update_reservation(reservation["id"], state="starting")
+            rdb.record_event("backend_started", profile_name,
+                             {"plan_id": plan.id, "pid": proc.pid})
+
             try:
                 # Wait for readiness
                 ready_timeout = rt.get("health_timeout", 120)
                 ready_t0 = time.time()
-                if _wait_ready(backend.readiness_url(profile, port), timeout=ready_timeout):
+                if _wait_ready(backend.readiness_url(profile, port),
+                               timeout=ready_timeout, proc=proc):
                     run["load_seconds"] = round(time.time() - ready_t0, 2)
-                    run["success"] = True
                     rdb.update_reservation(reservation["id"], state="active")
                     rdb.record_event("backend_ready", profile_name,
                                      {"plan_id": plan.id, "pid": proc.pid})
@@ -317,20 +335,33 @@ def worker_main(profile_name, port):
                     # Supervise until child exits
                     exit_code = proc.wait()
                     run["exit_code"] = exit_code
+                    # Success means the session ended cleanly, not merely
+                    # that the server once answered /health: a backend
+                    # that crashed mid-serving used to be recorded as a
+                    # successful run. 0 and SIGTERM (llama-swap's own
+                    # unload) are both clean endings.
+                    run["success"] = exit_code in (0, -signal.SIGTERM)
+                    if not run["success"]:
+                        run["failure_class"] = "backend_crash"
 
                     rdb.record_event("model_unloaded", profile_name,
                                      {"plan_id": plan.id, "exit_code": exit_code})
                     return exit_code
                 else:
-                    # Health timeout
-                    run["failure_class"] = "health_timeout"
+                    # Died during startup, or never answered in time.
+                    died = proc.poll() is not None
+                    run["failure_class"] = "backend_crash" if died else "health_timeout"
                     run["exit_code"] = proc.poll()
-                    _forward_proc_terminate(proc)
-                    proc.wait(timeout=10)
+                    if not died:
+                        _forward_proc_terminate(proc)
+                        proc.wait(timeout=10)
                     rdb.record_event("backend_failed", profile_name,
-                                     {"plan_id": plan.id, "reason": "health_timeout"})
+                                     {"plan_id": plan.id,
+                                      "reason": run["failure_class"]})
                     print(f"modelctl-worker: plan '{plan.label}' failed: "
-                          "health timeout", file=sys.stderr)
+                          f"{run['failure_class']}"
+                          + (f" (exit {run['exit_code']})" if died else ""),
+                          file=sys.stderr)
             finally:
                 signal.signal(signal.SIGTERM, prev_term)
                 signal.signal(signal.SIGINT, prev_int)
