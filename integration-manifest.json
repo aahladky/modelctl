@@ -1,11 +1,11 @@
 {
-  "generated_at": "2026-07-31T00:00:00-04:00",
-  "validated_modelctl_commit": "2d7d235",
-  "validated_llama_commit": "724f705c1151253b6e8f2d67f409c1a0f0d29a1e",
+  "generated_at": "2026-07-31T12:00:00-04:00",
+  "validated_modelctl_commit": "553fdb4",
+  "validated_llama_commit": "b9ce49c29c49190f6be882a436668eb0075c2624",
   "upstream_base": "9b2a08881",
-  "validation_report": "docs/upstream-sync/2026-07-31-promotion-report.md",
-  "modelctl_commit": "2d7d235",
-  "llama_cpp_commit": "724f705c1151253b6e8f2d67f409c1a0f0d29a1e",
+  "validation_report": "docs/upstream-sync/2026-07-31-promotion-report-2.md",
+  "modelctl_commit": "553fdb4",
+  "llama_cpp_commit": "b9ce49c29c49190f6be882a436668eb0075c2624",
   "llama_cpp_upstream_base": "9b2a08881",
   "llama_cpp_pre_sync_tag": "moe-cache-pre-upstream-2026-07-30",
   "llama_cpp_pre_sync_commit": "e7af6cf1996cb3d850963213b043d876ffe959ea",
@@ -25,5 +25,5 @@
   "release_channel": "experimental",
   "acceptance_report": "docs/upstream-sync/2026-07-31-promotion-report.md",
   "field_notes": "validated_* names the last modelctl+llama.cpp pair that passed hardware acceptance together -- the rollback target. The legacy modelctl_commit/llama_cpp_commit/llama_cpp_upstream_base/acceptance_report keys are the same values under their old ambiguous names, kept for ci/checks.sh and older readers.",
-  "notes": "Promotion of the Phase F + G2 + offload-threshold runtime. Gates 0.5 (seven build forms), 0.6 (correctness matrix vs the stock-upstream oracle at 9b2a08881) and 0.8 (integration chain, thirteen links) all run against this commit -- the previous pin (2dbf94801) predated every Phase F fix, so a clone built a runtime the docs did not describe. Known limitation carried forward: a GGML_BACKEND_DL=ON build reports build.dynamic_backends=false in its capability response although the backend is dlopened and every cache procedure resolves; the field is wrong, the functionality is not. Same class as the always-empty build.commit."
+  "notes": "Second same-day promotion: real build provenance (fixes the dynamic_backends and empty-commit limitations of the morning pin), learned cache geometry (fused/unequal projections), per-projection tensor-origin identity for multi-model device sharing, explicit device-queue ownership, and the G3 CPU-miss executor (host-tested, not yet wired -- moe_hybrid_cpu_miss still reports false, truthfully). Validated on this machine: token-identical greedy output across cache off/on/reset/distinct-prompt and main+draft two-context conditions on the tiny-moe fixture; learned geometry confirmed in the server log; no device loss. See the validation report for the full gate table."
 }
