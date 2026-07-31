@@ -589,3 +589,40 @@ class TestDecisionTrace(unittest.TestCase):
         import modelctl_evidence
         t = modelctl_evidence.build_decision_trace([], ranked=[])
         self.assertFalse(t.present)
+
+
+class TestMmapReservation(unittest.TestCase):
+    """An mmap-backed oversized MoE must be testable. Reserving against
+    addressed bytes rather than resident ones refused every plan this
+    project exists to serve."""
+
+    def _claim(self, storage_mode, ram_bytes, resident):
+        from modelctl_plans import ResourceClaim
+        return ResourceClaim({"SYCL0": 8 << 30}, ram_bytes, storage_mode,
+                             8192, ram_resident_bytes=resident)
+
+    def _reserved_ram(self, claim):
+        # Mirrors the admission figure test_launch_plan() computes.
+        resident = claim.ram_resident_bytes
+        if claim.storage_mode != "mmap" and not resident:
+            resident = claim.ram_bytes
+        return resident
+
+    def test_mmap_plan_reserves_resident_bytes_not_addressed_ones(self):
+        # 36.7 GiB addressed through mmap, nothing required resident.
+        c = self._claim("mmap", 37 << 30, 0)
+        self.assertEqual(self._reserved_ram(c), 0)
+
+    def test_mmap_plan_still_reserves_its_resident_portion(self):
+        c = self._claim("mmap", 37 << 30, 4 << 30)
+        self.assertEqual(self._reserved_ram(c), 4 << 30)
+
+    def test_non_mmap_plan_reserves_its_full_claim(self):
+        # A resident plan genuinely needs the RAM and must still be refused
+        # when it does not fit.
+        c = self._claim("none", 20 << 30, 0)
+        self.assertEqual(self._reserved_ram(c), 20 << 30)
+
+    def test_non_mmap_plan_prefers_an_explicit_resident_figure(self):
+        c = self._claim("none", 20 << 30, 12 << 30)
+        self.assertEqual(self._reserved_ram(c), 12 << 30)
