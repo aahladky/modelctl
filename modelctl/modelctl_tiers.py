@@ -407,11 +407,33 @@ def plan_tiers(profile, inventory, limit_pct, primary, ram_available=None,
     # --- tier 2: all GPUs ------------------------------------------------
     combined = sum(usable.values())
     if len(devs) > 1 and total <= combined:
-        ts = modelctl_vram.tensor_split_ratio([d["total_bytes"] for d in devs])
-        return result(2, {"device": "", "split_mode": "layer",
-                          "tensor_split": ts, "extra": other},
-                      [("all GPUs", _gib(total),
-                        f"layer split {ts} by capacity")])
+        # Ratio from USABLE bytes, not raw capacity: llama.cpp distributes
+        # the model by these weights, and a device carrying a reserve or
+        # the uniform cache reservation must receive proportionally less.
+        # A raw-capacity ratio put static bytes into the reserved space --
+        # aggregate admission passed, the small card OOMed at load.
+        ts = modelctl_vram.tensor_split_ratio(
+            [usable[d["device"]] for d in devs])
+        # The emitted ratio is GiB-rounded and GCD-reduced; recheck what
+        # each device actually receives under the quantized weights
+        # before admitting, and spill instead when quantization overflows
+        # someone's budget.
+        weights = [int(w) for w in ts.split(",")]
+        wsum = sum(weights) or 1
+        per_device_fits = all(
+            total * w / wsum <= usable[d["device"]]
+            for w, d in zip(weights, devs))
+        if per_device_fits:
+            # Explicit --device list: without one, llama.cpp maps
+            # tensor_split positions to its own enumeration order, while
+            # this ratio is in devs order (primary first) -- a non-SYCL0
+            # primary would receive the wrong share at runtime.
+            dev_list = ",".join(d["device"] for d in devs)
+            extra2 = f"--device {dev_list}" + (f" {other}" if other else "")
+            return result(2, {"device": "", "split_mode": "layer",
+                              "tensor_split": ts, "extra": extra2},
+                          [("all GPUs", _gib(total),
+                            f"layer split {ts} by usable VRAM")])
 
     # --- tiers 3/4: spill to CPU (RAM), maybe SSD streaming --------------
     tier = 3 if total <= combined + ram_budget else 4

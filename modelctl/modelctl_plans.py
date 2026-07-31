@@ -438,12 +438,26 @@ def _make_claim(profile, config, hardware):
     if split and "," in split and hardware:
         import modelctl_hardware as _hw
         ratios = [float(x) for x in split.split(",")]
-        gpus = list(_hw.enabled_gpus(hardware))
+        # Position i of --tensor-split maps to position i of the command's
+        # --device list when it carries one, else to llama.cpp's own
+        # enumeration order (SYCL index order). It never maps to the
+        # role/size ordering of enabled_gpus() -- attributing shares by
+        # that order charged the wrong cards whenever the two disagreed,
+        # admitting coexisting models onto a card that was already full.
+        m = re.search(r"--device[= ]([A-Za-z0-9_,]+)", extra or "")
+        if m:
+            order = m.group(1).split(",")
+        else:
+            def _dev_index(g):
+                num = re.search(r"(\d+)$", g.device)
+                return int(num.group(1)) if num else 0
+            order = [g.device for g in
+                     sorted(_hw.enabled_gpus(hardware), key=_dev_index)]
         denom = sum(ratios) or 1
         for i, ratio in enumerate(ratios):
-            if i < len(gpus):
+            if i < len(order):
                 share = ratio / denom
-                _add(gpus[i].device,
+                _add(order[i],
                      int(shared_gpu * share), int(shared_static * share),
                      int(shared_kv * share), int(shared_overhead * share))
     elif device:

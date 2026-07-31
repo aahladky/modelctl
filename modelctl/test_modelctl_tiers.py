@@ -94,7 +94,12 @@ class TestPlanTiers(unittest.TestCase):
             layout=dense_layout(30, 1.0))
         self.assertEqual(plan["tier"], 2)
         self.assertEqual(plan["config"]["split_mode"], "layer")
-        self.assertEqual(plan["config"]["tensor_split"], "8,3")
+        # The split ratio comes from USABLE bytes (limit_pct, reserves and
+        # any cache reservation applied), not raw card capacity: llama.cpp
+        # distributes the model by these weights, so a raw-capacity ratio
+        # ("8,3" here) over-filled whichever card had the bigger haircut.
+        # 90% of 32 GiB -> 29, 90% of 12 GiB -> 11.
+        self.assertEqual(plan["config"]["tensor_split"], "29,11")
 
     def test_moe_spill_assigns_fastest_first(self):
         # Laguna-like: 47 layers x 1.1 GiB experts, 4 GiB non-expert
