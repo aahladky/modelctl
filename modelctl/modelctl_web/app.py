@@ -1155,8 +1155,6 @@ def create_app(token=None, store=None, runner=None):
         snap = modelctl_hardware.capture_hardware_snapshot()
         plans = modelctl_plans.compile_launch_plans(p, snap)
         rdb = modelctl_runtime.RuntimeDB()
-        backend_fp = snap.backend_fingerprints.get(p.get("backend", "llama-cpp"), "")
-        observations = rdb.observations_for_profile(name, snap.fingerprint, backend_fp)
         failures = rdb.failures_for_profile(name)
 
         # Resolving the backend here is what lets a plan card name the build
@@ -1167,6 +1165,16 @@ def create_app(token=None, store=None, runner=None):
             backend = modelctl_launch.resolve_backend(p)
         except Exception:
             backend = None
+
+        # Resolved before the observations, so staleness can be judged on the
+        # effective launch environment and the capabilities the binary
+        # actually reported -- not only on hardware and backend identity
+        # (Task H1). When resolution fails the identity degrades to exactly
+        # the two checks this page did before.
+        observations = rdb.observations_for_profile(
+            name, identity=modelctl_runtime.ObservationIdentity.current(
+                snapshot=snap, backend=backend,
+                profile_name=p.get("backend", "llama-cpp")))
 
         try:
             ranked = modelctl_plans.rank_plans(

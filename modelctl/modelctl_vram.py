@@ -597,6 +597,30 @@ if __name__ == "__main__":
 _FP_CACHE = {}
 
 
+def model_fingerprint(model_path):
+    """Identity of a model, covering every shard (roadmap Task H1).
+
+    file_fingerprint() covers the file it is handed, which for a sharded
+    GGUF is only the shard that was named. Replacing shard 2 of 3 leaves it
+    unchanged, so both plan identity and observation validity would keep
+    treating a different model as the same one. Folding in every sibling
+    shard closes that.
+
+    For an unsharded model this is exactly file_fingerprint(), so plan IDs
+    for single-file models are unaffected.
+    """
+    if not model_path:
+        return ""
+    paths = [str(p) for p in _shard_paths(model_path)]
+    if len(paths) == 1:
+        return file_fingerprint(paths[0])
+    h = hashlib.sha256()
+    for p in paths:
+        h.update(file_fingerprint(p).encode())
+        h.update(b"\0")
+    return h.hexdigest()[:16]
+
+
 def file_fingerprint(path, full_limit=512 << 20, head_tail=1 << 20):
     """Content fingerprint of a file: full sha256 up to `full_limit`;
     head+tail+size+mtime sha256 for larger files (a 183 GB GGUF can't be

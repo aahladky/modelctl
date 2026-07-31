@@ -251,6 +251,84 @@ class TestReleaseAImportLocal(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestObservationValidity(unittest.TestCase):
+    """Task H1: an observation is only evidence while the setup it was
+    measured in still holds, and a stale one says what changed."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        import modelctl_runtime
+        self.rt = modelctl_runtime
+        self.rdb = modelctl_runtime.RuntimeDB(
+            db_path=Path(self.tmp.name) / "runtime.db")
+        self.rdb.record_plan_run({
+            "profile_name": "m", "plan_id": "p1",
+            "hardware_fingerprint": "hw", "backend_fingerprint": "be",
+            "environment_fingerprint": "env", "capability_digest": "caps",
+            "storage_device": "nvme0n1",
+            "started_at": 100, "finished_at": 101,
+            "success": True, "generation_tps": 42.0, "cache_state": "cold"})
+
+    def _obs(self, **kw):
+        ident = self.rt.ObservationIdentity(**kw)
+        return self.rdb.observations_for_profile("m", identity=ident)["p1"]
+
+    def test_matching_identity_is_not_stale(self):
+        o = self._obs(hardware_fingerprint="hw", backend_fingerprint="be",
+                      environment_fingerprint="env", capability_digest="caps",
+                      storage_device="nvme0n1")
+        self.assertFalse(o["stale"])
+        self.assertEqual(o["stale_reasons"], [])
+
+    def test_changed_environment_is_stale_and_says_so(self):
+        # The effective launch environment is not part of the plan ID, so
+        # nothing else would catch this.
+        o = self._obs(hardware_fingerprint="hw", environment_fingerprint="other")
+        self.assertTrue(o["stale"])
+        self.assertTrue(any("environment" in r for r in o["stale_reasons"]))
+
+    def test_changed_capabilities_are_stale(self):
+        # A rebuilt runtime reporting different features invalidates
+        # measurements taken under the old contract.
+        o = self._obs(capability_digest="rebuilt")
+        self.assertTrue(o["stale"])
+        self.assertTrue(any("capabilities" in r for r in o["stale_reasons"]))
+
+    def test_changed_storage_device_is_stale(self):
+        o = self._obs(storage_device="sda")
+        self.assertTrue(o["stale"])
+        self.assertTrue(any("storage" in r for r in o["stale_reasons"]))
+
+    def test_every_mismatch_is_reported_not_just_the_first(self):
+        # Task H3 has to explain a rejection; one reason out of three is a
+        # misleading explanation.
+        o = self._obs(hardware_fingerprint="new", backend_fingerprint="new",
+                      environment_fingerprint="new")
+        self.assertEqual(len(o["stale_reasons"]), 3)
+
+    def test_unknown_values_are_not_treated_as_changed(self):
+        # Rows predating a column, and callers that cannot supply a value,
+        # must not turn the whole history red.
+        o = self._obs(hardware_fingerprint="hw")
+        self.assertFalse(o["stale"])
+        o = self._obs()
+        self.assertFalse(o["stale"])
+
+    def test_legacy_positional_fingerprints_still_work(self):
+        obs = self.rdb.observations_for_profile("m", "different-hw", "be")
+        self.assertTrue(obs["p1"]["stale"])
+
+    def test_positional_and_identity_checks_are_unioned(self):
+        # Adopting the richer argument must not silently drop a check the
+        # caller was already getting positionally.
+        ident = self.rt.ObservationIdentity(environment_fingerprint="env")
+        obs = self.rdb.observations_for_profile(
+            "m", "different-hw", identity=ident)
+        self.assertTrue(obs["p1"]["stale"])
+        self.assertTrue(any("hardware" in r for r in obs["p1"]["stale_reasons"]))
+
+
 class TestReleaseAColdWarmSeparation(unittest.TestCase):
     """Req (Task 6.2, §13): cold and warm measurements are persisted with
     their cache state and never conflated in ranking observations."""

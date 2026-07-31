@@ -484,7 +484,10 @@ def _make_plan(profile, config, source, hardware, extra_warnings=(), decision=No
         "backend": profile.get("backend", "llama-cpp"),
         "binary": merged.get("binary", "") or profile.get("binary", ""),
         "binary_fp": modelctl_vram.file_fingerprint(backend_bin),
-        "model_fp": modelctl_vram.file_fingerprint(profile.get("model_path")),
+        # Every shard, not just the named file: swapping shard 2 of 3 has to
+        # produce a different plan (Task H1). Identical to file_fingerprint
+        # for unsharded models, so single-file plan IDs are unchanged.
+        "model_fp": modelctl_vram.model_fingerprint(profile.get("model_path")),
         "mmproj_fp": modelctl_vram.file_fingerprint(profile.get("mmproj_path")),
         "mtp_fp": modelctl_vram.file_fingerprint(profile.get("mtp_path")),
         "device": merged.get("device", ""),

@@ -12,6 +12,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 STATE_DIR = Path(os.environ.get(
@@ -72,6 +73,87 @@ ON plan_runs (profile_name, plan_id, hardware_fingerprint, backend_fingerprint, 
 """
 
 _STATES = {"pending", "starting", "active", "releasing", "stale"}
+
+
+@dataclass(frozen=True)
+class ObservationIdentity:
+    """What must still hold for a past measurement to describe this setup.
+
+    Roadmap Task H1. The task lists nine identities, but most of them are
+    already load-bearing in the plan ID itself: _plan_id() hashes the model
+    fingerprint, binary fingerprint, device, split, context, cache types,
+    fit, extra args, moe_cache config and env. Change any of those and the
+    old run is filed under a different plan, so it is never offered as
+    evidence for the new one -- that is a stronger guarantee than a
+    staleness flag, and duplicating it here would be dead code.
+
+    What plan identity does NOT cover, and what this therefore checks:
+
+      hardware   GPU/driver/kernel; the same plan on re-seated hardware
+      backend    the runtime behind the plan
+      env        the *effective* launch environment, which includes ambient
+                 variables the profile never declared
+      storage    which device the model was actually read from
+      capability what the binary reported it could do
+
+    Benchmark mode is deliberately absent: observations_for_profile()
+    buckets by cache_state and never compares across states, so a cold run
+    cannot masquerade as a warm one in the first place.
+
+    Every field is compared only when both sides are non-empty. A blank
+    means "not recorded", and unknown must not be reported as changed --
+    rows predating a column would otherwise all read stale, which trains
+    the user to ignore the flag.
+    """
+    hardware_fingerprint: str = ""
+    backend_fingerprint: str = ""
+    environment_fingerprint: str = ""
+    storage_device: str = ""
+    capability_digest: str = ""
+
+    @classmethod
+    def current(cls, snapshot=None, backend=None, profile_name="",
+                storage_device=""):
+        """Identity of the setup a measurement would run in right now.
+
+        `backend` is a ResolvedBackend when the caller already has one.
+        Resolving one solely to build this is not worth it -- the caller
+        then simply gets the hardware and backend checks, which is what it
+        had before.
+        """
+        backend_fp = ""
+        if snapshot is not None and profile_name:
+            backend_fp = getattr(snapshot, "backend_fingerprints", {}).get(
+                profile_name, "")
+        return cls(
+            hardware_fingerprint=getattr(snapshot, "fingerprint", "") or "",
+            backend_fingerprint=backend_fp,
+            environment_fingerprint=getattr(
+                backend, "environment_fingerprint", "") or "",
+            storage_device=storage_device,
+            capability_digest=getattr(
+                backend, "capability_fingerprint", "") or "")
+
+    def stale_reasons(self, row) -> tuple:
+        """Why `row` no longer describes this setup; empty when it still does.
+
+        Reasons rather than a bare bool because Task H3 has to explain
+        automatic choices, and "rejected: stale" is not an explanation.
+        """
+        checks = (
+            ("hardware", self.hardware_fingerprint, row.get("hardware_fingerprint")),
+            ("backend", self.backend_fingerprint, row.get("backend_fingerprint")),
+            ("environment", self.environment_fingerprint,
+             row.get("environment_fingerprint")),
+            ("storage device", self.storage_device, row.get("storage_device")),
+            ("runtime capabilities", self.capability_digest,
+             row.get("capability_digest")),
+        )
+        out = []
+        for label, current, recorded in checks:
+            if current and recorded and current != recorded:
+                out.append(f"{label} changed since this was measured")
+        return tuple(out)
 
 # Additive migrations for plan_runs provenance columns (Task 1.6).
 # Each tuple is (column_name, column_type, default).
@@ -380,10 +462,17 @@ class RuntimeDB:
             return [dict(r) for r in c.execute(q, args).fetchall()]
 
     def observations_for_profile(self, profile_name, hardware_fingerprint="",
-                                 backend_fingerprint=""):
+                                 backend_fingerprint="", identity=None):
         """Latest successful measurement per plan, keyed by plan_id, shaped
-        for rank_plans' `observations` argument. Includes a `stale` flag when
-        the run's fingerprints don't match the current environment.
+        for rank_plans' `observations` argument. Includes a `stale` flag, and
+        `stale_reasons` naming what changed, when the run's recorded identity
+        no longer matches the current one.
+
+        `identity` is an ObservationIdentity covering everything plan identity
+        does not (see that class). The two positional fingerprints are the
+        older, narrower form and are still honoured; passing both takes the
+        union, so an existing caller cannot lose a check by adopting the
+        richer argument.
 
         Cold and warm measurements are never conflated: a single cache_state
         is chosen for the whole profile (the state with the widest plan
@@ -410,17 +499,27 @@ class RuntimeDB:
         chosen_state = sorted(
             by_state,
             key=lambda s: (-len(by_state[s]), 0 if s == "cold" else 1))[0]
+        # The positional fingerprints and the identity object describe the
+        # same current setup, so fold them together rather than choosing.
+        ident = identity or ObservationIdentity()
+        ident = ObservationIdentity(
+            hardware_fingerprint=hardware_fingerprint or ident.hardware_fingerprint,
+            backend_fingerprint=backend_fingerprint or ident.backend_fingerprint,
+            environment_fingerprint=ident.environment_fingerprint,
+            storage_device=ident.storage_device,
+            capability_digest=ident.capability_digest)
+
         out = {}
         for plan_id, d in by_state[chosen_state].items():
-            stale = ((hardware_fingerprint and d["hardware_fingerprint"] != hardware_fingerprint)
-                     or (backend_fingerprint and d["backend_fingerprint"] != backend_fingerprint))
+            reasons = ident.stale_reasons(d)
             out[plan_id] = {
                 "generation_tps": d["generation_tps"],
                 "prompt_tps": d["prompt_tps"],
                 "load_seconds": d["load_seconds"],
                 "actual_context": d["actual_context"],
                 "cache_state": d.get("cache_state") or "cold",
-                "stale": bool(stale),
+                "stale": bool(reasons),
+                "stale_reasons": list(reasons),
                 "run_id": d["id"],
                 "measured_at": d["started_at"],
             }
