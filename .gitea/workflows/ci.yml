@@ -59,7 +59,14 @@ jobs:
           git fetch -q --depth 1 origin "${GITHUB_REF:-$GITHUB_SHA}" \
             || git fetch -q --depth 1 origin "$GITHUB_SHA"
           git checkout -q FETCH_HEAD
-          git submodule update --init --recursive --depth 1
+          # The submodule lives in a SIBLING repository, and gitea's
+          # per-run token is scoped to this repository alone -- it gets
+          # "Repository not found" for moe-serving/llama.cpp. The runner
+          # runs as a user whose SSH key is already authorized on the
+          # instance, so fetch the submodule over SSH instead of adding
+          # a second stored credential.
+          git config submodule.llama.cpp.url "git@gitea:moe-serving/llama.cpp.git"
+          git -c protocol.version=2 submodule update --init --recursive --depth 1
         env:
           # secrets.GITHUB_TOKEN is gitea's automatic per-run token;
           # CI_TOKEN is the explicit fallback if the automatic one is
