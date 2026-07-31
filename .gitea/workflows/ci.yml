@@ -37,16 +37,41 @@ jobs:
       - name: Checkout
         run: |
           set -euo pipefail
+          # Plain git rather than actions/checkout: that action is
+          # JavaScript fetched from github.com at run time, a strange
+          # dependency for a runner sitting on the same box as the gitea
+          # it builds for, and it makes the checks unrunnable offline.
+          #
+          # The repositories are private, so the fetch needs the
+          # per-run token gitea provides. Fetch the REF rather than the
+          # SHA: for pull_request events GITHUB_SHA names a merge commit
+          # that is not always fetchable on its own.
+          URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          if [ -n "${GITHUB_TOKEN:-}" ]; then
+            URL="${GITHUB_SERVER_URL/:\/\//://x-access-token:${GITHUB_TOKEN}@}/${GITHUB_REPOSITORY}.git"
+          else
+            echo "note: no per-run token in the environment; a private" >&2
+            echo "repository will fail to clone. Set a CI_TOKEN secret" >&2
+            echo "and pass it as GITHUB_TOKEN if this fetch fails." >&2
+          fi
           git init -q .
-          git remote add origin \
-            "${GITHUB_SERVER_URL/:\/\//://x-access-token:${GITHUB_TOKEN}@}/${GITHUB_REPOSITORY}.git" \
-            2>/dev/null || git remote set-url origin \
-            "${GITHUB_SERVER_URL/:\/\//://x-access-token:${GITHUB_TOKEN}@}/${GITHUB_REPOSITORY}.git"
-          git fetch -q --depth 1 origin "${GITHUB_SHA}"
+          git remote add origin "$URL" 2>/dev/null || git remote set-url origin "$URL"
+          git fetch -q --depth 1 origin "${GITHUB_REF:-$GITHUB_SHA}" \
+            || git fetch -q --depth 1 origin "$GITHUB_SHA"
           git checkout -q FETCH_HEAD
-          git submodule update --init --recursive --depth 1
+          # The submodule lives in a SIBLING repository, and gitea's
+          # per-run token is scoped to this repository alone -- it gets
+          # "Repository not found" for moe-serving/llama.cpp. The runner
+          # runs as a user whose SSH key is already authorized on the
+          # instance, so fetch the submodule over SSH instead of adding
+          # a second stored credential.
+          git config submodule.llama.cpp.url "git@gitea:moe-serving/llama.cpp.git"
+          git -c protocol.version=2 submodule update --init --recursive --depth 1
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          # secrets.GITHUB_TOKEN is gitea's automatic per-run token;
+          # CI_TOKEN is the explicit fallback if the automatic one is
+          # not provisioned on this instance.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN || secrets.CI_TOKEN }}
 
       - name: Install dependencies
         working-directory: modelctl
