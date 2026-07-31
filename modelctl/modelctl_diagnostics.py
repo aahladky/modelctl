@@ -87,6 +87,11 @@ class ManifestStatus:
     # Expected drift during development -- worth showing, not worth
     # alarming about.
     notes: tuple = ()
+    # True when the running control plane is newer than the last
+    # hardware-validated modelctl+llama.cpp pair. Normal between
+    # promotions; the UI and support bundle surface it so future-you
+    # knows which commit to roll back to when an experiment goes wrong.
+    newer_than_validated: bool = False
 
     @property
     def present(self) -> bool:
@@ -95,6 +100,26 @@ class ManifestStatus:
     @property
     def ok(self) -> bool:
         return self.present and not self.mismatches
+
+    @property
+    def validated_modelctl_commit(self) -> str:
+        return (self.manifest.get("validated_modelctl_commit")
+                or self.manifest.get("modelctl_commit", ""))
+
+    @property
+    def validated_llama_commit(self) -> str:
+        return (self.manifest.get("validated_llama_commit")
+                or self.manifest.get("llama_cpp_commit", ""))
+
+    @property
+    def upstream_base(self) -> str:
+        return (self.manifest.get("upstream_base")
+                or self.manifest.get("llama_cpp_upstream_base", ""))
+
+    @property
+    def validation_report(self) -> str:
+        return (self.manifest.get("validation_report")
+                or self.manifest.get("acceptance_report", ""))
 
 
 def _commits_agree(a: str, b: str) -> bool:
@@ -144,12 +169,13 @@ def manifest_status() -> ManifestStatus:
 
     mismatches = []
     notes = []
-    declared_runtime = m.get("llama_cpp_commit", "")
+    declared_runtime = status.validated_llama_commit
     if declared_runtime and status.submodule_pinned:
         if not _commits_agree(declared_runtime, status.submodule_pinned):
             mismatches.append(
-                f"manifest pins llama.cpp {declared_runtime[:12]} but the "
-                f"submodule is pinned at {status.submodule_pinned[:12]}")
+                f"manifest's validated llama.cpp is {declared_runtime[:12]} "
+                f"but the submodule is pinned at "
+                f"{status.submodule_pinned[:12]}")
     if status.submodule_pinned and status.submodule_checked_out:
         if not _commits_agree(status.submodule_pinned,
                               status.submodule_checked_out):
@@ -162,14 +188,17 @@ def manifest_status() -> ManifestStatus:
     # Control-plane drift is the normal state between promotions -- the
     # manifest is regenerated when a runtime is promoted, not on every
     # commit. Reporting it as a mismatch would leave the page permanently
-    # red and train the user to ignore it.
-    declared_ctl = m.get("modelctl_commit", "")
+    # red and train the user to ignore it. It IS flagged distinctly
+    # (newer_than_validated) so rollback always has a named target.
+    declared_ctl = status.validated_modelctl_commit
     if declared_ctl and status.modelctl_commit:
         if not _commits_agree(declared_ctl, status.modelctl_commit):
+            status.newer_than_validated = True
             notes.append(
-                f"modelctl has moved on since the manifest was written "
-                f"({declared_ctl[:12]} → {status.modelctl_commit[:12]}); "
-                f"expected between runtime promotions")
+                f"running modelctl {status.modelctl_commit[:12]} is newer "
+                f"than the last hardware-validated pair "
+                f"(validated: {declared_ctl[:12]}); expected between "
+                f"promotions -- that commit is the rollback target")
     if status.working_tree_dirty:
         notes.append("working tree has uncommitted changes")
 
@@ -299,6 +328,11 @@ def support_bundle_bytes(log_tail_lines: int = 500) -> bytes:
             "path": status.path,
             "error": status.error,
             "modelctl_commit": status.modelctl_commit,
+            "validated_modelctl_commit": status.validated_modelctl_commit,
+            "validated_llama_commit": status.validated_llama_commit,
+            "upstream_base": status.upstream_base,
+            "validation_report": status.validation_report,
+            "newer_than_validated": status.newer_than_validated,
             "submodule_pinned": status.submodule_pinned,
             "submodule_checked_out": status.submodule_checked_out,
             "working_tree_dirty": status.working_tree_dirty,

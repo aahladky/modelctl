@@ -1,5 +1,9 @@
 {
   "generated_at": "2026-07-31T00:00:00-04:00",
+  "validated_modelctl_commit": "2d7d235",
+  "validated_llama_commit": "724f705c1151253b6e8f2d67f409c1a0f0d29a1e",
+  "upstream_base": "9b2a08881",
+  "validation_report": "docs/upstream-sync/2026-07-31-promotion-report.md",
   "modelctl_commit": "2d7d235",
   "llama_cpp_commit": "724f705c1151253b6e8f2d67f409c1a0f0d29a1e",
   "llama_cpp_upstream_base": "9b2a08881",
@@ -20,5 +24,6 @@
   ],
   "release_channel": "experimental",
   "acceptance_report": "docs/upstream-sync/2026-07-31-promotion-report.md",
+  "field_notes": "validated_* names the last modelctl+llama.cpp pair that passed hardware acceptance together -- the rollback target. The legacy modelctl_commit/llama_cpp_commit/llama_cpp_upstream_base/acceptance_report keys are the same values under their old ambiguous names, kept for ci/checks.sh and older readers.",
   "notes": "Promotion of the Phase F + G2 + offload-threshold runtime. Gates 0.5 (seven build forms), 0.6 (correctness matrix vs the stock-upstream oracle at 9b2a08881) and 0.8 (integration chain, thirteen links) all run against this commit -- the previous pin (2dbf94801) predated every Phase F fix, so a clone built a runtime the docs did not describe. Known limitation carried forward: a GGML_BACKEND_DL=ON build reports build.dynamic_backends=false in its capability response although the backend is dlopened and every cache procedure resolves; the field is wrong, the functionality is not. Same class as the always-empty build.commit."
 }

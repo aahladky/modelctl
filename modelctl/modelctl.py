@@ -3825,10 +3825,13 @@ def cmd_doctor(args):
     if not man.present:
         print(f"  {man.error}")
     else:
-        print(f"  runtime pinned (manifest):  {man.manifest.get('llama_cpp_commit', '—')}")
+        print(f"  validated pair:             modelctl {man.validated_modelctl_commit or '—'} "
+              f"+ llama.cpp {(man.validated_llama_commit or '—')[:12]}")
+        print(f"  upstream base:              {man.upstream_base or '—'}")
         print(f"  runtime pinned (submodule): {man.submodule_pinned or '—'}")
         print(f"  runtime checked out:        {man.submodule_checked_out or '—'}")
-        print(f"  modelctl commit:            {man.modelctl_commit or '—'}")
+        print(f"  modelctl commit (running):  {man.modelctl_commit or '—'}"
+              + ("  [newer than validated]" if man.newer_than_validated else ""))
         for m in man.mismatches:
             print(f"  MISMATCH: {m}")
         for n in man.notes:

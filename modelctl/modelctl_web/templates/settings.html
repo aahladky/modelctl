@@ -26,14 +26,24 @@
   <p class="muted">Expected at <code>{{ manifest.path }}</code>.</p>
   {% else %}
   <table>
-    <tr><td><strong>runtime pinned (manifest)</strong></td>
-        <td><code>{{ manifest.manifest.get('llama_cpp_commit', '—') }}</code></td></tr>
+    <tr><td><strong>validated pair</strong></td>
+        <td>modelctl <code>{{ manifest.validated_modelctl_commit or '—' }}</code>
+            + llama.cpp <code>{{ manifest.validated_llama_commit[:12] or '—' }}</code>
+            <span class="muted">(last hardware-validated together; the rollback target)</span></td></tr>
+    <tr><td><strong>upstream base</strong></td>
+        <td><code>{{ manifest.upstream_base or '—' }}</code>
+            {% if manifest.validation_report %}
+            · <span class="muted">report: {{ manifest.validation_report }}</span>
+            {% endif %}</td></tr>
     <tr><td><strong>runtime pinned (submodule)</strong></td>
         <td><code>{{ manifest.submodule_pinned or '—' }}</code></td></tr>
     <tr><td><strong>runtime checked out</strong></td>
         <td><code>{{ manifest.submodule_checked_out or '—' }}</code></td></tr>
-    <tr><td><strong>modelctl commit</strong></td>
-        <td><code>{{ manifest.modelctl_commit or '—' }}</code></td></tr>
+    <tr><td><strong>modelctl commit (running)</strong></td>
+        <td><code>{{ manifest.modelctl_commit or '—' }}</code>
+            {% if manifest.newer_than_validated %}
+            <span class="warn">newer than validated</span>
+            {% endif %}</td></tr>
     <tr><td><strong>capability schema</strong></td>
         <td>{{ manifest.manifest.get('capability_schema', '—') }}</td></tr>
     <tr><td><strong>profile schema</strong></td>

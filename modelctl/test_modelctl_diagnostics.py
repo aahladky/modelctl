@@ -135,8 +135,45 @@ class TestManifestStatus(ManifestBase):
         # page permanently red and train the user to ignore it.
         self.write_manifest(modelctl_commit="0" * 40)
         status = diag.manifest_status()
-        self.assertTrue(any("modelctl has moved on" in n for n in status.notes))
+        self.assertTrue(any("newer than the last hardware-validated" in n
+                            for n in status.notes))
         self.assertFalse(any("modelctl" in m for m in status.mismatches))
+
+    def test_newer_than_validated_is_flagged_with_a_rollback_target(self):
+        # The distinction the manifest exists for: which pair was last
+        # hardware-validated together, vs what is running now.
+        self.write_manifest(validated_modelctl_commit="0" * 40)
+        status = diag.manifest_status()
+        self.assertTrue(status.newer_than_validated)
+        self.assertTrue(any("rollback target" in n for n in status.notes))
+
+    def test_running_the_validated_pair_is_not_flagged(self):
+        # Written WITHOUT committing (committing the manifest would move
+        # HEAD past the commit it records), so HEAD == validated.
+        (self.root / diag.MANIFEST_NAME).write_text(json.dumps({
+            "validated_modelctl_commit": self.head,
+            "validated_llama_commit": "a" * 40,
+            "capability_schema": 2, "profile_schema": 2,
+        }))
+        status = diag.manifest_status()
+        self.assertFalse(status.newer_than_validated)
+
+    def test_validated_fields_fall_back_to_legacy_names(self):
+        self.write_manifest(modelctl_commit="1" * 40,
+                            llama_cpp_commit="b" * 40,
+                            llama_cpp_upstream_base="c" * 9,
+                            acceptance_report="docs/report.md")
+        status = diag.manifest_status()
+        self.assertEqual(status.validated_modelctl_commit, "1" * 40)
+        self.assertEqual(status.validated_llama_commit, "b" * 40)
+        self.assertEqual(status.upstream_base, "c" * 9)
+        self.assertEqual(status.validation_report, "docs/report.md")
+
+    def test_explicit_validated_fields_win_over_legacy(self):
+        self.write_manifest(validated_llama_commit="d" * 40,
+                            llama_cpp_commit="b" * 40)
+        status = diag.manifest_status()
+        self.assertEqual(status.validated_llama_commit, "d" * 40)
 
     def test_dirty_working_tree_is_noted(self):
         self.write_manifest()
@@ -236,7 +273,8 @@ class TestSubmodulePinDrift(unittest.TestCase):
         # not regenerating the manifest.
         self._run(["checkout", "-q", self.newer], self.root / "llama.cpp")
         status = diag.manifest_status()
-        self.assertFalse(any("manifest pins" in m for m in status.mismatches),
+        self.assertFalse(any("validated llama.cpp" in m
+                             for m in status.mismatches),
                          status.mismatches)
 
     def test_manifest_behind_the_pin_is_reported_against_the_pin(self):
@@ -249,7 +287,8 @@ class TestSubmodulePinDrift(unittest.TestCase):
         }))
         self._commit(self.root, "stale manifest")
         status = diag.manifest_status()
-        self.assertTrue(any("manifest pins" in m for m in status.mismatches))
+        self.assertTrue(any("validated llama.cpp" in m
+                            for m in status.mismatches), status.mismatches)
         # The message must name the real pin, not the checked-out commit.
         self.assertTrue(any(self.promoted[:12] in m
                             for m in status.mismatches), status.mismatches)
