@@ -129,6 +129,7 @@ def _classify_probe_failure(binary_path: str) -> dict:
             "moe_cache_prefill_policy": False,
             "moe_cache_reset": False,
             "moe_cache_prefetch": False,
+            "moe_offload_threshold_control": False,
         },
         "constraints": {
             "moe_cache_backend": "",
@@ -175,6 +176,8 @@ def normalize_capabilities(raw_caps: dict) -> dict:
             "moe_cache_prefill_policy": bool(features.get("moe_cache_prefill_policy")),
             "moe_cache_reset": has_cache,
             "moe_cache_prefetch": False,
+            # Schema 1 predates a per-op-type offload threshold.
+            "moe_offload_threshold_control": False,
         }
 
         # Map schema 1 CLI names to canonical names.
@@ -232,6 +235,14 @@ def normalize_capabilities(raw_caps: dict) -> dict:
         "moe_cache_prefill_policy": bool(features.get("moe_cache_prefill_policy")),
         "moe_cache_reset": bool(features.get("moe_cache_reset")),
         "moe_cache_prefetch": False,  # Not implemented until Phase 9
+        # Routed MoE ops honour their own offload minimum. Passed
+        # through from the backend rather than defaulted, because the
+        # acceptance matrix gates its offload sweep on it: dropping the
+        # key made those cells skip against a runtime that does support
+        # it, which is the opposite failure to the one the gate exists
+        # to prevent but just as misleading.
+        "moe_offload_threshold_control": bool(
+            features.get("moe_offload_threshold_control")),
     }
 
     # Force prefetch false until implemented. Hybrid is now allowed through
