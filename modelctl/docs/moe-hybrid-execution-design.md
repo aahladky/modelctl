@@ -178,14 +178,37 @@ reuse, and H2D bytes avoided.
 
 ## 4. Scope
 
-**Delivered now (G2):** the contribution representation, the
-side-effect-free residency query, a corrected partition builder, and
-host-only unit tests in the shape F8 established.
+**Delivered (G2):** the contribution representation, the side-effect-free
+residency query, a corrected partition builder, and host-only unit tests
+in the shape F8 established.
 
-**Not delivered:** G3 (quantised CPU kernels over mmap weights), G4 (GPU
-hit dispatch), G5 (weighted merge in the real op), G6 (async promotion),
-G7 (control-plane integration). These need to land in that order, and G3
-is the largest single piece.
+**Delivered (G3, 2026-07-31):** `moe_cpu_execute_misses()` in
+`moe-hybrid.cpp` — batch-1 CPU execution of a partition's miss
+contributions over host/mmap weights, one dequantized row at a time so no
+weight byte is read twice. One deviation from §3.4, made deliberately:
+the executor dequantizes through **ggml-base's type traits**
+(`ggml_get_type_traits()->to_float`) plus an f32 dot, instead of calling
+the CPU backend's `mul_mat_id` machinery. The SYCL backend cannot reach
+ggml-cpu's kernels in shared/dynamic builds without inventing a new
+cross-backend interface; the ggml-base dequantizer is the same reference
+math those kernels are validated against; and the miss path at batch 1 is
+bound by reading the weights (page faults / storage), not FLOPs. Types
+without a dequantizer fail closed (return -1 → non-hybrid path). Covered
+by five host-only cases in `tests/test-moe-hybrid.cpp`, including a
+quantized (Q8_0 / Q4_K / Q6_K) comparison against an independent
+dequantize-and-dot reference and an end-to-end
+partition→execute→weighted-merge check.
+
+**Not delivered:** G4 (GPU hit dispatch from cache slots inside
+`ggml_sycl_mul_mat_id`), G5 (the in-op merge on device), G6 (async
+promotion + the full metrics wiring; `moe_hybrid_metrics` exists, nothing
+fills it), G7 (control-plane integration). These are the pieces that
+cannot be validated without the Arc GPUs: they restructure how the
+scheduler stages experts (a miss expert must NOT be staged — that is the
+entire saving) and how the op consumes them, and per the re-review's own
+rules that work must not be declared from plausible code. Wire them in
+G4→G5→G6→G7 order on the integration branch, validating each against
+§3.9's token-identical oracle before the next.
 
 `moe_hybrid_cpu_miss` stays `false` until G3–G5 exist and pass §3.9. The
 capability must never lead the implementation.
