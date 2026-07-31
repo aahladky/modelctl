@@ -215,7 +215,7 @@ def estimate_from_parts(weights_bytes, ctx, kv_quant, gguf_params=None,
     else:
         kv = int(ctx) * HEURISTIC_KV_BYTES_PER_TOKEN
         quality = "heuristic"
-    overhead = max(1 << 30, int(weights * 0.10))
+    overhead = compute_overhead_bytes(weights)
     return {"weights": weights, "kv_bytes": kv, "overhead": overhead,
             "total": weights + kv + overhead, "quality": quality}
 
@@ -310,6 +310,18 @@ def match_devices(sycl_devices, xpu_device_list):
     return mapping
 
 
+def compute_overhead_bytes(resident_weight_bytes):
+    """Compute-buffer + allocator slack for weights resident on the
+    accelerator side: max(1 GiB, 10% of resident weights).
+
+    The one formula. The call sites used to carry four variants (5% or
+    10%, over all weights or only the resident share), and the loosest
+    one -- the admission claim's -- was the operative gate: admission
+    could pass where every planner formula would have refused.
+    """
+    return max(1 << 30, int(resident_weight_bytes * 0.10))
+
+
 def tensor_split_ratio(total_bytes_list):
     """Derive a llama-server --tensor-split ratio from card capacities,
     e.g. 32GB+12GB -> '8,3'. GiB-rounded then GCD-reduced for readability."""
@@ -318,29 +330,43 @@ def tensor_split_ratio(total_bytes_list):
     return ",".join(str(g // divisor) for g in gib)
 
 
-def recommend_placement(estimate_total, inventory, limit_pct, primary_device):
+def recommend_placement(estimate_total, inventory, limit_pct, primary_device,
+                        reserve_bytes_map=None, cache_bytes_map=None):
     """The static placement rule from the design spec:
-    fits within limit_pct of the primary card alone -> pin to it;
-    fits within limit_pct of all cards combined -> layer-split by capacity;
+    fits within the usable budget of the primary card alone -> pin to it;
+    fits within the usable budget of all cards combined -> layer-split;
     doesn't fit at all -> same split, fits=False (caller warns loudly).
+
+    Usable = total * limit_pct - configured reserve - cache reservation.
+    Ignoring reserves and the cache here recommended pins that every
+    other budget computation (worker admission, tier planning) would
+    refuse -- or that OOMed under fixed mode.
 
     Returns None if primary_device isn't in the inventory."""
     primary = next((d for d in inventory if d["device"] == primary_device), None)
     if primary is None:
         return None
     frac = limit_pct / 100.0
-    if estimate_total <= primary["total_bytes"] * frac:
+    reserve_bytes_map = reserve_bytes_map or {}
+    cache_bytes_map = cache_bytes_map or {}
+
+    def usable(d):
+        return max(0, int(d["total_bytes"] * frac)
+                   - reserve_bytes_map.get(d["device"], 0)
+                   - cache_bytes_map.get(d["device"], 0))
+
+    if estimate_total <= usable(primary):
         return {"device": primary_device, "split_mode": "", "tensor_split": "",
                 "fits": True}
     ordered = [primary] + [d for d in inventory if d is not primary]
-    combined_budget = sum(d["total_bytes"] for d in ordered) * frac
+    combined_budget = sum(usable(d) for d in ordered)
     if len(ordered) == 1:
         # Single-GPU system: a one-way "split" is meaningless -- keep the
         # pin and let fits=False carry the over-budget warning.
         return {"device": primary_device, "split_mode": "", "tensor_split": "",
                 "fits": estimate_total <= combined_budget}
     return {"device": "", "split_mode": "layer",
-            "tensor_split": tensor_split_ratio([d["total_bytes"] for d in ordered]),
+            "tensor_split": tensor_split_ratio([usable(d) for d in ordered]),
             "fits": estimate_total <= combined_budget}
 
 

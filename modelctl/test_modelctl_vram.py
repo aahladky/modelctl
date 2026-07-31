@@ -329,8 +329,21 @@ class TestRecommendPlacement(unittest.TestCase):
         rec = modelctl_vram.recommend_placement(35 << 30, self.INVENTORY, 90, "SYCL0")
         self.assertEqual(rec["device"], "")
         self.assertEqual(rec["split_mode"], "layer")
-        self.assertEqual(rec["tensor_split"], "8,3")
+        # Usable-based ratio (90% of 32/12 GiB), not raw capacity "8,3":
+        # llama.cpp distributes by these weights, and the recommendation
+        # must match what admission and the tier planner budget.
+        self.assertEqual(rec["tensor_split"], "29,11")
         self.assertTrue(rec["fits"])
+
+    def test_reserves_shrink_the_recommendation(self):
+        # A 27 GiB estimate fits 90% of a 32 GiB card (28.8) -- but not
+        # once a 6 GiB reserve is configured. Ignoring the reserve
+        # recommended pins that admission would refuse or that OOMed.
+        rec = modelctl_vram.recommend_placement(
+            27 << 30, self.INVENTORY, 90, "SYCL0",
+            reserve_bytes_map={"SYCL0": 6 << 30})
+        self.assertNotEqual(rec["device"], "SYCL0",
+                            "pin recommended into a configured reserve")
 
     def test_too_big_for_everything_flagged(self):
         rec = modelctl_vram.recommend_placement(60 << 30, self.INVENTORY, 90, "SYCL0")
