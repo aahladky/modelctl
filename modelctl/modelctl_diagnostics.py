@@ -214,11 +214,13 @@ def manifest_status() -> ManifestStatus:
                 f"manifest declares profile_schema {declared}, code writes {actual}")
     except Exception:
         pass
+    import modelctl_capabilities
     declared_caps = m.get("capability_schema")
-    if isinstance(declared_caps, int) and declared_caps != 2:
+    canonical = modelctl_capabilities.CAPABILITY_SCHEMA_VERSION
+    if isinstance(declared_caps, int) and declared_caps != canonical:
         mismatches.append(
             f"manifest declares capability_schema {declared_caps}, "
-            f"modelctl normalizes to 2")
+            f"modelctl normalizes to {canonical}")
 
     status.mismatches = tuple(mismatches)
     status.notes = tuple(notes)

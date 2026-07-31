@@ -1,13 +1,18 @@
-# Backend Capability Schema v2
+# Backend Capability Schema
 
 ## Overview
 
 The `--modelctl-capabilities` probe returns a JSON object describing
-what the llama-server binary supports. Schema 2 is the canonical
-format. Schema 0 (unsupported probe) and schema 1 (early fork) are
-automatically normalized to schema 2 by `normalize_capabilities()`;
-those rules stay only as long as pre-schema-2 binaries are still in
-use locally.
+what the llama-server binary supports. **Schema 3 is the canonical
+format** (`modelctl_capabilities.CAPABILITY_SCHEMA_VERSION`). Schema 0
+(unsupported probe), 1 (early fork), and 2 are automatically normalized
+to it by `normalize_capabilities()`; features an older schema cannot
+express normalize to `false`, never to an assumption.
+
+Schema 3 adds `moe_cache_per_device_budgets`: `--moe-cache-bytes`
+accepts a device map (`SYCL0=8589934592,SYCL1=2147483648`) as well as a
+single uniform value. This matters to placement, not just the CLI --
+see the reservation rule below.
 
 The probe runs under the actual launch environment (modelctl passes
 it), so environment-sensitive constraints reflect the values the
@@ -76,6 +81,7 @@ rather than trusting this snapshot.
 | `moe_cache_prefill_policy` | Prefill/decode phase admission control | Implemented |
 | `moe_cache_reset` | Cache reset via API | Implemented |
 | `moe_offload_threshold_control` | `GGML_OP_OFFLOAD_MOE_MIN_BATCH` (per-op-type offload threshold) | Implemented |
+| `moe_cache_per_device_budgets` | `--moe-cache-bytes` accepts a per-device map (schema 3) | Implemented |
 | `moe_cache_prefetch` | Expert prefetching | Not implemented; forced `false` by normalization |
 
 **Fail-closed rule**: a feature a binary does not affirmatively report
@@ -83,6 +89,26 @@ is treated as absent, and features known to be unimplemented
 (`moe_cache_prefetch`) are forced false regardless of what the binary
 claims. Schema semantics (what a field means) are fixed here; which
 features are true is the binary's report, not this document's.
+
+## Cache budget reservation
+
+The budget contract decides how placement reserves VRAM, and emitting
+one contract's flags while reserving the other's is how the runtime
+cache collides with statically placed experts:
+
+- **`moe_cache_per_device_budgets: true`** (schema 3+): the profile's
+  `moe_cache.gpu.budgets_bytes` map is passed through literally. Each
+  named device is reserved its own budget; **a device the map does not
+  name gets no cache**, and none is reserved for it.
+- **`false`** (schema 1/2): the runtime has ONE global budget applied
+  to every device that creates a cache. The map collapses to its
+  **maximum**, and that figure is reserved on every participating
+  device. Summing, or sending a smaller device's figure, would hand
+  some card more cache than was reserved there.
+
+If a budget does not fit its device's usable VRAM, the planner
+disables the cache for that plan rather than reserving half of it --
+a partial reservation would diverge from what the server allocates.
 
 ## Constraint semantics
 
@@ -95,13 +121,14 @@ features are true is the binary's report, not this document's.
   tier handles every weight type ggml can dequantize; other types are
   never skipped from staging (fail-safe).
 
-## Schema 1 → 2 Normalization
+## Normalization to the canonical schema
 
-| Schema 1 | Schema 2 |
+| Schema 1 | Canonical |
 |---|---|
 | `moe_expert_cache` + `moe_cache_sycl` | `moe_weight_transfer_cache` |
 | `moe_cache_prefetch` | forced `false` |
 | (absent) | `moe_offload_threshold_control: false` |
+| (absent, schema 1/2) | `moe_cache_per_device_budgets: false` |
 | `cache_bytes` (cli) | `moe_cache_bytes` |
 | `cache_policy` (cli) | `moe_cache_policy` |
 | `admission_misses` (cli) | `moe_cache_admission` |

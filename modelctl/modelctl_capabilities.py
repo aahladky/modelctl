@@ -12,12 +12,15 @@ result accordingly.
 Schema versions:
   0 — stock binary that rejects the probe (no cache support)
   1 — early fork response (moe_expert_cache, moe_cache_sycl, etc.)
-  2 — canonical schema with moe_weight_transfer_cache, device features,
-      constraints, and cli flag declarations
+  2 — moe_weight_transfer_cache, device features, constraints, and cli
+      flag declarations; one uniform per-GPU cache budget
+  3 — adds moe_cache_per_device_budgets: --moe-cache-bytes accepts a
+      device map (SYCL0=N,SYCL1=N), so each card gets the budget the
+      planner reserved for it
 
-normalize_capabilities() converts schema 0/1 to the internal canonical
-form so all consumers see a consistent representation.  The raw probe
-output is preserved in _raw_probe for debugging.
+normalize_capabilities() converts every schema to the current canonical
+form so all consumers see a consistent representation; features absent
+from an older schema normalize to false, never to an assumption.
 
 Public API:
     probe_backend(binary_path) -> dict
@@ -43,8 +46,34 @@ from pathlib import Path
 from modelctl_paths import STATE_DIR
 CAPABILITIES_DIR = STATE_DIR / "backend_capabilities"
 
+# The canonical schema every consumer sees after normalization. One
+# constant, not six scattered literals: a schema-3 migration must not
+# have to hunt for magic numbers.
+CAPABILITY_SCHEMA_VERSION = 3
+
+# Bumped whenever normalize_capabilities() changes meaning. Cache entries
+# store the RAW probe output and are re-normalized on every read, so a
+# normalizer fix reaches even the pinned, never-rebuilt binary; this
+# stamp exists for observability, not gating.
+NORMALIZER_VERSION = 3
+
+# SYCL driver init under load can exceed the old 10s. Overridable for
+# slow machines without patching code.
+PROBE_TIMEOUT = int(os.environ.get("MODELCTL_PROBE_TIMEOUT", "10") or 10)
+
 # The probe is fast but binary hashing is not free; cache for the session.
-_session_cache: dict[str, dict] = {}
+# Keyed by (binary fingerprint, env fingerprint): a probe answered under
+# the bare environment (possibly seeing zero SYCL devices) must never be
+# served to the launch path that asked under its resolved env.
+_session_cache: dict[tuple, dict] = {}
+
+# stderr signatures of a binary that RAN its argument parser and rejected
+# the flag -- the only outcome that may be persisted as "unsupported".
+# Crashes, timeouts, and garbage output are transient ("error"): caching
+# them silently stripped every fork feature until the binary was rebuilt,
+# with no reprobe command to recover.
+_REJECTION_MARKERS = ("invalid argument", "unrecognized argument",
+                      "unknown argument", "unknown option", "invalid option")
 
 
 def _binary_fingerprint(binary_path: str) -> str:
@@ -74,55 +103,82 @@ def _version_string(binary_path: str) -> str:
         return ""
 
 
-def _run_probe(binary_path: str, extra_env: dict | None) -> dict | None:
+def _run_probe(binary_path: str, extra_env: dict | None) -> tuple:
+    """One probe attempt. Returns (verdict, raw):
+
+    "ok"       -- exit 0 with a JSON object on stdout
+    "rejected" -- the binary ran its argument parser and refused the flag
+                  (stock llama.cpp); the only verdict safe to persist as
+                  "this binary has no fork features"
+    "error"    -- crash, timeout, unreadable binary, or garbage output;
+                  transient by definition, must never be persisted
+    """
     env = None
     if extra_env:
         env = dict(os.environ)
         env.update(extra_env)
     try:
         r = subprocess.run([binary_path, "--modelctl-capabilities"],
-                           capture_output=True, text=True, timeout=10, env=env)
-        if r.returncode != 0:
-            return None
-        return json.loads(r.stdout)
-    except (json.JSONDecodeError, subprocess.TimeoutExpired, OSError):
-        return None
+                           capture_output=True, text=True,
+                           timeout=PROBE_TIMEOUT, env=env)
+    except (subprocess.TimeoutExpired, OSError):
+        return "error", None
+    if r.returncode != 0:
+        # A clean rejection exits via the arg parser with a recognizable
+        # message and a small positive code; a crash exits via a signal
+        # (negative returncode) or an abort, message or not.
+        err = (r.stderr or "").lower()
+        if r.returncode > 0 and any(m in err for m in _REJECTION_MARKERS):
+            return "rejected", None
+        return "error", None
+    try:
+        raw = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return "error", None
+    if not isinstance(raw, dict):
+        # Valid JSON that is not an object ([] or "ok") used to crash
+        # resolution with AttributeError further down.
+        return "error", None
+    return "ok", raw
 
 
-def _probe_raw(binary_path: str, env: dict | None = None) -> dict | None:
-    """Run --modelctl-capabilities and parse JSON, or None on failure.
+def _probe_raw(binary_path: str, env: dict | None = None) -> tuple:
+    """Probe under the caller's launch env, the bare env, then the env
+    scripts the launch path uses (SYCL builds initialize the GPU driver
+    even for the probe, so they crash without their oneAPI env).
 
-    Tries the caller-supplied launch environment first (the one the binary
-    will really run under), then the bare process env. SYCL builds
-    initialize the backend registry (and thus the GPU driver) even for the
-    probe, so they crash without their oneAPI env. Retry with the env
-    scripts the launch path uses before giving up."""
-    if env is not None:
-        raw = _run_probe(binary_path, env)
-        if raw is not None:
-            return raw
-    raw = _run_probe(binary_path, None)
-    if raw is not None:
-        return raw
+    Returns (verdict, raw). "ok" and "rejected" are decisive -- the
+    binary answered coherently -- and short-circuit; only crashes keep
+    trying the next environment."""
+    for attempt_env in ([env] if env is not None else []) + [None]:
+        verdict, raw = _run_probe(binary_path, attempt_env)
+        if verdict in ("ok", "rejected"):
+            return verdict, raw
+    # Still undecided (crashes only): gather env scripts lazily -- they
+    # cost subprocess spawns and must not run when the bare probe answers.
     try:
         import modelctl
         for script in modelctl.find_env_script_candidates():
-            env = modelctl.source_env_script(script)
-            if env:
-                modelctl.ensure_binary_ld_library_path(env, binary_path)
-                raw = _run_probe(binary_path, env)
-                if raw is not None:
-                    return raw
+            script_env = modelctl.source_env_script(script)
+            if script_env:
+                modelctl.ensure_binary_ld_library_path(script_env, binary_path)
+                verdict, raw = _run_probe(binary_path, script_env)
+                if verdict in ("ok", "rejected"):
+                    return verdict, raw
     except ImportError:
         pass
-    return None
+    return "error", None
 
 
-def _classify_probe_failure(binary_path: str) -> dict:
-    """Build a minimal capability dict for a binary that doesn't support
-    the probe command (stock llama.cpp or non-llama.cpp backend)."""
+def _classify_probe_failure(binary_path: str, status: str = "unsupported") -> dict:
+    """Build a minimal all-false capability dict.
+
+    status "unsupported": the binary coherently rejected the probe (stock
+    llama.cpp) -- cacheable. status "error": the probe itself failed
+    (crash/timeout/garbage) -- fail closed for this call, session-cached
+    only, retried next process."""
     return {
-        "schema": 2,
+        "schema": CAPABILITY_SCHEMA_VERSION,
         "backend": "unknown",
         "build": {"commit": "", "compiler": "", "dynamic_backends": False},
         "devices": [],
@@ -134,6 +190,7 @@ def _classify_probe_failure(binary_path: str) -> dict:
             "moe_cache_reset": False,
             "moe_cache_prefetch": False,
             "moe_offload_threshold_control": False,
+            "moe_cache_per_device_budgets": False,
         },
         "constraints": {
             "moe_cache_backend": "",
@@ -141,7 +198,7 @@ def _classify_probe_failure(binary_path: str) -> dict:
             "moe_cache_supported_projections": [],
         },
         "cli": {},
-        "_probe_status": "unsupported",
+        "_probe_status": status,
     }
 
 
@@ -182,6 +239,9 @@ def normalize_capabilities(raw_caps: dict) -> dict:
             "moe_cache_prefetch": False,
             # Schema 1 predates a per-op-type offload threshold.
             "moe_offload_threshold_control": False,
+            # Schema 1/2 backends take a single uniform budget; the
+            # per-device map form arrived with schema 3.
+            "moe_cache_per_device_budgets": False,
         }
 
         # Map schema 1 CLI names to canonical names.
@@ -213,7 +273,7 @@ def normalize_capabilities(raw_caps: dict) -> dict:
                 normalized_devices.append(d)
 
         return {
-            "schema": 2,
+            "schema": CAPABILITY_SCHEMA_VERSION,
             "backend": raw_caps.get("backend", "unknown"),
             "build": build,
             "devices": normalized_devices,
@@ -247,6 +307,11 @@ def normalize_capabilities(raw_caps: dict) -> dict:
         # to prevent but just as misleading.
         "moe_offload_threshold_control": bool(
             features.get("moe_offload_threshold_control")),
+        # Schema 3: --moe-cache-bytes accepts SYCL0=N,SYCL1=N. Absent on
+        # schema 1/2 backends, which take one uniform budget -- the
+        # planner and build_moe_cache_args collapse the map for those.
+        "moe_cache_per_device_budgets": bool(
+            features.get("moe_cache_per_device_budgets")),
     }
 
     # Force prefetch false until implemented. Hybrid is allowed through
@@ -257,15 +322,27 @@ def normalize_capabilities(raw_caps: dict) -> dict:
     if not isinstance(constraints, dict):
         constraints = {}
 
+    def _int_or(value, default=0):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _list_or(value):
+        return list(value) if isinstance(value, (list, tuple)) else []
+
+    # Guarded conversions: a malformed constraint value from a newer or
+    # foreign fork must degrade fail-closed, not raise out of every
+    # launch/preview path for the profile.
     canonical_constraints = {
         "moe_cache_backend": constraints.get("moe_cache_backend", ""),
-        "moe_cache_min_batch": int(constraints.get("moe_cache_min_batch", 0)),
-        "moe_cache_supported_projections": list(
-            constraints.get("moe_cache_supported_projections", [])),
-        "moe_hybrid_supported_archs": list(
-            constraints.get("moe_hybrid_supported_archs", [])),
-        "moe_hybrid_supported_quant": list(
-            constraints.get("moe_hybrid_supported_quant", [])),
+        "moe_cache_min_batch": _int_or(constraints.get("moe_cache_min_batch", 0)),
+        "moe_cache_supported_projections": _list_or(
+            constraints.get("moe_cache_supported_projections")),
+        "moe_hybrid_supported_archs": _list_or(
+            constraints.get("moe_hybrid_supported_archs")),
+        "moe_hybrid_supported_quant": _list_or(
+            constraints.get("moe_hybrid_supported_quant")),
         "moe_hybrid_can_overlap": bool(
             constraints.get("moe_hybrid_can_overlap", False)),
     }
@@ -292,7 +369,7 @@ def normalize_capabilities(raw_caps: dict) -> dict:
             })
 
     return {
-        "schema": 2,
+        "schema": CAPABILITY_SCHEMA_VERSION,
         "backend": raw_caps.get("backend", "unknown"),
         "build": build,
         "devices": normalized_devices,
@@ -305,112 +382,170 @@ def normalize_capabilities(raw_caps: dict) -> dict:
     }
 
 
-def _cache_path(binary_path: str) -> Path:
+def _env_fingerprint(env: dict | None) -> str:
+    """Digest of the CALLER's requested probe environment.
+
+    Cache entries are keyed by it: a SYCL build probed under the bare env
+    can truthfully answer with zero SYCL devices, and that answer must
+    never be served to the launch path asking under its resolved env.
+    """
+    if not env:
+        return "default"
+    text = json.dumps(sorted(env.items()), separators=(",", ":"))
+    return hashlib.sha256(text.encode()).hexdigest()[:12]
+
+
+def _cache_path(binary_path: str, env: dict | None = None) -> Path:
     fp = _binary_fingerprint(binary_path)
-    return CAPABILITIES_DIR / f"{fp}.json"
+    return CAPABILITIES_DIR / f"{fp}-{_env_fingerprint(env)}.json"
 
 
-def _read_cache(binary_path: str) -> dict | None:
-    """Read cached capabilities if the binary fingerprint and probe schema
-    still match."""
-    path = _cache_path(binary_path)
+def _read_cache(binary_path: str, env: dict | None = None) -> dict | None:
+    """Read a cache entry and normalize it FRESH from the stored raw probe
+    output. Entries in the legacy format (normalized caps, no "raw" key)
+    are ignored so they get re-probed once: they were written by whatever
+    normalizer was current then, and its bugs were frozen in with them.
+    """
+    path = _cache_path(binary_path, env)
     if not path.exists():
         return None
     try:
-        cached = json.loads(path.read_text())
-        # Invalidate if the binary version changed.
-        if cached.get("_version") != _version_string(binary_path):
-            return None
-        # Invalidate if the probe schema itself changed.
-        if cached.get("schema", 0) < 0:
-            return None
-        return cached
+        entry = json.loads(path.read_text())
     except (json.JSONDecodeError, OSError):
         return None
+    if not isinstance(entry, dict) or "raw" not in entry:
+        return None
+    if entry.get("_version") != _version_string(binary_path):
+        return None
+    raw = entry["raw"]
+    if not isinstance(raw, dict):
+        return None
+    if raw.get("_probe_status") == "unsupported":
+        return _classify_probe_failure(binary_path)
+    return normalize_capabilities(raw)
 
 
-def _write_cache(binary_path: str, caps: dict):
-    """Persist capabilities to disk.  Best-effort; failures are silent."""
+def _write_cache(binary_path: str, raw: dict, env: dict | None = None):
+    """Persist the RAW probe output (not the normalized form -- see
+    _read_cache). Best-effort; failures are silent."""
     CAPABILITIES_DIR.mkdir(parents=True, exist_ok=True)
-    caps["_version"] = _version_string(binary_path)
-    caps["_binary"] = binary_path
+    entry = {
+        "_version": _version_string(binary_path),
+        "_binary": binary_path,
+        "_normalizer_version": NORMALIZER_VERSION,
+        "raw": raw,
+    }
     try:
-        _cache_path(binary_path).write_text(json.dumps(caps, indent=2))
+        _cache_path(binary_path, env).write_text(json.dumps(entry, indent=2))
     except OSError:
         pass
 
 
 def probe_backend(binary_path: str, env: dict | None = None) -> dict:
-    """Probe a binary for backend capabilities.  Returns a normalized dict
-    with schema 2 representation.
+    """Probe a binary for backend capabilities. Returns a normalized dict
+    in the canonical schema.
 
     `env` is the environment the binary will actually launch under
-    (resolve_backend passes its resolved one). Probing under a different
-    environment than the launch is how a SYCL build reports the wrong
-    devices -- or fails to start at all -- while the real launch behaves
-    differently. Capabilities are compiled into the binary, so the cache
-    stays keyed by binary content alone.
+    (resolve_backend passes its resolved one); results are cached per
+    (binary content, requested env) so an env-less diagnostics probe can
+    never shadow the launch path's answer.
 
     _probe_status is one of:
-      "ok"         — binary responded with valid JSON
-      "unsupported" — binary does not support --modelctl-capabilities
-
-    Results are cached on disk by binary content hash and invalidated
-    when the binary content, version string, or probe schema changes.
+      "ok"          -- binary responded with a valid JSON object
+      "unsupported" -- binary ran its arg parser and rejected the flag
+                       (stock llama.cpp); persisted
+      "error"       -- the probe crashed, timed out, or produced garbage;
+                       fail-closed for this call, session-cached only,
+                       retried next process. Never persisted: one bad
+                       probe used to brand a fork binary "unsupported"
+                       until it was rebuilt.
     """
-    # Session cache first.
     fp = _binary_fingerprint(binary_path)
-    if fp in _session_cache:
-        return _session_cache[fp]
+    key = (fp, _env_fingerprint(env))
+    if key in _session_cache:
+        return _session_cache[key]
 
-    # Disk cache next.
-    cached = _read_cache(binary_path)
+    cached = _read_cache(binary_path, env)
     if cached is not None:
-        # Re-normalize in case we upgraded from schema 1 to 2.
-        if cached.get("schema") != 2:
-            cached = normalize_capabilities(cached)
-        _session_cache[fp] = cached
+        _session_cache[key] = cached
         return cached
 
-    # Live probe.
-    raw = _probe_raw(binary_path, env=env)
-    if raw is not None:
+    verdict, raw = _probe_raw(binary_path, env=env)
+    if verdict == "ok":
         raw.setdefault("schema", 1)
         raw.setdefault("backend", "unknown")
         raw.setdefault("build", "")
         raw.setdefault("features", {})
         raw.setdefault("cli", {})
         raw["_probe_status"] = "ok"
+        _write_cache(binary_path, raw, env)
         normalized = normalize_capabilities(raw)
-        _write_cache(binary_path, normalized)
-        _session_cache[fp] = normalized
+        _session_cache[key] = normalized
         return normalized
 
-    # Unsupported binary.
-    caps = _classify_probe_failure(binary_path)
-    _write_cache(binary_path, caps)
-    _session_cache[fp] = caps
+    if verdict == "rejected":
+        _write_cache(binary_path, {"_probe_status": "unsupported"}, env)
+        caps = _classify_probe_failure(binary_path)
+        _session_cache[key] = caps
+        return caps
+
+    caps = _classify_probe_failure(binary_path, status="error")
+    _session_cache[key] = caps
     return caps
 
 
-def get_cached_capabilities(binary_path: str) -> dict | None:
-    """Return cached capabilities if available, without running a probe."""
+def get_cached_capabilities(binary_path: str, env: dict | None = None) -> dict | None:
+    """Return cached capabilities if available, without running a probe.
+
+    Falls back to any env variant's entry for this binary (display
+    callers ask without an env; serving them the launch env's answer
+    beats serving nothing)."""
     fp = _binary_fingerprint(binary_path)
-    if fp in _session_cache:
-        return _session_cache[fp]
-    cached = _read_cache(binary_path)
+    key = (fp, _env_fingerprint(env))
+    if key in _session_cache:
+        return _session_cache[key]
+    cached = _read_cache(binary_path, env)
+    if cached is None and CAPABILITIES_DIR.exists():
+        candidates = sorted(CAPABILITIES_DIR.glob(f"{fp}-*.json"),
+                            key=lambda p: p.stat().st_mtime, reverse=True)
+        for path in candidates:
+            try:
+                entry = json.loads(path.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            raw = entry.get("raw")
+            if isinstance(raw, dict):
+                if raw.get("_probe_status") == "unsupported":
+                    cached = _classify_probe_failure(binary_path)
+                else:
+                    cached = normalize_capabilities(raw)
+                break
     if cached is not None:
-        if cached.get("schema") != 2:
-            cached = normalize_capabilities(cached)
-        _session_cache[fp] = cached
+        _session_cache[key] = cached
     return cached
 
 
-def clear_cache():
-    """Remove all cached capability files and the session cache."""
-    _session_cache.clear()
+def clear_cache(binary_path: str | None = None):
+    """Remove cached capability entries and their session copies.
+
+    With a binary_path, clears only that binary's entries (every env
+    variant) -- the reprobe escape hatch `modelctl capabilities
+    --reprobe` and the /setup button use this."""
+    if binary_path is None:
+        _session_cache.clear()
+        if CAPABILITIES_DIR.exists():
+            for f in CAPABILITIES_DIR.glob("*.json"):
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+        return
+    fp = _binary_fingerprint(binary_path)
+    for key in [k for k in _session_cache if k[0] == fp]:
+        _session_cache.pop(key, None)
     if CAPABILITIES_DIR.exists():
-        for f in CAPABILITIES_DIR.glob("*.json"):
+        for f in list(CAPABILITIES_DIR.glob(f"{fp}-*.json")) \
+                + list(CAPABILITIES_DIR.glob(f"{fp}.json")):
             try:
                 f.unlink()
             except OSError:

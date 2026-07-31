@@ -38,24 +38,51 @@ class TestClassifyProbeFailure(unittest.TestCase):
     def test_returns_unsupported_status(self):
         caps = modelctl_capabilities._classify_probe_failure("/usr/bin/llama-server")
         self.assertEqual(caps["_probe_status"], "unsupported")
-        self.assertEqual(caps["schema"], 2)
+        self.assertEqual(caps["schema"],
+                         modelctl_capabilities.CAPABILITY_SCHEMA_VERSION)
         self.assertFalse(caps["features"]["moe_weight_transfer_cache"])
 
 
 class TestProbeRaw(unittest.TestCase):
-    def test_returns_none_on_nonzero_exit(self):
+    def test_silent_nonzero_exit_is_error_not_unsupported(self):
+        # No rejection message on stderr: indistinguishable from a crash,
+        # so it must classify "error" (transient, never persisted) -- a
+        # cached "unsupported" from one bad run silently stripped every
+        # fork feature until the binary was rebuilt.
         with TemporaryDirectory() as d:
             script = Path(d) / "fake-server"
             script.write_text("#!/bin/sh\nexit 1\n")
             script.chmod(0o755)
-            self.assertIsNone(modelctl_capabilities._probe_raw(str(script)))
+            verdict, raw = modelctl_capabilities._probe_raw(str(script))
+        self.assertEqual(verdict, "error")
+        self.assertIsNone(raw)
 
-    def test_returns_none_on_invalid_json(self):
+    def test_flag_rejection_is_unsupported(self):
+        with TemporaryDirectory() as d:
+            script = Path(d) / "fake-server"
+            script.write_text(
+                "#!/bin/sh\necho \"error: invalid argument: $1\" >&2\nexit 1\n")
+            script.chmod(0o755)
+            verdict, raw = modelctl_capabilities._probe_raw(str(script))
+        self.assertEqual(verdict, "rejected")
+
+    def test_garbage_output_is_error(self):
         with TemporaryDirectory() as d:
             script = Path(d) / "fake-server"
             script.write_text("#!/bin/sh\necho 'not json'\n")
             script.chmod(0o755)
-            self.assertIsNone(modelctl_capabilities._probe_raw(str(script)))
+            verdict, raw = modelctl_capabilities._probe_raw(str(script))
+        self.assertEqual(verdict, "error")
+
+    def test_non_object_json_is_error(self):
+        # Valid JSON that is not an object used to AttributeError out of
+        # every launch/preview path instead of failing closed.
+        with TemporaryDirectory() as d:
+            script = Path(d) / "fake-server"
+            script.write_text("#!/bin/sh\necho '[]'\n")
+            script.chmod(0o755)
+            verdict, raw = modelctl_capabilities._probe_raw(str(script))
+        self.assertEqual(verdict, "error")
 
     def test_parses_valid_json(self):
         caps_json = json.dumps({
@@ -69,9 +96,9 @@ class TestProbeRaw(unittest.TestCase):
             script = Path(d) / "fake-server"
             script.write_text(f"#!/bin/sh\necho '{caps_json}'\n")
             script.chmod(0o755)
-            result = modelctl_capabilities._probe_raw(str(script))
-            self.assertIsNotNone(result)
-            self.assertTrue(result["features"]["moe_weight_transfer_cache"])
+            verdict, raw = modelctl_capabilities._probe_raw(str(script))
+            self.assertEqual(verdict, "ok")
+            self.assertTrue(raw["features"]["moe_weight_transfer_cache"])
 
     def test_retries_with_env_script_after_bare_failure(self):
         # SYCL binaries crash without their oneAPI env even for the probe;
@@ -90,9 +117,9 @@ class TestProbeRaw(unittest.TestCase):
                                    return_value=["/fake/env.sh"]), \
                  mock.patch.object(modelctl, "source_env_script",
                                    return_value={"PROBE_TEST_MARKER": "1"}):
-                result = modelctl_capabilities._probe_raw(str(script))
-            self.assertIsNotNone(result)
-            self.assertTrue(result["features"]["moe_weight_transfer_cache"])
+                verdict, raw = modelctl_capabilities._probe_raw(str(script))
+            self.assertEqual(verdict, "ok")
+            self.assertTrue(raw["features"]["moe_weight_transfer_cache"])
 
     def test_env_fallback_not_used_when_bare_probe_works(self):
         caps_json = json.dumps({"schema": 2, "features": {}})
@@ -104,8 +131,8 @@ class TestProbeRaw(unittest.TestCase):
             with mock.patch.object(
                     modelctl, "find_env_script_candidates",
                     side_effect=AssertionError("should not be called")):
-                result = modelctl_capabilities._probe_raw(str(script))
-            self.assertIsNotNone(result)
+                verdict, _ = modelctl_capabilities._probe_raw(str(script))
+            self.assertEqual(verdict, "ok")
 
 
 class TestProbeBackend(unittest.TestCase):
@@ -122,7 +149,8 @@ class TestProbeBackend(unittest.TestCase):
     def test_unsupported_binary(self):
         with TemporaryDirectory() as d:
             script = Path(d) / "fake-server"
-            script.write_text("#!/bin/sh\nexit 1\n")
+            script.write_text(
+                "#!/bin/sh\necho \"error: invalid argument: $1\" >&2\nexit 1\n")
             script.chmod(0o755)
             caps = modelctl_capabilities.probe_backend(str(script))
             self.assertEqual(caps["_probe_status"], "unsupported")
@@ -584,7 +612,8 @@ class TestNormalizeCapabilities(unittest.TestCase):
     def test_schema0_unsupported(self):
         raw = {"schema": 0, "_probe_status": "unsupported", "features": {}}
         norm = modelctl_capabilities.normalize_capabilities(raw)
-        self.assertEqual(norm["schema"], 2)
+        self.assertEqual(norm["schema"],
+                         modelctl_capabilities.CAPABILITY_SCHEMA_VERSION)
         self.assertFalse(norm["features"]["moe_weight_transfer_cache"])
         self.assertFalse(norm["features"]["moe_hybrid_cpu_miss"])
         self.assertEqual(norm["_probe_status"], "unsupported")
@@ -610,7 +639,8 @@ class TestNormalizeCapabilities(unittest.TestCase):
             },
         }
         norm = modelctl_capabilities.normalize_capabilities(raw)
-        self.assertEqual(norm["schema"], 2)
+        self.assertEqual(norm["schema"],
+                         modelctl_capabilities.CAPABILITY_SCHEMA_VERSION)
         self.assertTrue(norm["features"]["moe_weight_transfer_cache"])
         # hybrid is allowed through from schema 1 when both flags are true
         self.assertTrue(norm["features"]["moe_hybrid_cpu_miss"])
@@ -690,7 +720,8 @@ class TestNormalizeCapabilities(unittest.TestCase):
             },
         }
         norm = modelctl_capabilities.normalize_capabilities(raw)
-        self.assertEqual(norm["schema"], 2)
+        self.assertEqual(norm["schema"],
+                         modelctl_capabilities.CAPABILITY_SCHEMA_VERSION)
         self.assertTrue(norm["features"]["moe_weight_transfer_cache"])
         self.assertEqual(norm["constraints"]["moe_cache_backend"], "SYCL")
         self.assertEqual(norm["constraints"]["moe_cache_min_batch"], 32)

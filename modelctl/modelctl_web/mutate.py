@@ -9,6 +9,22 @@ import time
 import modelctl
 
 
+def _caps_for(profile):
+    """Backend capabilities for a profile's binary, or None.
+
+    The tier planner needs them to know whether this backend honours a
+    per-device cache budget map (schema 3+) or collapses it to one
+    uniform figure -- reserving the wrong one is how the runtime cache
+    collides with statically placed experts.
+    """
+    try:
+        import modelctl_capabilities
+        binary = profile.get("binary") or modelctl.LLAMA_SERVER_BIN
+        return modelctl_capabilities.probe_backend(binary)
+    except Exception:
+        return None
+
+
 def submit_edit(runner, name, updates):
     """Apply config/profile field updates, regenerate, sync."""
     from modelctl_services import profile_service
@@ -33,7 +49,8 @@ def submit_tier_apply(runner, name):
         d = modelctl.load_defaults()
         primary = modelctl.resolve_primary_gpu(inventory, d)
         plan = modelctl_tiers.plan_tiers(profile, inventory, d["vram_limit_pct"], primary,
-                                          cache_request=profile.get("moe_cache"))
+                                          cache_request=profile.get("moe_cache"),
+                                          capabilities=_caps_for(profile))
         if plan is None:
             raise RuntimeError(f"couldn't analyze model layout for '{name}'")
         modelctl_tiers.apply_plan_cache_budgets(profile, plan, log=ctx.log)

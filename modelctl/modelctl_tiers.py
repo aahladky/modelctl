@@ -268,7 +268,7 @@ def _gib(n):
 
 
 def plan_tiers(profile, inventory, limit_pct, primary, ram_available=None,
-               layout=None, cache_request=None):
+               layout=None, cache_request=None, capabilities=None):
     """Compute a tiered placement for one profile.
 
     profile     -- modelctl profile dict (config carries ctx/cache types/extra)
@@ -351,29 +351,53 @@ def plan_tiers(profile, inventory, limit_pct, primary, ram_available=None,
     _, other_flags = split_extra_flags(cfg.get("extra", ""))
     other = " ".join(other_flags)
 
-    # Extract the dynamic cache budget from cache_request.  The llama.cpp
-    # fork's --moe-cache-bytes is a single UNIFORM per-GPU budget: one global
-    # (g_moe_cache_budget_bytes) is applied to every device's lazily-created
-    # cache instance -- there is no per-device flag.  So per-device requests
-    # collapse to their max, and that uniform budget must be reserved on
-    # EVERY participating device BEFORE static expert layers are assigned,
-    # or the runtime cache can collide with statically placed experts (OOM).
-    # If the uniform budget doesn't fit on even one device, the cache is
-    # disabled for the whole plan -- a half-reserved cache would diverge
-    # from what the server actually allocates.
+    # Reserve the dynamic cache BEFORE assigning static expert layers, or
+    # the runtime cache collides with statically placed experts (OOM).
+    #
+    # Two runtime contracts, and the plan must match whichever one this
+    # backend implements:
+    #   schema 3+ (per_device_budgets): --moe-cache-bytes takes a device
+    #     map. Each named device is reserved its own budget; unnamed
+    #     devices get no cache, and none is reserved for them.
+    #   older: ONE global budget is applied to every device that creates
+    #     a cache. Per-device requests collapse to their max, reserved on
+    #     every participating device. If that uniform figure doesn't fit
+    #     on even one of them, the cache is disabled for the whole plan --
+    #     a half-reserved cache would diverge from what the server
+    #     actually allocates.
     cache_budgets = {}
     if cache_request and cache_request.get("mode", "off") != "off":
-        requested = [b for b in cache_request.get("gpu", {})
-                     .get("budgets_bytes", {}).values() if b > 0]
-        if requested:
-            uniform = max(requested)
+        requested = {d: b for d, b in cache_request.get("gpu", {})
+                     .get("budgets_bytes", {}).items() if b > 0}
+        per_device = bool((capabilities or {}).get("features", {})
+                          .get("moe_cache_per_device_budgets"))
+        if requested and per_device:
+            unknown = sorted(d for d in requested if d not in usable)
+            if unknown:
+                warnings.append(
+                    f"cache budget names {', '.join(unknown)}, which this "
+                    "plan does not use -- those budgets are ignored")
+            too_small = sorted(d for d, b in requested.items()
+                               if d in usable and b > usable[d])
+            if too_small:
+                warnings.append(
+                    f"cache budget exceeds usable VRAM on "
+                    f"{', '.join(too_small)} -- the cache is disabled for "
+                    "this plan")
+            else:
+                cache_budgets = {d: b for d, b in requested.items()
+                                 if d in usable}
+                for d, b in cache_budgets.items():
+                    usable[d] -= b
+        elif requested:
+            uniform = max(requested.values())
             too_small = sorted(d for d, u in usable.items() if uniform > u)
             if too_small:
                 warnings.append(
                     f"cache budget {uniform / (1<<30):.1f} GiB exceeds usable "
-                    f"VRAM on {', '.join(too_small)} -- the fork applies one "
-                    "per-GPU budget to every device, so the cache is disabled "
-                    "for this plan")
+                    f"VRAM on {', '.join(too_small)} -- this backend applies "
+                    "one per-GPU budget to every device, so the cache is "
+                    "disabled for this plan")
             else:
                 cache_budgets = {d: uniform for d in usable}
                 for d in usable:

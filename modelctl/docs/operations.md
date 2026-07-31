@@ -96,7 +96,7 @@ Rollback: check out the validated pair from the manifest, rebuild, and
 re-run `ci/checks.sh`. Capability probes are cached per binary, so a
 rolled-back binary is re-probed automatically; if in doubt, run
 `llama-server --modelctl-capabilities` and compare against
-[runtime/backend-capability-schema-v2.md](runtime/backend-capability-schema-v2.md).
+[runtime/backend-capability-schema.md](runtime/backend-capability-schema.md).
 
 ## Network exposure
 
