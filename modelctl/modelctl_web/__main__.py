@@ -4,13 +4,13 @@ import os
 
 import uvicorn
 
-from .app import app
+from .app import create_app
 
 
 def main():
     bind = os.environ.get("MODELCTL_WEB_BIND", "0.0.0.0:9293")
     host, _, port = bind.rpartition(":")
-    uvicorn.run(app, host=host or "0.0.0.0", port=int(port or 9293),
+    uvicorn.run(create_app(), host=host or "0.0.0.0", port=int(port or 9293),
                 log_level="info")
 
 

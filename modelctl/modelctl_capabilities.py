@@ -40,9 +40,7 @@ import os
 import subprocess
 from pathlib import Path
 
-STATE_DIR = Path(os.environ.get(
-    "MODELCTL_STATE_DIR",
-    Path.home() / ".local" / "share" / "modelctl"))
+from modelctl_paths import STATE_DIR
 CAPABILITIES_DIR = STATE_DIR / "backend_capabilities"
 
 # The probe is fast but binary hashing is not free; cache for the session.

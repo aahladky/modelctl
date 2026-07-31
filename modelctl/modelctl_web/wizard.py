@@ -15,8 +15,9 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
-STATE_DIR = Path(os.environ.get(
-    "MODELCTL_HOME", Path.home() / ".local" / "share" / "modelctl"))
+import modelctl_fsutil
+from modelctl_paths import STATE_DIR
+
 WIZARD_DIR = STATE_DIR / "wizards"
 
 # Wizard steps in order.
@@ -217,7 +218,8 @@ class WizardStore:
     def save(self, state: WizardState):
         """Persist wizard state to disk."""
         state.updated_at = time.time()
-        self._path(state.wizard_id).write_text(
+        modelctl_fsutil.atomic_write_text(
+            self._path(state.wizard_id),
             json.dumps(state.to_dict(), indent=2))
 
     def load(self, wizard_id: str) -> WizardState | None:
