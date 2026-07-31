@@ -3,6 +3,9 @@
 Combined project: the **modelctl** control plane plus the **llama.cpp
 fork** it drives, pinned as a submodule.
 
+This Gitea repository is the source of truth. The GitHub copies
+(`aahladky/modelctl`, `aahladky/llama.cpp`) are review mirrors only.
+
 | Piece | Path | Repo |
 |---|---|---|
 | modelctl (CLI + web console) | [modelctl/](modelctl/) | this repo |
@@ -39,11 +42,12 @@ bootstrap, automation, diagnostics, and recovery.
   `moe_cache_*` metrics, and a `/cache/reset` endpoint; modelctl's web
   console (`/runtime`) scrapes the metrics and proxies the reset.
 - Cache-aware tier planning (`modelctl place --tiers`) reserves the
-  cache budget on every participating GPU before placing static
-  experts, so the two never collide.
+  uniform runtime cache budget on every GPU named in the profile's
+  cache budget map before placing static experts, so the two never
+  collide on those devices.
 
-Design docs live in [modelctl/docs/](modelctl/docs/) and
-[modelctl/docs/modelctl_sparse_moe_expert_cache_coding_plan.md](modelctl/docs/modelctl_sparse_moe_expert_cache_coding_plan.md).
+Current architecture and runtime docs live in
+[modelctl/docs/](modelctl/docs/).
 
 See [modelctl/README.md](modelctl/README.md) for modelctl itself
 (install, profiles, placement, web console).

@@ -6,7 +6,7 @@
   "references": {
     "llama.cpp": {
       "path": "../llama.cpp",
-      "description": "SYCL MoE expert-cache llama.cpp fork (git submodule, branch feature/sycl-moe-expert-cache). Runtime data plane for the roadmap. Build: source llama-sycl-env.sh, then cmake --build build-sycl --target llama-server."
+      "description": "SYCL MoE expert-cache llama.cpp fork (git submodule, branch feature/sycl-moe-expert-cache). Runtime data plane. Build: source llama-sycl-env.sh, then cmake --build build-sycl --target llama-server."
     }
   },
 

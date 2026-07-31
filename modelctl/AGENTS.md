@@ -2,14 +2,35 @@
 
 Web console (FastAPI + HTMX) backed by a Python CLI, for managing local
 GGUF models on multi-GPU Intel SYCL workstations. **The browser is the
-product entry point** (roadmap Task C1): `modelctl web install` starts it
-and prints URL + token; `/setup` reports first-run readiness. The CLI is
-for bootstrap, automation, diagnostics, and recovery — it is fully
-supported, but new user-facing capability belongs in the console first.
+product entry point**: `modelctl web install` starts it and prints
+URL + token; `/setup` reports first-run readiness. The CLI is for
+bootstrap, automation, diagnostics, and recovery — fully supported, but
+new user-facing capability belongs in the console first.
 
-## Active Roadmap
+This is a **local-first** project: one operator, one machine, real
+hardware. Correctness on the actual GPUs/RAM/storage, accurate resource
+accounting, reproducible runtime builds, and safe recovery outrank
+public packaging, portability, stable external APIs, or multi-user
+concerns.
 
-The authoritative work order is `docs/modelctl-re-review-2026-07-31-local-first.md` (the local-first re-review; it is authoritative over the earlier roadmaps and over anything else in the project — work its P0→P3 priorities in order). `docs/modelctl-task-by-task-roadmap-2026-07-30.md` remains as background for task numbering and phase context. Key invariants: experimental features fail closed (§2.5), one canonical launch path (§2.2), cold/warm measurements never conflated, control plane stays in Python, tensor execution stays in the `../llama.cpp` fork.
+## How to work
+
+Inspect the current code, implement the requested change through the
+real production path, add or update tests, run them, and report the
+result in plain English (file, function, what was wrong, what changed,
+which test proves it). Do not create a roadmap or an unrelated
+refactor; the user's prompt determines the task. Finish vertical
+slices — a helper alone is not done until the planner/preview/worker/
+launch/web path that uses it works and is tested. When hardware or a
+live service is unavailable, finish everything deterministic, then
+state the exact remaining validation command and its expected result.
+Ask only before destructive changes or when a missing product decision
+makes implementation genuinely ambiguous.
+
+Invariants: experimental features fail closed; one canonical launch
+path (`modelctl_launch.py` types) for every preview/artifact/launch;
+cold/warm measurements never conflated; control plane stays in Python,
+tensor execution stays in the `../llama.cpp` fork.
 
 ## Setup
 
@@ -38,7 +59,10 @@ Or run a single test file:
 .venv/bin/python -m unittest test_modelctl_vram -v
 ```
 
-Tests are pure unittest (no fixtures, no services). Web tests use FastAPI's `TestClient` with mocked modelctl state.
+The suite is stdlib `unittest`; data fixtures live in `tests/fixtures/`.
+Web tests use FastAPI's `TestClient` with mocked modelctl state.
+Hardware/reproduction scripts outside the unit suite are documented
+where they live (`docs/runtime/`).
 
 ## Architecture
 
@@ -53,18 +77,18 @@ Tests are pure unittest (no fixtures, no services). Web tests use FastAPI's `Tes
 | `modelctl_hardware.py` | Hardware settings, snapshots, and fingerprinting |
 | `modelctl_launch.py` | Canonical resolved-backend and launch-command types |
 | `modelctl_matrix.py` | Managed llama-swap routing matrix |
-| `modelctl_plans.py` | Launch-plan generation |
+| `modelctl_plans.py` | Launch-plan generation and resource claims |
 | `modelctl_profiles.py` | Profile schema, migration, and validation |
 | `modelctl_runtime.py` | Runtime database: reservations and runtime events |
-| `modelctl_services/` | Application services (cache, hardware, plan, profile, runtime) shared by CLI and web |
-| `modelctl_setup.py` | First-run readiness checks behind the console's `/setup` page |
+| `modelctl_services/` | Application services shared by CLI and web |
+| `modelctl_setup.py` | First-run readiness checks behind `/setup` |
 | `modelctl_storage.py` | Storage topology probing |
 | `modelctl_tiers.py` | Tier planner for `place --tiers` |
 | `modelctl_transactions.py` | Atomic multi-file mutation transactions |
-| `modelctl_tui.py` | Textual wizard (`pull --tui`). Calls into `modelctl.py`, no logic duplication |
+| `modelctl_tui.py` | Textual wizard (`pull --tui`); calls into `modelctl.py` |
 | `modelctl_tune.py` | Plan testing and autotuning |
 | `modelctl_vram.py` | Pure-stdlib VRAM math. No `modelctl` import — standalone calculator |
-| `modelctl_web/` | FastAPI + HTMX console (`modelctl web`). Reads concurrent, writes via single JobRunner |
+| `modelctl_web/` | FastAPI + HTMX console. Reads concurrent; profile/config writes serialize on the `mutation` job lane |
 | `modelctl_worker.py` | Managed worker process |
 
 ## Key Conventions

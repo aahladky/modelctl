@@ -5,7 +5,6 @@ This file adds interaction only. Every screen calls an existing pure
 function from modelctl.py (search_models, get_repo_contents, preflight,
 download_if_needed, save_profile, generate_artifacts, sync_all_backends,
 sync_hermes_custom_providers) -- no business logic is duplicated here.
-See docs/superpowers/specs/2026-07-01-modelctl-tui-pull-wizard-design.md.
 """
 import contextlib
 import io

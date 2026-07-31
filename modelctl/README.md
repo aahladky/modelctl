@@ -207,16 +207,6 @@ precedence over any local heuristics.
 `modelctl defaults` reads/writes these as a persisted JSON file so you
 don't need to export them every session.
 
-## Further reading
-
-Design rationale and implementation history for individual features
-live in `docs/superpowers/specs/` (design docs) and
-`docs/superpowers/plans/` (task-by-task implementation plans):
-
-- VRAM-aware placement + router observability
-- Split K/V cache quantization + standalone calculator
-- TUI pull wizard
-
 ## Web console (`modelctl web` / modelctl-web.service)
 
 A FastAPI + HTMX console on `:9293`. The browser is the primary
