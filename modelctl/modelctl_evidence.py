@@ -16,7 +16,10 @@ Public API:
     CATEGORIES
     build_plan_evidence(profile, plans, observations, failures, backend) -> list
     group_evidence(evidence) -> list[(category, label, description, items)]
+    DecisionTrace dataclass
+    build_decision_trace(evidence, ranked, policy, observations, explain) -> DecisionTrace
 """
+import time
 from dataclasses import dataclass, field
 
 import modelctl_plans
@@ -222,6 +225,144 @@ def build_plan_evidence(profile, plans, observations=None, failures=None,
     out.sort(key=lambda e: (CATEGORY_ORDER.get(e.category, 99),
                             e.fallback_ordinal if e.fallback_ordinal is not None else 999))
     return out
+
+
+@dataclass
+class DecisionTrace:
+    """Why the automatic choice is what it is (roadmap Task H3).
+
+    Every field is allowed to be empty, and an empty one is simply not
+    rendered. A trace that invents a reason it does not have is worse than
+    a short one -- the point is that the user can check the machine's
+    reasoning, which requires the reasoning to be the real one.
+    """
+    selected: str = ""
+    selected_plan_id: str = ""
+    reason: str = ""
+    constraints: tuple = ()
+    rejected: tuple = ()          # (label, why) pairs
+    fallback: str = ""
+    evidence: tuple = ()
+
+    @property
+    def present(self) -> bool:
+        return bool(self.selected)
+
+
+def _describe_constraints(policy) -> tuple:
+    """The policy limits actually in force, in the user's units."""
+    out = []
+    objective = getattr(policy, "objective", "")
+    if objective:
+        out.append(f"objective: {objective.replace('_', ' ')}")
+    if getattr(policy, "minimum_context", None):
+        out.append(f"context >= {policy.minimum_context:,}")
+    if getattr(policy, "maximum_cpu_bytes", None):
+        out.append(f"RAM <= {policy.maximum_cpu_bytes / float(1 << 30):.0f} GiB")
+    tier = getattr(policy, "maximum_storage_tier", 3)
+    if tier < 3:
+        out.append("storage tier: " + ("GPU only" if tier == 1 else "GPU + RAM"))
+    if not getattr(policy, "allow_untested", True):
+        out.append("untested plans not selectable")
+    margin = getattr(policy, "experimental_margin", None)
+    if margin:
+        out.append(f"experimental plans must beat the safe baseline by "
+                   f"{margin * 100:.0f}%")
+    return tuple(out)
+
+
+def _selection_reason(winner, observations, policy) -> str:
+    """Why the winner won, stated against the safe baseline it displaced.
+
+    Falls back to naming the absence of evidence rather than inventing a
+    justification: "nothing has been measured" is the honest reason a
+    baseline is chosen, and it tells the user what to do about it.
+    """
+    obs = (observations or {}).get(winner.plan.id) or {}
+    metric = {
+        "fastest_prompt": ("prompt_tps", "prompt throughput", True),
+        "interactive_latency": ("ttft_seconds", "time to first token", False),
+        "fastest_load": ("load_seconds", "load time", False),
+        "lowest_storage": ("read_bytes", "storage read", False),
+    }.get(getattr(policy, "objective", ""),
+          ("generation_tps", "generation throughput", True))
+    key, label, higher_better = metric
+
+    if not obs.get(key):
+        if winner.is_baseline:
+            return ("nothing has been measured for this profile yet, so the "
+                    "profile's own configuration is used unchanged")
+        return f"no measurement of {label} yet; ranked on estimated claims"
+
+    state = f"{winner.cache_state} " if winner.cache_state else ""
+    return f"best measured {state}{label} of the selectable plans"
+
+
+def build_decision_trace(evidence, ranked=None, policy=None, observations=None,
+                         explain=None, backend=None, hardware_fingerprint=""):
+    """Assemble the trace for the plan the policy would launch.
+
+    `explain` is rank_plans()' demotion dict, so a rejection reads with the
+    guardrail's own words rather than a rephrasing that could drift from
+    what the ranker actually did.
+    """
+    ranked = list(ranked or [])
+    by_id = {e.plan.id: e for e in evidence}
+    order = [pid for pid, in ((p.id,) for p, _s in ranked)] if ranked else [
+        e.plan.id for e in evidence if e.fallback_ordinal == 0]
+    chosen = next((by_id[pid] for pid in order if pid in by_id), None)
+    if chosen is None:
+        return DecisionTrace()
+
+    trace = DecisionTrace(
+        selected=chosen.plan.label,
+        selected_plan_id=chosen.plan.id,
+        reason=_selection_reason(chosen, observations, policy),
+        constraints=_describe_constraints(policy) if policy else (),
+    )
+    # Read the pin off the policy that actually did the ranking, not off the
+    # evidence: PlanEvidence.pinned reflects the saved profile, and a caller
+    # can rank under a policy that differs from it.
+    if chosen.pinned or getattr(policy, "pinned_plan_id", None) == chosen.plan.id:
+        trace.reason = "pinned by the profile, overriding automatic ranking"
+
+    # Rejections: the guardrail's demotions first (those are choices the
+    # ranker made), then plans that could not run at all.
+    rejected = []
+    for pid, why in (explain or {}).items():
+        e = by_id.get(pid)
+        if e is not None and pid != chosen.plan.id:
+            rejected.append((e.plan.label, why))
+    for e in evidence:
+        if e.plan.id == chosen.plan.id or e.plan.id in (explain or {}):
+            continue
+        if e.blocked or e.suppressed:
+            why = "; ".join(e.blocked_reasons) or e.reason or "cannot be launched"
+            rejected.append((e.plan.label, why))
+    trace.rejected = tuple(rejected)
+
+    nxt = next((by_id[pid] for pid in order[1:] if pid in by_id), None)
+    trace.fallback = nxt.plan.label if nxt is not None else ""
+
+    ev = []
+    obs = (observations or {}).get(chosen.plan.id) or {}
+    if obs:
+        when = obs.get("measured_at")
+        ev.append("measured " + (
+            time.strftime("%Y-%m-%d %H:%M", time.localtime(when)) if when
+            else "at an unrecorded time")
+            + (f", {obs['cache_state']} cache" if obs.get("cache_state") else ""))
+        if obs.get("stale"):
+            ev.append("measurement is stale: " +
+                      "; ".join(obs.get("stale_reasons") or ["identity changed"]))
+    else:
+        ev.append("no measurement; claims are computed from the GGUF layout")
+    if chosen.binary_fingerprint:
+        ev.append(f"binary {chosen.binary_fingerprint[:12]}")
+    if hardware_fingerprint:
+        ev.append(f"hardware {hardware_fingerprint[:12]}")
+    trace.evidence = tuple(ev)
+    return trace
 
 
 def group_evidence(evidence):

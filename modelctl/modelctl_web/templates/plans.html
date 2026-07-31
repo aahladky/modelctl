@@ -29,6 +29,32 @@
   {% endif %}
 </div>
 
+{% if trace and trace.present %}
+<div class="card">
+  <h2>why this plan</h2>
+  <p><strong>selected:</strong> {{ trace.selected }}
+    {% if trace.selected_plan_id %}<code>{{ trace.selected_plan_id }}</code>{% endif %}</p>
+  {% if trace.reason %}<p><strong>reason:</strong> {{ trace.reason }}</p>{% endif %}
+  {% if trace.constraints %}
+  <p><strong>constraints:</strong> {{ trace.constraints | join(' · ') }}</p>
+  {% endif %}
+  {% if trace.fallback %}
+  <p><strong>fallback:</strong> {{ trace.fallback }}</p>
+  {% endif %}
+  {% if trace.rejected %}
+  <p><strong>rejected:</strong></p>
+  <ul>
+    {% for label, why in trace.rejected %}
+    <li>{{ label }} — <span class="muted">{{ why }}</span></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if trace.evidence %}
+  <p class="muted"><strong>evidence:</strong> {{ trace.evidence | join(' · ') }}</p>
+  {% endif %}
+</div>
+{% endif %}
+
 <details class="card">
   <summary><strong>runtime policy</strong> (edit)</summary>
   <form method="post" action="/profiles/{{ profile_name }}/runtime-policy">

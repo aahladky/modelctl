@@ -1176,10 +1176,16 @@ def create_app(token=None, store=None, runner=None):
                 snapshot=snap, backend=backend,
                 profile_name=p.get("backend", "llama-cpp")))
 
+        # `explain` collects the ranker's own words for every plan the
+        # experimental guardrail demoted, so the trace below reports what
+        # actually happened rather than a rephrasing that could drift.
+        explain = {}
+        policy = None
+        ranked = []
         try:
+            policy = modelctl_plans.policy_for_profile(p)
             ranked = modelctl_plans.rank_plans(
-                plans, modelctl_plans.policy_for_profile(p),
-                observations, failures)
+                plans, policy, observations, failures, explain=explain)
             ranked_ids = [pl.id for pl, _score in ranked]
         except Exception:
             ranked_ids = []
@@ -1187,11 +1193,15 @@ def create_app(token=None, store=None, runner=None):
         evidence = modelctl_evidence.build_plan_evidence(
             p, plans, observations, failures, backend=backend,
             ranked_ids=ranked_ids)
+        trace = modelctl_evidence.build_decision_trace(
+            evidence, ranked=ranked, policy=policy, observations=observations,
+            explain=explain, backend=backend,
+            hardware_fingerprint=snap.fingerprint)
         return templates.TemplateResponse(request=request, name="plans.html", context=ctx(
             request, p=p, plans=plans, profile_name=name,
             observations=observations,
             groups=modelctl_evidence.group_evidence(evidence),
-            evidence=evidence, backend=backend))
+            evidence=evidence, backend=backend, trace=trace))
 
     @app.get("/api/profiles/{name}/plans")
     def api_plans(name: str):

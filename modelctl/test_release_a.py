@@ -491,3 +491,101 @@ class TestExperimentalGuardrail(unittest.TestCase):
         obs = {"a": {"ttft_seconds": 5.0}}
         ranked = self.mp.rank_plans([a, b], self._policy("interactive_latency"), obs)
         self.assertEqual(ranked[0][0].id, "a")
+
+
+class TestDecisionTrace(unittest.TestCase):
+    """Task H3: every automatic choice can be checked by the user, which
+    means the trace has to state the real reason, not a plausible one."""
+
+    def _plan(self, pid, cache_bytes=0, source="test", label=None):
+        from modelctl_plans import LaunchPlan, ResourceClaim
+        return LaunchPlan(
+            id=pid, profile_name="m", backend="llama-cpp", label=label or pid,
+            argv=(), env={},
+            claim=ResourceClaim({"S0": 8 << 30}, 0, "none", 32768,
+                                cache_bytes=cache_bytes),
+            estimated={}, source=source, warnings=(), decision_data={})
+
+    def _policy(self, **kw):
+        from modelctl_plans import RuntimePolicy
+        base = dict(objective="fastest_generation", pinned_plan_id=None,
+                    allow_fallback=True, allow_untested=True,
+                    minimum_context=8192, maximum_cpu_bytes=None,
+                    maximum_storage_tier=3)
+        base.update(kw)
+        return RuntimePolicy(**base)
+
+    def _build(self, plans, obs, policy):
+        import modelctl_evidence, modelctl_plans
+        explain = {}
+        ranked = modelctl_plans.rank_plans(plans, policy, obs, explain=explain)
+        ev = modelctl_evidence.build_plan_evidence(
+            {"name": "m"}, plans, obs, {}, ranked_ids=[p.id for p, _ in ranked])
+        return modelctl_evidence.build_decision_trace(
+            ev, ranked=ranked, policy=policy, observations=obs, explain=explain,
+            hardware_fingerprint="hw123456789abc")
+
+    def test_trace_names_the_selected_plan_and_its_fallback(self):
+        a = self._plan("a", label="fast")
+        b = self._plan("b", label="slow")
+        t = self._build([a, b], {"a": {"generation_tps": 20.0},
+                                 "b": {"generation_tps": 5.0}}, self._policy())
+        self.assertEqual(t.selected, "fast")
+        self.assertEqual(t.fallback, "slow")
+
+    def test_rejection_quotes_the_ranker_not_a_paraphrase(self):
+        # The reason shown must be the guardrail's own words, or the trace
+        # can drift from what the ranker actually did.
+        safe = self._plan("safe", source="current-profile", label="baseline")
+        exp = self._plan("exp", cache_bytes=2 << 30, label="cache plan")
+        t = self._build([safe, exp], {"safe": {"generation_tps": 10.0},
+                                      "exp": {"generation_tps": 10.2}},
+                        self._policy(experimental_margin=0.10))
+        self.assertEqual(t.selected, "baseline")
+        rejected = dict(t.rejected)
+        self.assertIn("cache plan", rejected)
+        self.assertIn("margin", rejected["cache plan"])
+
+    def test_stale_reasons_reach_the_trace(self):
+        safe = self._plan("safe", source="current-profile", label="baseline")
+        exp = self._plan("exp", cache_bytes=2 << 30, label="cache plan")
+        obs = {"safe": {"generation_tps": 10.0},
+               "exp": {"generation_tps": 99.0, "stale": True,
+                       "stale_reasons": ["storage device changed since this was measured"]}}
+        t = self._build([safe, exp], obs, self._policy())
+        self.assertIn("storage device changed", dict(t.rejected)["cache plan"])
+
+    def test_unmeasured_baseline_says_so_rather_than_inventing_a_reason(self):
+        safe = self._plan("safe", source="current-profile", label="baseline")
+        t = self._build([safe], {}, self._policy())
+        self.assertIn("nothing has been measured", t.reason)
+
+    def test_constraints_are_reported_in_user_units(self):
+        t = self._build([self._plan("a")], {"a": {"generation_tps": 1.0}},
+                        self._policy(maximum_cpu_bytes=64 << 30,
+                                     minimum_context=32768))
+        joined = " ".join(t.constraints)
+        self.assertIn("64 GiB", joined)
+        self.assertIn("32,768", joined)
+
+    def test_evidence_records_provenance_of_the_choice(self):
+        t = self._build([self._plan("a")],
+                        {"a": {"generation_tps": 1.0, "measured_at": 1700000000,
+                               "cache_state": "warm"}}, self._policy())
+        joined = " ".join(t.evidence)
+        self.assertIn("warm", joined)
+        self.assertIn("hw123456789", joined)
+
+    def test_pinned_choice_says_it_was_pinned(self):
+        a = self._plan("a", label="pinned one")
+        b = self._plan("b", label="faster")
+        t = self._build([a, b], {"a": {"generation_tps": 1.0},
+                                 "b": {"generation_tps": 50.0}},
+                        self._policy(pinned_plan_id="a"))
+        self.assertEqual(t.selected, "pinned one")
+        self.assertIn("pinned", t.reason)
+
+    def test_empty_when_there_is_nothing_to_choose(self):
+        import modelctl_evidence
+        t = modelctl_evidence.build_decision_trace([], ranked=[])
+        self.assertFalse(t.present)

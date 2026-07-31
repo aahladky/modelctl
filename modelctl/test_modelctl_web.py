@@ -1557,3 +1557,42 @@ class TestBaselinePlanCapabilities(WebTestBase):
                 profile, self._mock_hardware())
         base = next(p for p in plans if p.source == "current-profile")
         self.assertEqual(list(base.argv).count("--moe-cache-bytes"), 1)
+
+
+class TestPlansPageDecisionTrace(unittest.TestCase):
+    """Task H3: the trace has to survive template rendering, not just
+    dataclass construction -- a field the template never reads explains
+    nothing."""
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+        from modelctl_web.app import create_app
+        self.app = create_app(token="t", store=mock.MagicMock(),
+                              runner=mock.MagicMock())
+        self.client = TestClient(self.app)
+        self.auth = {"Authorization": "Bearer t"}
+
+    def test_plans_page_renders_the_decision_trace(self):
+        import modelctl_hardware
+        profile = {"name": "m1", "backend": "llama-cpp", "model_path": "",
+                   "config": {"device": "SYCL0", "split_mode": "",
+                              "tensor_split": "", "ctx": 32768,
+                              "cache_type_k": "q8_0", "cache_type_v": "q8_0",
+                              "fit": "on", "extra": ""}}
+        snap = modelctl_hardware.HardwareSnapshot(
+            captured_at=time.time(), fingerprint="hwfingerprint01",
+            gpus=(modelctl_hardware.GpuSnapshot(
+                "SYCL0", "B70", 32 << 30, 30 << 30, 0, True, "", 608),),
+            ram_total_bytes=64 << 30, ram_available_bytes=50 << 30,
+            ram_reserve_bytes=0, storage=(), backend_fingerprints={})
+        with mock.patch("modelctl_hardware.capture_hardware_snapshot",
+                        return_value=snap), \
+             mock.patch.object(modelctl, "load_profile", return_value=profile), \
+             mock.patch.object(modelctl, "build_server_args",
+                               return_value=["llama-server"]):
+            resp = self.client.get("/profiles/m1/plans", headers=self.auth)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("why this plan", resp.text)
+        # An unmeasured profile must say so rather than showing a blank
+        # reason or an invented one.
+        self.assertIn("nothing has been measured", resp.text)
