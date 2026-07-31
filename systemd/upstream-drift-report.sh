@@ -88,13 +88,33 @@ FLAGGED="$(echo "$COMMITS" | grep -iE \
 } > "$REPORT"
 
 cd "$TOP"
-git add "$REPORT"
+
+# This runs unattended from a weekly timer in the operator's live
+# checkout. Two rules keep it from shipping anything but the report:
+#   1. Refuse to run with a dirty index -- `git add $REPORT` followed by
+#      a bare `git commit` used to sweep whatever happened to be staged
+#      into a commit titled "Upstream drift report" and push it to
+#      master.
+#   2. Commit ONLY the report path, and gate the push on ci/checks.sh,
+#      which is supposed to run on every push and otherwise only ran
+#      when a human remembered.
 if ! git diff --cached --quiet; then
-  git commit -q -m "Upstream drift report $DATE ($DRIFT_COUNT commits behind)"
+  echo "Refusing to commit: the index has staged changes that are not" >&2
+  echo "the drift report. Commit or reset them, then re-run." >&2
+  exit 1
+fi
+
+if git diff --quiet -- "$REPORT" && git ls-files --error-unmatch "$REPORT" >/dev/null 2>&1; then
+  echo "No changes to commit (report identical to last run?)"
+else
+  if ! "$TOP/ci/checks.sh" --quick; then
+    echo "Refusing to push: ci/checks.sh --quick failed." >&2
+    exit 1
+  fi
+  git commit -q -m "Upstream drift report $DATE ($DRIFT_COUNT commits behind)" \
+    -- "$REPORT"
   git push -q origin master
   echo "Committed and pushed $REPORT"
-else
-  echo "No changes to commit (report identical to last run?)"
 fi
 
 echo "Drift: $DRIFT_COUNT commits behind. Flagged commits: $(echo "$FLAGGED" | grep -c . || true)"
