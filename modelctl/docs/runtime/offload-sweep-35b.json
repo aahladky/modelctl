@@ -1,0 +1,133 @@
+[
+  {
+    "cell": "offload-A-default",
+    "status": "passed",
+    "reason": "",
+    "elapsed_s": 34.6,
+    "generation_tps": 37.72,
+    "prompt_tps": 78.75,
+    "load_seconds": 12.01,
+    "ttft_seconds": 0.792,
+    "peak_vram_bytes": {
+      "SYCL0": 10595860480,
+      "SYCL1": 0
+    },
+    "peak_ram_bytes": 18138357760,
+    "storage_activity": "storage-backed",
+    "cache_state": "warm",
+    "command_fingerprint": "c14d6c65c5cfb32d",
+    "read_bytes": 17626587136,
+    "disk_read_bytes": 8841498624,
+    "major_faults": 1690,
+    "environment_fingerprint": "4f53cda18c2baa0c",
+    "cache_metrics": {
+      "SYCL0": {
+        "hits_total": "0",
+        "misses_total": "23060",
+        "evictions_total": "0",
+        "promotions_total": "0",
+        "slots": "3177",
+        "slots_used": "0",
+        "hit_ratio": "0",
+        "h2d_bytes_total": "0",
+        "served_projections_total": "0",
+        "host_weight_copy_fallbacks_total": "34590"
+      }
+    }
+  },
+  {
+    "cell": "offload-B-global-1",
+    "status": "passed",
+    "reason": "",
+    "elapsed_s": 38.3,
+    "generation_tps": 24.47,
+    "prompt_tps": 71.77,
+    "load_seconds": 6.0,
+    "ttft_seconds": 0.946,
+    "peak_vram_bytes": {
+      "SYCL0": 10600054784,
+      "SYCL1": 13631488
+    },
+    "peak_ram_bytes": 18223726592,
+    "storage_activity": "page-cache-served",
+    "cache_state": "warm",
+    "command_fingerprint": "ca91b53d48183b17",
+    "read_bytes": 20238336,
+    "disk_read_bytes": 100847616,
+    "major_faults": 192,
+    "environment_fingerprint": "3fe6106a294b6213",
+    "cache_metrics": {
+      "SYCL0": {
+        "hits_total": "256920",
+        "misses_total": "50860",
+        "evictions_total": "5789",
+        "promotions_total": "17932",
+        "slots": "3177",
+        "slots_used": "3177",
+        "hit_ratio": "0.834752",
+        "h2d_bytes_total": "8079441920",
+        "served_projections_total": "256920",
+        "host_weight_copy_fallbacks_total": "186818"
+      }
+    }
+  },
+  {
+    "cell": "offload-D-moe-1",
+    "status": "passed",
+    "reason": "",
+    "elapsed_s": 37.4,
+    "generation_tps": 25.7,
+    "prompt_tps": 70.88,
+    "load_seconds": 6.0,
+    "ttft_seconds": 0.765,
+    "peak_vram_bytes": {
+      "SYCL0": 10526654464,
+      "SYCL1": 9437184
+    },
+    "peak_ram_bytes": 18211356672,
+    "storage_activity": "bulk-read",
+    "cache_state": "warm",
+    "command_fingerprint": "e181343bee1e723e",
+    "read_bytes": 165482496,
+    "disk_read_bytes": 93548544,
+    "major_faults": 6,
+    "environment_fingerprint": "ab269873dc9f4d22",
+    "cache_metrics": {
+      "SYCL0": {
+        "hits_total": "257106",
+        "misses_total": "50658",
+        "evictions_total": "5761",
+        "promotions_total": "17876",
+        "slots": "3177",
+        "slots_used": "3177",
+        "hit_ratio": "0.8354",
+        "h2d_bytes_total": "8054210560",
+        "served_projections_total": "257106",
+        "host_weight_copy_fallbacks_total": "186664"
+      }
+    }
+  },
+  {
+    "cell": "offload-E-moe-1-no-cache",
+    "status": "passed",
+    "reason": "",
+    "elapsed_s": 44.4,
+    "generation_tps": 18.89,
+    "prompt_tps": 74.17,
+    "load_seconds": 6.0,
+    "ttft_seconds": 0.879,
+    "peak_vram_bytes": {
+      "SYCL0": 6342836224,
+      "SYCL1": 2097152
+    },
+    "peak_ram_bytes": 18216013824,
+    "storage_activity": "page-cache-served",
+    "cache_state": "warm",
+    "command_fingerprint": "c67ec1e48e86f101",
+    "read_bytes": 18231296,
+    "disk_read_bytes": 22429696,
+    "major_faults": 5,
+    "environment_fingerprint": "ab269873dc9f4d22",
+    "cache_metrics": null
+  }
+]

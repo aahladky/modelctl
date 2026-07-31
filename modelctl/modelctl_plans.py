@@ -423,8 +423,21 @@ def _make_claim(profile, config, hardware):
     mc = profile.get("moe_cache", {})
     if mc.get("mode", "off") != "off":
         budgets = mc.get("gpu", {}).get("budgets_bytes", {})
-        cache_map = {d: b for d, b in budgets.items() if b > 0}
-        cache_budget = max(cache_map.values(), default=0)
+        declared = {d: b for d, b in budgets.items() if b > 0}
+        # The runtime's --moe-cache-bytes is a single UNIFORM per-GPU
+        # budget: server.cpp stores one global and ggml-sycl's lazy init
+        # gives that same value to every device that creates a cache. So a
+        # profile asking for {SYCL0: 4 GiB, SYCL1: 2 GiB} actually gets
+        # 4 GiB on *both*. Reserving the declared 2 GiB on SYCL1 would
+        # under-reserve by 2 GiB against what the runtime allocates, and
+        # the cache would collide with statically placed experts.
+        #
+        # Reserve the uniform figure on every device the profile names, so
+        # the claim describes what will actually be allocated rather than
+        # what was asked for. modelctl.build_server_args() already collapses
+        # the flag to the same max; this is the planner's half of that.
+        cache_budget = max(declared.values(), default=0)
+        cache_map = {d: cache_budget for d in declared}
 
     # ---- RAM vs mmap (Task D1) -----------------------------------------
     # CPU-side weights are only *resident* when mmap is off. With mmap on

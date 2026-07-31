@@ -626,3 +626,68 @@ class TestMmapReservation(unittest.TestCase):
     def test_non_mmap_plan_prefers_an_explicit_resident_figure(self):
         c = self._claim("none", 20 << 30, 12 << 30)
         self.assertEqual(self._reserved_ram(c), 12 << 30)
+
+
+class TestUniformCacheBudgetReservation(unittest.TestCase):
+    """The runtime's --moe-cache-bytes is one uniform per-GPU budget, so
+    the planner must reserve what will be allocated, not what was asked
+    for. Under-reserving lets the cache collide with placed experts."""
+
+    def _claim(self, budgets):
+        import modelctl_plans, modelctl_hardware, modelctl_profiles
+        from unittest import mock
+        prof = modelctl_profiles.normalize_profile({
+            "name": "m", "backend": "llama-cpp", "model_path": "/x/m.gguf",
+            "moe_cache": {"mode": "manual",
+                          "gpu": {"budgets_bytes": budgets, "policy": "slru"},
+                          "decode": {"admit_to_gpu_cache": True,
+                                     "miss_execution": "gpu"}},
+            "config": {"device": "SYCL0,SYCL1", "ctx": 4096, "fit": "off",
+                       "extra": ""}})
+        gpus = [modelctl_hardware.GpuSnapshot("SYCL0", "A", 32 << 30, 30 << 30,
+                                              0, True, "", 600),
+                modelctl_hardware.GpuSnapshot("SYCL1", "B", 12 << 30, 11 << 30,
+                                              0, True, "", 400)]
+        snap = modelctl_hardware.HardwareSnapshot(
+            captured_at=0, fingerprint="f", gpus=tuple(gpus),
+            ram_total_bytes=64 << 30, ram_available_bytes=50 << 30,
+            ram_reserve_bytes=0, storage=(), backend_fingerprints={})
+        with mock.patch("modelctl.build_server_args", return_value=["llama-server"]), \
+             mock.patch("modelctl_vram.file_fingerprint", return_value="fp"):
+            return modelctl_plans.current_profile_plan(prof, snap).claim
+
+    def test_uneven_budgets_reserve_the_maximum_on_every_device(self):
+        c = self._claim({"SYCL0": 4 << 30, "SYCL1": 2 << 30})
+        self.assertEqual(c.vram_cache_bytes.get("SYCL0"), 4 << 30)
+        # The runtime would allocate 4 GiB here too, not the declared 2.
+        self.assertEqual(c.vram_cache_bytes.get("SYCL1"), 4 << 30)
+
+    def test_equal_budgets_are_unchanged(self):
+        c = self._claim({"SYCL0": 2 << 30, "SYCL1": 2 << 30})
+        self.assertEqual(c.vram_cache_bytes.get("SYCL0"), 2 << 30)
+        self.assertEqual(c.vram_cache_bytes.get("SYCL1"), 2 << 30)
+
+    def test_undeclared_devices_reserve_nothing(self):
+        # Only devices the profile names get a reservation; inventing one
+        # for every GPU would refuse plans that fit.
+        c = self._claim({"SYCL0": 4 << 30})
+        self.assertEqual(c.vram_cache_bytes.get("SYCL0"), 4 << 30)
+        self.assertEqual(c.vram_cache_bytes.get("SYCL1", 0), 0)
+
+    def test_reservation_matches_the_flag_the_command_carries(self):
+        # Planner and command builder must agree, or the claim describes a
+        # different allocation than the one that happens.
+        import modelctl, modelctl_profiles
+        budgets = {"SYCL0": 4 << 30, "SYCL1": 2 << 30}
+        c = self._claim(budgets)
+        prof = modelctl_profiles.normalize_profile({
+            "name": "m", "backend": "llama-cpp", "model_path": "/x/m.gguf",
+            "moe_cache": {"mode": "manual",
+                          "gpu": {"budgets_bytes": budgets, "policy": "slru"},
+                          "decode": {"admit_to_gpu_cache": True,
+                                     "miss_execution": "gpu"}},
+            "config": {"device": "SYCL0", "ctx": 4096, "fit": "off", "extra": ""}})
+        caps = {"schema": 2, "features": {"moe_weight_transfer_cache": True}}
+        args = modelctl.build_server_args(prof, capabilities=caps)
+        flag = args[args.index("--moe-cache-bytes") + 1] if "--moe-cache-bytes" in args else None
+        self.assertEqual(int(flag), max(c.vram_cache_bytes.values()))

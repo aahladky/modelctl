@@ -133,3 +133,46 @@ Placement is derived in that script with the cache reserved. Deriving for
 the model alone and adding the cache afterwards overcommits SYCL0 by ~1 GiB
 and loses the device mid-decode with `UR_RESULT_ERROR_DEVICE_LOST` — that
 is what happened on the first attempt.
+
+---
+
+## Addendum: the same sweep on a VRAM-resident quant — 2026-07-31
+
+Run to answer whether `GGML_OP_OFFLOAD_MOE_MIN_BATCH` should default to 1.
+**It should not.** Qwen3.5-35B-A3B UD-IQ4_XS, 16.3 GiB, experts 10+ forced
+host-resident, SYCL0, ctx 4096:
+
+| | decode | hit ratio | vs A |
+|---|---|---|---|
+| **A** default | **37.72 t/s** | **0** — cache inert | — |
+| **B** global min-batch 1 | 24.47 t/s | 83.5% | -35% |
+| **D** MoE-only min-batch 1 | 25.70 t/s | 83.5% | **-32%** |
+| **E** MoE-only, cache off | 18.89 t/s | — | -50% |
+
+**The sign flips on the quant.** D vs A is -32% here and +148% on the
+storage-bound Q4_K_M. Lowering the threshold pays only when experts are
+reached through storage; where the model sits in VRAM it costs a third of
+decode throughput. The change therefore stays inert by default and opt-in
+through the environment variable.
+
+Two things this run settles that the Q4_K_M sweep could not, because cache
+counters are now recorded per cell:
+
+- **Condition A's cache was provably inert**: `hits_total: 0`,
+  `hit_ratio: 0`, `slots_used: 0` against 23,060 misses. Previously that
+  could only be inferred from the throughput, which is exactly the
+  reasoning that produced two misleading results earlier in this project.
+- **D beats B by 5%** (25.70 vs 24.47) where the two were identical on
+  Q4_K_M. That is the first direct evidence that a MoE-specific threshold
+  avoids collateral damage the global one inflicts, and it is the argument
+  for keeping the change rather than reverting to the global knob.
+
+### Correction to the device-0 limitation above
+
+The claim that the cache initialising on device 0 only might *understate*
+the +61% was wrong. SYCL1 held experts for layers 13-15 **device-resident**,
+and device-resident experts never trigger the copy hook because they never
+need copying -- a cache there would have had nothing to serve. Verified
+separately: a SYCL1-only run does log `moe_cache: initialized on device 1`,
+so the per-device mechanism works and device 0 was simply where every
+host-resident copy landed. The +61% stands unqualified on this point.
