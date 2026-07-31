@@ -1,0 +1,55 @@
+# Integration-repository CI (roadmap Task A3).
+#
+# A thin wrapper around ci/checks.sh. The checks live in the script
+# rather than here for two reasons: this gitea currently has Actions
+# disabled and no runner, so anything expressed only as a workflow would
+# never execute; and a check that cannot be run by hand is a check nobody
+# runs before pushing.
+#
+# To enable: add an [actions] section with ENABLED = true to gitea's
+# app.ini, restart gitea, and register a runner. That touches a running
+# service, so it is deliberately not automated here.
+#
+# The SYCL matrix stays out of this on purpose. It needs the oneAPI
+# toolchain and two Arc cards; the roadmap's rule is that a SYCL hardware
+# runner may be separate, but CPU-only capability truthfulness must be
+# enforced on every push -- which is what this does.
+
+name: integration checks
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        working-directory: modelctl
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --quiet --upgrade pip
+          # The roadmap asks for the web tests to run "with all declared
+          # dependencies" -- a suite that silently skips them because
+          # fastapi is absent reports a pass it has not earned.
+          # requirements.txt is sufficient: httpx, which FastAPI's
+          # TestClient needs, arrives as a hard dependency of
+          # huggingface-hub rather than being listed directly.
+          .venv/bin/pip install --quiet -r requirements.txt
+
+      - name: Install build toolchain
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq cmake build-essential
+
+      - name: Run integration checks
+        run: ./ci/checks.sh

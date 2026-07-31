@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# Integration-repository checks (roadmap Task A3).
+#
+# Written as a script rather than only as a CI workflow because this gitea
+# has Actions disabled and no runner, so a workflow file alone would never
+# execute. This runs today -- by hand, from a git hook, or from CI once a
+# runner exists. .gitea/workflows/ci.yml is a thin wrapper around it.
+#
+# Lives in ci/ rather than scripts/ because scripts/ is gitignored at the
+# repo root as "non-project workspace junk" -- this is project
+# infrastructure and has to be tracked.
+#
+# Usage:
+#   ci/checks.sh            # everything, including the CPU-only build
+#   ci/checks.sh --quick    # skip the build (~seconds instead of minutes)
+#
+# Exits non-zero if any check fails. Each check prints PASS or FAIL with the
+# reason, and a failure never stops later checks -- one broken thing should
+# not hide the others.
+set -uo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+QUICK=0
+[ "${1:-}" = "--quick" ] && QUICK=1
+
+FAILURES=0
+pass() { printf '  \033[32mPASS\033[0m  %s\n' "$1"; }
+fail() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
+head() { printf '\n\033[1m%s\033[0m\n' "$1"; }
+
+VENV="$REPO/modelctl/.venv/bin/python"
+[ -x "$VENV" ] || VENV=python3
+
+# --- 1. submodule pin -------------------------------------------------
+# The specific failure this exists for: the repo sat five commits ahead of
+# its own pin for a day, so a clone built a runtime the docs did not
+# describe, and the drift check that should have caught it was reading the
+# checked-out commit under the name of the pinned one.
+head "submodule pin"
+PINNED=$(git -C "$REPO" rev-parse HEAD:llama.cpp 2>/dev/null)
+CHECKED=$(git -C "$REPO/llama.cpp" rev-parse HEAD 2>/dev/null)
+if [ -z "$PINNED" ]; then
+    fail "cannot read the pinned llama.cpp commit"
+elif [ "$PINNED" != "$CHECKED" ]; then
+    fail "working tree is at ${CHECKED:0:12}, pinned at ${PINNED:0:12}"
+else
+    pass "pin and working tree agree (${PINNED:0:12})"
+fi
+
+URL=$(git -C "$REPO" config -f .gitmodules submodule.llama.cpp.url 2>/dev/null)
+if [ -n "$URL" ]; then pass "submodule URL declared: $URL"
+else fail "no submodule URL in .gitmodules"; fi
+
+MANIFEST_RT=$("$VENV" - <<'EOF' 2>/dev/null
+import json, pathlib, sys
+try:
+    print(json.loads(pathlib.Path("integration-manifest.json").read_text())
+          .get("llama_cpp_commit", ""))
+except Exception:
+    sys.exit(1)
+EOF
+)
+if [ -z "$MANIFEST_RT" ]; then
+    fail "integration-manifest.json unreadable or missing llama_cpp_commit"
+elif [ "${MANIFEST_RT:0:12}" != "${PINNED:0:12}" ]; then
+    fail "manifest names ${MANIFEST_RT:0:12}, pin is ${PINNED:0:12}"
+else
+    pass "manifest agrees with the pin"
+fi
+
+# --- 2. static import / compile --------------------------------------
+head "static checks"
+if "$VENV" -m compileall -q "$REPO/modelctl" > /tmp/ci-compileall.log 2>&1; then
+    pass "compileall"
+else
+    fail "compileall -- see /tmp/ci-compileall.log"
+fi
+
+if (cd "$REPO/modelctl" && "$VENV" -c "
+import importlib, pathlib, sys
+bad = []
+for p in sorted(pathlib.Path('.').glob('modelctl*.py')):
+    if p.name.startswith('test_'):
+        continue
+    try:
+        importlib.import_module(p.stem)
+    except Exception as e:
+        bad.append(f'{p.stem}: {type(e).__name__}: {e}')
+if bad:
+    print('\n'.join(bad)); sys.exit(1)
+" > /tmp/ci-imports.log 2>&1); then
+    pass "every modelctl module imports"
+else
+    fail "import failure -- $(head -1 /tmp/ci-imports.log)"
+fi
+
+# --- 3. test suite ----------------------------------------------------
+# Covers the roadmap's golden command/provenance and transaction rollback
+# jobs, which already live in the suite rather than as separate CI steps.
+head "test suite"
+if (cd "$REPO/modelctl" && "$VENV" -m unittest discover -s . -p "test_*.py" \
+        > /tmp/ci-tests.log 2>&1); then
+    pass "$(grep -oE '^Ran [0-9]+ tests' /tmp/ci-tests.log | tail -1)"
+else
+    fail "tests -- $(grep -cE '^(FAIL|ERROR):' /tmp/ci-tests.log) failing, see /tmp/ci-tests.log"
+fi
+
+# --- 4. CPU-only build and capability truthfulness --------------------
+# The roadmap's one non-negotiable: "CPU-only capability truthfulness must
+# be enforced on every push". A CPU-only build claiming a SYCL feature
+# would let modelctl generate cache flags for a binary that cannot honour
+# them.
+head "CPU-only build and capability truthfulness"
+if [ "$QUICK" = "1" ]; then
+    printf '  \033[33mSKIP\033[0m  build (--quick)\n'
+else
+    BUILD=/tmp/ci-build-cpu
+    if cmake -B "$BUILD" -S "$REPO/llama.cpp" -DGGML_SYCL=OFF \
+            -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_TESTS=ON \
+            -DLLAMA_BUILD_EXAMPLES=OFF -DCMAKE_BUILD_TYPE=Release \
+            > /tmp/ci-cmake.log 2>&1 \
+       && cmake --build "$BUILD" --target llama-server test-moe-cache \
+            test-moe-hybrid -j"$(nproc)" > /tmp/ci-build.log 2>&1; then
+        pass "CPU-only build"
+
+        if "$BUILD/bin/test-moe-cache" > /dev/null 2>&1; then
+            pass "MoE cache unit tests (host-only, no GPU)"
+        else fail "MoE cache unit tests"; fi
+        if "$BUILD/bin/test-moe-hybrid" > /dev/null 2>&1; then
+            pass "MoE hybrid partition tests (host-only, no GPU)"
+        else fail "MoE hybrid partition tests"; fi
+
+        CAPS=$("$BUILD/bin/llama-server" --modelctl-capabilities 2>/dev/null)
+        LIARS=$(printf '%s' "$CAPS" | "$VENV" -c "
+import json, sys
+try:
+    f = json.load(sys.stdin).get('features', {})
+except Exception:
+    print('UNPARSEABLE'); sys.exit(0)
+print(','.join(k for k, v in f.items() if v) or 'none')
+")
+        if [ "$LIARS" = "none" ]; then
+            pass "CPU-only build reports every SYCL/cache feature false"
+        elif [ "$LIARS" = "UNPARSEABLE" ]; then
+            fail "capability response is not valid JSON"
+        else
+            fail "CPU-only build claims: $LIARS"
+        fi
+    else
+        fail "CPU-only build -- see /tmp/ci-build.log"
+    fi
+fi
+
+head "result"
+if [ "$FAILURES" -eq 0 ]; then
+    printf '  \033[32mall checks passed\033[0m\n\n'
+    exit 0
+fi
+printf '  \033[31m%d check(s) failed\033[0m\n\n' "$FAILURES"
+exit 1
