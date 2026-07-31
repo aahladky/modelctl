@@ -11,6 +11,21 @@ from dataclasses import dataclass
 from typing import Literal
 
 
+class ProfileNotFoundError(Exception):
+    """Raised when a named profile has no file on disk.
+
+    load_profile() raises this instead of exiting so that long-lived
+    callers (web job lanes, route handlers, services) survive a missing
+    profile; the CLI translates it to a friendly message and exit code 1
+    in exactly one place (main()).
+    """
+
+    def __init__(self, name: str):
+        self.name = name
+        super().__init__(
+            f"No profile named '{name}'. Run `modelctl list` to see saved profiles.")
+
+
 @dataclass(frozen=True)
 class ValidationMessage:
     """A single validation result attached to a launch path, plan, or profile."""

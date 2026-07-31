@@ -114,7 +114,9 @@ head "CPU-only build and capability truthfulness"
 if [ "$QUICK" = "1" ]; then
     printf '  \033[33mSKIP\033[0m  build (--quick)\n'
 else
-    BUILD=/tmp/ci-build-cpu
+    # Overridable so worktrees and parallel runs don't fight over one
+    # cmake cache configured against a different source path.
+    BUILD="${MODELCTL_CI_BUILD_DIR:-/tmp/ci-build-cpu}"
     if cmake -B "$BUILD" -S "$REPO/llama.cpp" -DGGML_SYCL=OFF \
             -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_TESTS=ON \
             -DLLAMA_BUILD_EXAMPLES=OFF -DCMAKE_BUILD_TYPE=Release \

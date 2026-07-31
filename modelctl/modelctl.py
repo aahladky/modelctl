@@ -40,6 +40,7 @@ except ModuleNotFoundError as e:
     )
     sys.exit(1)
 
+import modelctl_errors
 import modelctl_vram
 
 try:
@@ -2141,8 +2142,7 @@ def _deep_copy_dict(d):
 def load_profile(name):
     path = PROFILES_DIR / f"{name}.json"
     if not path.exists():
-        print(f"No profile named '{name}'. Run `modelctl list` to see saved profiles.")
-        sys.exit(1)
+        raise modelctl_errors.ProfileNotFoundError(name)
     return normalize_profile(json.loads(path.read_text()))
 
 
@@ -3050,13 +3050,16 @@ def cmd_place_tiers(args, inventory, defaults, primary, names):
             continue
         plan = modelctl_tiers.plan_tiers(
             profile, inventory, defaults["vram_limit_pct"], primary,
-            ram_available=ram_available)
+            ram_available=ram_available,
+            cache_request=profile.get("moe_cache"))
         if plan is None:
             print(f"{name}: couldn't analyze model layout "
                   f"({profile.get('model_path')})\n")
             continue
         differs = _print_tier_plan(name, profile.get("config", {}), plan)
         if args.apply and differs:
+            modelctl_tiers.apply_plan_cache_budgets(
+                profile, plan, log=lambda m: print(f"  -> {m}"))
             cfg = profile.get("config", {})
             cfg.update(plan["config"])
             profile["config"] = cfg
@@ -3633,6 +3636,9 @@ def smoke_test_profile(name, timeout=600, prompt=None, proc_register=None):
             result["messages"].append(
                 f"loaded and responded, but finish_reason='{finish}' or empty "
                 "content -- inspect manually.")
+        # The generation request completed; "generate" from here on means it
+        # errored. cmd_test relies on this to tell FAIL from PASS/WARN.
+        result["stage"] = "done"
         return result
     finally:
         proc.terminate()
@@ -4364,6 +4370,9 @@ def main():
     args = parser.parse_args()
     try:
         args.func(args)
+    except modelctl_errors.ProfileNotFoundError as e:
+        print(e)
+        sys.exit(1)
     except KeyboardInterrupt:
         print("\nCancelled.")
         sys.exit(130)

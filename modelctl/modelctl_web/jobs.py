@@ -318,11 +318,17 @@ class JobLane:
                              finished=time.time())
             except CancelledError:
                 store.update(job_id, status="cancelled", finished=time.time())
-            except Exception as e:
+            except BaseException as e:
+                # BaseException, not Exception: CLI-flavored code can raise
+                # SystemExit, and letting it escape kills this lane's worker
+                # thread silently -- the job stays "running" forever and every
+                # later job queues eternally. The lane must outlive any job.
                 store.update(
                     job_id, status="failed",
                     error=f"{e}\n{traceback.format_exc(limit=5)}",
                     finished=time.time())
+                if isinstance(e, KeyboardInterrupt):
+                    raise
             finally:
                 ctx.cancel_all()
                 with cancel_lock:

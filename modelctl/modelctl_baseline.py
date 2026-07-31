@@ -92,9 +92,12 @@ def _expert_offload_rule(hardware, profile):
     if blocks < 4:
         return ""
     # Upper half of the expert layers to CPU: enough to exercise the
-    # heterogeneous path on any model big enough to need it.
+    # heterogeneous path on any model big enough to need it. Explicit
+    # alternation, not a character-class range: [25-9] means {2,5..9},
+    # which silently pinned the LOWER half on models with >=20 blocks.
     first = blocks // 2
-    return rf"-ot blk\.({first}|[{first + 1}-9]|[1-9][0-9])\.ffn_.*_exps\.=CPU"
+    upper = "|".join(str(i) for i in range(first, blocks))
+    return rf"-ot blk\.({upper})\.ffn_.*_exps\.=CPU"
 
 
 def build_candidate_set(profile, hardware=None, backend=None) -> BaselineSet:
