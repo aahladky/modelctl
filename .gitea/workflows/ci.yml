@@ -27,9 +27,26 @@ jobs:
   checks:
     runs-on: host
     steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      # Plain git rather than actions/checkout: that action is JavaScript
+      # fetched from github.com at run time, which is a strange
+      # dependency for a runner sitting on the same box as the gitea it
+      # builds for -- and it was the step that failed. This clones from
+      # the local instance; .gitmodules uses a relative URL, so the
+      # submodule resolves against the same host and inherits the
+      # credential.
+      - name: Checkout
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin \
+            "${GITHUB_SERVER_URL/:\/\//://x-access-token:${GITHUB_TOKEN}@}/${GITHUB_REPOSITORY}.git" \
+            2>/dev/null || git remote set-url origin \
+            "${GITHUB_SERVER_URL/:\/\//://x-access-token:${GITHUB_TOKEN}@}/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth 1 origin "${GITHUB_SHA}"
+          git checkout -q FETCH_HEAD
+          git submodule update --init --recursive --depth 1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
       - name: Install dependencies
         working-directory: modelctl
