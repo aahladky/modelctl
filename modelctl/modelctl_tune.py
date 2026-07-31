@@ -26,6 +26,38 @@ import modelctl_vram
 _TEST_PROMPT = ("Summarize why the sky is blue in three sentences.")
 _WARMUP_PROMPT = ("Write a short greeting.")
 
+# Measurement prompts, rotated one per request.
+#
+# Repeating a single prompt is not a valid throughput measurement on this
+# stack: llama.cpp reuses the KV cache for an identical prefix, so the
+# second request skips prompt processing entirely, and graph reuse skips
+# redundant expert restaging -- which is why `moe_cache_hits_total` stays
+# flat across identical repeated requests (scripts/moe-cache-correctness
+# records the same effect). A single prompt at temperature 0 also routes to
+# one fixed expert sequence, so a MoE cache sees one access pattern rather
+# than a representative spread.
+#
+# Four of them, each over 32 tokens so the expert staging path genuinely
+# re-executes, and distinct in subject so they route differently.
+_MEASURE_PROMPTS = (
+    "Explain how a modern solid-state drive differs from a spinning hard "
+    "disk, covering access latency, wear levelling, the role of the flash "
+    "translation layer, and why sequential and random access patterns "
+    "perform so differently on each of the two technologies in practice.",
+    "Describe the water cycle from evaporation through condensation and "
+    "precipitation, and explain what role ocean currents, prevailing winds "
+    "and mountain ranges each play in moving moisture between different "
+    "regions of the planet over the course of a typical year.",
+    "Summarise the main differences between the Baroque and Classical "
+    "periods in European music, mentioning representative composers from "
+    "each, the typical forms and structures that dominated them, and how "
+    "the size and instrumentation of orchestras changed between the two.",
+    "Walk through how an optimising compiler turns source code into a "
+    "running program, from lexing and parsing through intermediate "
+    "representation, optimisation passes and code generation, and explain "
+    "where the assembler and the linker fit into that overall sequence.",
+)
+
 
 def _free_port():
     import socket
@@ -392,6 +424,21 @@ def _wait_ready(port, proc, timeout=900):
     return False, time.time() - (deadline - timeout)
 
 
+def _prompt_sequence(prompt):
+    """Prompts to rotate through the measured requests.
+
+    A caller passing one string keeps the old single-prompt behaviour,
+    because some callers (a user testing a specific prompt) mean exactly
+    that. Passing a sequence, or nothing, gets the rotated set.
+    """
+    if prompt is None:
+        return _MEASURE_PROMPTS
+    if isinstance(prompt, str):
+        return (prompt,)
+    seq = tuple(p for p in prompt if p)
+    return seq or _MEASURE_PROMPTS
+
+
 def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
                      max_tokens=128, runs=2, binary=None,
                      proc_register=None, cancel_check=None,
@@ -529,6 +576,13 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
             run["details"] = {**run.get("details", {}),
                               "warmup_generation_tps": run["warmup_generation_tps"]}
 
+            # Rotate a distinct prompt into every request, including the
+            # streaming TTFT call and the timings call within one iteration
+            # -- those two were previously the same prompt back to back, so
+            # the second measured a warm KV cache rather than the plan.
+            prompts = _prompt_sequence(prompt)
+            issued = 0
+
             prompt_tps, gen_tps, ttfts = [], [], []
             for i in range(runs):
                 if cancel_check and cancel_check():
@@ -536,16 +590,20 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
                     raise InterruptedError("plan test cancelled")
                 ttft, _total, _usage = _post_stream(
                     f"http://127.0.0.1:{port}/v1/chat/completions",
-                    {"messages": [{"role": "user", "content": prompt or _TEST_PROMPT}],
+                    {"messages": [{"role": "user",
+                                   "content": prompts[issued % len(prompts)]}],
                      "max_tokens": max_tokens, "temperature": 0},
                     timeout=600)
+                issued += 1
                 if ttft:
                     ttfts.append(ttft)
                 resp = _post_json(
                     f"http://127.0.0.1:{port}/v1/chat/completions",
-                    {"messages": [{"role": "user", "content": prompt or _TEST_PROMPT}],
+                    {"messages": [{"role": "user",
+                                   "content": prompts[issued % len(prompts)]}],
                      "max_tokens": max_tokens, "temperature": 0},
                     timeout=600)
+                issued += 1
                 t = resp.get("timings", {})
                 if t.get("prompt_per_second"):
                     prompt_tps.append(t["prompt_per_second"])
@@ -553,6 +611,13 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
                     gen_tps.append(t["predicted_per_second"])
 
             run["success"] = True
+            # Which measurement protocol produced these numbers. Rotated
+            # prompts and a single repeated prompt are not comparable --
+            # the repeated one reuses the KV cache -- and rows recorded
+            # before this existed have no key here at all.
+            run["details"] = {**run.get("details", {}),
+                              "prompt_count": len(prompts),
+                              "requests_issued": issued}
             run["actual_context"] = actual_ctx or plan.claim.expected_context
             run["ttft_seconds"] = round(min(ttfts), 3) if ttfts else None
             run["prompt_tps"] = round(sum(prompt_tps) / len(prompt_tps), 2) if prompt_tps else None

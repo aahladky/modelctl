@@ -37,16 +37,40 @@ class MatrixCell:
     # Config overrides applied to the fixture profile.
     config: dict = field(default_factory=dict)
     moe_cache: dict | None = None
+    # Environment overrides, as "KEY=VALUE" entries merged into the
+    # fixture profile's env. This is how offload-threshold cells vary
+    # GGML_OP_OFFLOAD_MIN_BATCH and GGML_OP_OFFLOAD_MOE_MIN_BATCH.
+    #
+    # Routed through the profile rather than set on the harness process
+    # deliberately: profile env lands in the launch environment, in
+    # environment_fingerprint, and in the plan ID, so each cell records as
+    # a distinct plan with its own provenance instead of several cells
+    # silently overwriting one another's observations.
+    env: tuple = ()
     # Preconditions, checked against the live snapshot before running.
     min_gpus: int = 0
     needs_cache_capable: bool = False
     needs_moe_model: bool = False
     needs_draft_model: bool = False
+    # The runtime must honour a MoE-specific offload threshold. Without it,
+    # a cell setting GGML_OP_OFFLOAD_MOE_MIN_BATCH runs identically to the
+    # baseline and reports a difference of zero, which reads as a genuine
+    # "no effect" result rather than as a variable the runtime ignored.
+    needs_moe_offload_control: bool = False
     min_free_vram_bytes: int = 0
     min_free_ram_bytes: int = 0
     concurrent_requests: int = 1
     # Heavy cells need a large model and several minutes each.
     heavy: bool = False
+
+
+# One cache configuration across the sweep, so the only thing varying
+# between its cells is the offload threshold.
+_SWEEP_CACHE = {"mode": "manual",
+                "gpu": {"budgets_bytes": {"SYCL0": 4 << 30},
+                        "policy": "slru", "admission_misses": 2},
+                "decode": {"admit_to_gpu_cache": True,
+                           "miss_execution": "gpu"}}
 
 
 CELLS = (
@@ -119,6 +143,56 @@ CELLS = (
                 "extra": r"-ot blk\.(1[0-9]|[2-9][0-9])\.ffn_.*_exps\.=CPU"},
         moe_cache={"mode": "off"},
         needs_moe_model=True, min_gpus=1, heavy=True),
+    # --- offload-threshold sweep -------------------------------------
+    #
+    # Does giving routed MoE ops their own offload threshold make the
+    # existing transfer cache a win at batch 1? Four conditions, because
+    # two cannot separate the answers:
+    #
+    #   A  default            the real-world baseline; the cache is inert,
+    #                         since the hook only fires at batch >= 32
+    #   B  global minimum 1   what lowering the threshold for *everything*
+    #                         costs -- the -12% result
+    #   D  MoE minimum 1      the proposal
+    #   E  MoE minimum 1,     D without the cache, which separates "work
+    #      cache off          moved to the GPU" from "the cache served it"
+    #
+    # D vs A is whether it was worth doing. D vs E is the cache's own
+    # contribution. Reporting D vs B alone would overstate the case, the
+    # way reporting C vs B did on the earlier run.
+    #
+    # Heavy: these need a real oversized MoE and minutes each.
+    MatrixCell(
+        name="offload-A-default",
+        description="Offload sweep A: default thresholds, cache on (inert)",
+        config={"device": "SYCL0", "extra": "", "fit": "off"},
+        moe_cache=_SWEEP_CACHE,
+        min_gpus=1, needs_cache_capable=True, needs_moe_model=True,
+        heavy=True),
+    MatrixCell(
+        name="offload-B-global-1",
+        description="Offload sweep B: global minimum 1, cache on",
+        config={"device": "SYCL0", "extra": "", "fit": "off"},
+        moe_cache=_SWEEP_CACHE,
+        env=("GGML_OP_OFFLOAD_MIN_BATCH=1",),
+        min_gpus=1, needs_cache_capable=True, needs_moe_model=True,
+        heavy=True),
+    MatrixCell(
+        name="offload-D-moe-1",
+        description="Offload sweep D: MoE-only minimum 1, cache on",
+        config={"device": "SYCL0", "extra": "", "fit": "off"},
+        moe_cache=_SWEEP_CACHE,
+        env=("GGML_OP_OFFLOAD_MOE_MIN_BATCH=1",),
+        min_gpus=1, needs_cache_capable=True, needs_moe_model=True,
+        needs_moe_offload_control=True, heavy=True),
+    MatrixCell(
+        name="offload-E-moe-1-no-cache",
+        description="Offload sweep E: MoE-only minimum 1, cache off",
+        config={"device": "SYCL0", "extra": "", "fit": "off"},
+        moe_cache={"mode": "off"},
+        env=("GGML_OP_OFFLOAD_MOE_MIN_BATCH=1",),
+        min_gpus=1, needs_cache_capable=True, needs_moe_model=True,
+        needs_moe_offload_control=True, heavy=True),
     MatrixCell(
         name="main-plus-draft",
         description="Main model plus a draft/MTP model",
@@ -152,6 +226,14 @@ def _precondition_failure(cell, snapshot, caps, profile, include_heavy):
             import modelctl_capabilities
             if not modelctl_capabilities.is_cache_capable(caps or {}):
                 return "runtime does not report moe_weight_transfer_cache"
+        except Exception:
+            return "capability probe unavailable"
+    if cell.needs_moe_offload_control:
+        try:
+            import modelctl_capabilities
+            if not modelctl_capabilities.has_moe_offload_threshold_control(caps or {}):
+                return ("runtime has no MoE-specific offload threshold; "
+                        "GGML_OP_OFFLOAD_MOE_MIN_BATCH would be ignored")
         except Exception:
             return "capability probe unavailable"
     if cell.needs_moe_model:
@@ -232,6 +314,16 @@ def run_matrix(profile, snapshot=None, backend=None, include_heavy=False,
         cell_profile["config"] = {**profile.get("config", {}), **cell.config}
         if cell.moe_cache is not None:
             cell_profile["moe_cache"] = cell.moe_cache
+        if cell.env:
+            # The cell's entries win over the fixture profile's, by name,
+            # so a profile that already sets a threshold cannot silently
+            # defeat the cell that exists to vary it.
+            merged = {}
+            for entry in list(profile.get("env") or []) + list(cell.env):
+                if "=" in entry:
+                    k, v = entry.split("=", 1)
+                    merged[k] = v
+            cell_profile["env"] = [f"{k}={v}" for k, v in sorted(merged.items())]
 
         started = time.time()
         try:
@@ -252,6 +344,18 @@ def run_matrix(profile, snapshot=None, backend=None, include_heavy=False,
                 "storage_activity": run.get("storage_activity"),
                 "cache_state": run.get("cache_state"),
                 "command_fingerprint": run.get("command_fingerprint"),
+                # Raw storage counters, not just the classification. On a
+                # model larger than RAM the page cache is warmed by
+                # whichever cell ran first and survives the process
+                # restart, so a later cell can look faster for reasons
+                # unrelated to what it varies. Comparing these across
+                # cells is how that contamination is detected rather than
+                # assumed away.
+                "read_bytes": run.get("read_bytes"),
+                "disk_read_bytes": run.get("disk_read_bytes"),
+                "major_faults": run.get("major_faults"),
+                "ttft_seconds": run.get("ttft_seconds"),
+                "environment_fingerprint": run.get("environment_fingerprint"),
             }
             if run.get("success"):
                 result.status = "passed"

@@ -410,6 +410,19 @@ def is_weight_transfer_cache_capable(caps: dict) -> bool:
     return bool(caps.get("features", {}).get("moe_weight_transfer_cache"))
 
 
+def has_moe_offload_threshold_control(caps: dict) -> bool:
+    """True if routed MoE ops have their own offload threshold.
+
+    Without this the runtime honours only the global
+    GGML_OP_OFFLOAD_MIN_BATCH, so a cell setting
+    GGML_OP_OFFLOAD_MOE_MIN_BATCH would run identically to the baseline and
+    report a difference of zero -- a measurement of nothing that reads as a
+    real result. The offload sweep is gated on it rather than trusting that
+    setting a variable did something.
+    """
+    return bool(caps.get("features", {}).get("moe_offload_threshold_control"))
+
+
 def is_sycl_cache_capable(caps: dict) -> bool:
     """True if the backend supports GPU-side expert caching on SYCL.
 

@@ -171,3 +171,112 @@ class TestReport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOffloadSweepCells(unittest.TestCase):
+    """The offload-threshold sweep: four conditions that must stay
+    distinguishable from each other and from the rest of the matrix."""
+
+    def _cell(self, name):
+        return next(c for c in acc.CELLS if c.name == name)
+
+    def test_all_four_conditions_exist(self):
+        names = {c.name for c in acc.CELLS}
+        for n in ("offload-A-default", "offload-B-global-1",
+                  "offload-D-moe-1", "offload-E-moe-1-no-cache"):
+            self.assertIn(n, names)
+
+    def test_conditions_differ_only_in_threshold_and_cache(self):
+        # If placement drifted between cells the comparison would be
+        # measuring placement, which is how the Q4_K_M run went wrong.
+        cells = [self._cell(n) for n in
+                 ("offload-A-default", "offload-B-global-1",
+                  "offload-D-moe-1", "offload-E-moe-1-no-cache")]
+        configs = {tuple(sorted(c.config.items())) for c in cells}
+        self.assertEqual(len(configs), 1)
+
+    def test_baseline_sets_no_threshold_override(self):
+        self.assertEqual(self._cell("offload-A-default").env, ())
+
+    def test_global_and_moe_conditions_set_different_variables(self):
+        b = self._cell("offload-B-global-1").env
+        d = self._cell("offload-D-moe-1").env
+        self.assertIn("GGML_OP_OFFLOAD_MIN_BATCH=1", b)
+        self.assertIn("GGML_OP_OFFLOAD_MOE_MIN_BATCH=1", d)
+        self.assertNotEqual(set(b), set(d))
+
+    def test_cache_on_conditions_share_one_cache_config(self):
+        # Only the threshold may vary across A, B and D.
+        caches = [self._cell(n).moe_cache for n in
+                  ("offload-A-default", "offload-B-global-1", "offload-D-moe-1")]
+        self.assertEqual(caches[0], caches[1])
+        self.assertEqual(caches[1], caches[2])
+
+    def test_condition_e_isolates_the_cache_contribution(self):
+        e = self._cell("offload-E-moe-1-no-cache")
+        d = self._cell("offload-D-moe-1")
+        self.assertEqual(e.env, d.env)              # same threshold
+        self.assertEqual(e.moe_cache, {"mode": "off"})
+
+    def test_sweep_cells_are_heavy_and_need_a_real_moe(self):
+        for n in ("offload-A-default", "offload-B-global-1",
+                  "offload-D-moe-1", "offload-E-moe-1-no-cache"):
+            c = self._cell(n)
+            self.assertTrue(c.heavy, n)
+            self.assertTrue(c.needs_moe_model, n)
+
+
+class TestCellEnvironmentMerge(unittest.TestCase):
+    """A cell's env must reach the launched process, and must win over the
+    fixture profile's own settings."""
+
+    def _merge(self, profile_env, cell_env):
+        # Mirrors run_matrix()'s merge without launching anything.
+        merged = {}
+        for entry in list(profile_env) + list(cell_env):
+            if "=" in entry:
+                k, v = entry.split("=", 1)
+                merged[k] = v
+        return [f"{k}={v}" for k, v in sorted(merged.items())]
+
+    def test_cell_env_overrides_the_profile(self):
+        out = self._merge(["GGML_OP_OFFLOAD_MIN_BATCH=32"],
+                          ["GGML_OP_OFFLOAD_MIN_BATCH=1"])
+        self.assertEqual(out, ["GGML_OP_OFFLOAD_MIN_BATCH=1"])
+
+    def test_unrelated_profile_env_survives(self):
+        out = self._merge(["ZES_ENABLE_SYSMAN=1"],
+                          ["GGML_OP_OFFLOAD_MOE_MIN_BATCH=1"])
+        self.assertIn("ZES_ENABLE_SYSMAN=1", out)
+        self.assertIn("GGML_OP_OFFLOAD_MOE_MIN_BATCH=1", out)
+
+
+class TestMeasurementPrompts(unittest.TestCase):
+    """Repeating one prompt is not a throughput measurement: llama.cpp
+    reuses the KV cache for an identical prefix and skips expert
+    restaging."""
+
+    def test_default_rotates_several_distinct_prompts(self):
+        import modelctl_tune
+        seq = modelctl_tune._prompt_sequence(None)
+        self.assertGreaterEqual(len(seq), 4)
+        self.assertEqual(len(set(seq)), len(seq))
+
+    def test_prompts_are_long_enough_to_restage_experts(self):
+        # The staging path was observed to be skipped for short prompts.
+        import modelctl_tune
+        for p in modelctl_tune._prompt_sequence(None):
+            self.assertGreater(len(p.split()), 32)
+
+    def test_explicit_single_prompt_is_respected(self):
+        import modelctl_tune
+        self.assertEqual(modelctl_tune._prompt_sequence("hello"), ("hello",))
+
+    def test_explicit_sequence_is_used_as_given(self):
+        import modelctl_tune
+        self.assertEqual(modelctl_tune._prompt_sequence(["a", "b"]), ("a", "b"))
+
+    def test_empty_sequence_falls_back_to_the_default_set(self):
+        import modelctl_tune
+        self.assertEqual(modelctl_tune._prompt_sequence([]),
+                         modelctl_tune._MEASURE_PROMPTS)
