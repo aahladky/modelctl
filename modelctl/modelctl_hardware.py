@@ -20,9 +20,7 @@ from pathlib import Path
 import modelctl_tiers
 import modelctl_vram
 
-STATE_DIR = Path(os.environ.get(
-    "MODELCTL_STATE_DIR",
-    Path.home() / ".local" / "share" / "modelctl"))
+from modelctl_paths import STATE_DIR
 SETTINGS_PATH = STATE_DIR / "hardware.json"
 
 _BANDWIDTH_GBS = {

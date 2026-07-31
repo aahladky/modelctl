@@ -29,9 +29,8 @@ import traceback
 import uuid
 from pathlib import Path
 
-STATE_DIR = Path(os.environ.get(
-    "MODELCTL_STATE_DIR",
-    Path.home() / ".local" / "share" / "modelctl"))
+from modelctl_paths import STATE_DIR
+
 DB_PATH = STATE_DIR / "web_jobs.db"
 
 _LANE_DEFAULTS = {

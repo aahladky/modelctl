@@ -1463,4 +1463,8 @@ def create_app(token=None, store=None, runner=None):
     return app
 
 
-app = create_app()
+# No module-level create_app(): importing this module used to construct a
+# JobStore against the live web_jobs.db (flipping the running service's
+# jobs to 'interrupted') and spawn six worker threads -- from `modelctl
+# web url`, from the test suite, from anything that touched the module.
+# Entry points call create_app() explicitly.
