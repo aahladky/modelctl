@@ -515,18 +515,16 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
         run["command_fingerprint"] = launch.command_fingerprint
         run["binary_path"] = launch.backend.binary
         run["binary_fingerprint"] = launch.backend.binary_fingerprint
-        run["environment_fingerprint"] = launch.backend.environment_fingerprint
+        run["environment_fingerprint"] = launch.environment_fingerprint
         run["capability_schema"] = launch.backend.capabilities.get("schema", 0)
         run["capability_digest"] = launch.backend.capability_fingerprint
         log(f"launching: {' '.join(cmd[:6])} ...")
         log_path = modelctl.PROFILES_DIR / profile_name / f"plan-test-{plan_id[:8]}.log"
         run["log_path"] = str(log_path)
+        # launch.environment is complete (plan env and library paths
+        # included) and is what the fingerprint describes -- no caller-side
+        # environment assembly.
         child_env = dict(launch.environment)
-        child_env.update(plan.env or {})
-        # plan.env (the profile's own saved env passthrough) can clobber the
-        # LD_LIBRARY_PATH resolve_backend() built -- re-apply after merging
-        # so the profile's env can add to it but never drop it.
-        modelctl.ensure_binary_ld_library_path(child_env, launch.backend.binary)
         # The per-profile directory is created by generate_artifacts(), but a
         # plan test must not require artifacts to have been generated first:
         # testing a plan before registering anything is the normal wizard

@@ -23,10 +23,11 @@ class LlamaCppAdapter:
         from modelctl_worker import _build_command
         return _build_command(profile, plan, port, binary=binary)
 
-    def effective_environment(self, profile, plan):
-        env = dict(os.environ)
-        env.update(plan.env or {})
-        return env
+    # NOTE: there is deliberately no environment method here. The launch
+    # environment is assembled once, inside
+    # modelctl_launch.build_launch_command(), and is part of the command's
+    # fingerprinted identity -- an adapter-level env would be a second
+    # place to construct it.
 
     def readiness_url(self, profile, port):
         return f"http://127.0.0.1:{port}/health"
@@ -80,9 +81,6 @@ class OvmsAdapter:
         if cfg.get("reasoning_parser"):
             args += ["--reasoning-parser", cfg["reasoning_parser"]]
         return args
-
-    def effective_environment(self, profile, plan):
-        return dict(os.environ)
 
     def readiness_url(self, profile, port):
         return f"http://127.0.0.1:{port}/v2/health/ready"

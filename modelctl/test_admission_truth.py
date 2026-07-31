@@ -78,6 +78,7 @@ FAKE_LAUNCH = SimpleNamespace(
     argv=("/fake/llama-server", "--model", "m.gguf"),
     environment={},
     command_fingerprint="cmd-test",
+    environment_fingerprint="launch-env-test",
     errors=(),
     raise_for_errors=lambda: None,
     backend=SimpleNamespace(
@@ -116,7 +117,10 @@ class AdmissionTruthBase(unittest.TestCase):
             "config": {"ctx": 8192, "flash_attn": "auto", "fit": "off",
                        "device": "SYCL0", "extra": extra,
                        "cache_type_k": "q8_0", "cache_type_v": "q8_0"},
-            "env": [],
+            # Nonempty so the launch-environment assertion in run_worker()
+            # can catch a caller re-applying plan.env on top of the
+            # already-complete launch.environment.
+            "env": ["GGML_OP_OFFLOAD_MOE_MIN_BATCH=64"],
         })
         profile["moe_cache"] = {
             "mode": "manual",
@@ -161,6 +165,12 @@ class AdmissionTruthBase(unittest.TestCase):
             return orig_acquire(profile_name, plan_id, claim_dict,
                                 owner_pid, budgets=budgets)
 
+        launched_envs = []
+
+        def fake_popen(cmd, env=None, **kwargs):
+            launched_envs.append(env)
+            return FakeProc()
+
         with mock.patch.object(modelctl_hardware, "capture_hardware_snapshot",
                                return_value=snap), \
              mock.patch.object(modelctl_plans, "compile_launch_plans",
@@ -173,12 +183,19 @@ class AdmissionTruthBase(unittest.TestCase):
              mock.patch.object(modelctl_launch, "build_launch_command",
                                return_value=FAKE_LAUNCH), \
              mock.patch.object(modelctl_worker.subprocess, "Popen",
-                               return_value=FakeProc()), \
+                               side_effect=fake_popen), \
              mock.patch.object(modelctl_worker, "_wait_ready",
                                return_value=launch_succeeds), \
              mock.patch.object(modelctl_worker, "_forward_proc_terminate",
                                lambda proc: None):
             code = modelctl_worker.worker_main("admtest", 18080)
+        # Launch-contract check that rides along on every worker run: the
+        # child process gets EXACTLY the fingerprinted launch environment,
+        # with no caller-side additions (P0 launch identity).
+        for env in launched_envs:
+            self.assertEqual(env, dict(FAKE_LAUNCH.environment),
+                             "worker launched with an environment other "
+                             "than LaunchCommand.environment")
         return code, captured
 
     def events(self, event_type):

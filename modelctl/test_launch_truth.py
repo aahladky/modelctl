@@ -361,5 +361,132 @@ class TestArtifactsExportOnlyProfileEnvironment(LaunchTruthBase):
         self.assertNotIn("MODELCTL_TEST_INHERIT", backend.environment_overrides)
 
 
+# Answers the capability probe only when the marker variable is present:
+# a stand-in for a SYCL build that cannot even start without its oneAPI
+# environment.
+ENV_DEPENDENT_SERVER = """#!/bin/sh
+case "$1" in
+  --version) echo "version: 6000 (abcdef)"; exit 0 ;;
+  --modelctl-capabilities)
+    if [ "$MODELCTL_TEST_REQUIRES_ME" = "1" ]; then
+      echo '{"schema": 2, "features": {}}'
+      exit 0
+    fi
+    exit 1 ;;
+  *) echo "error: invalid argument: $1" >&2; exit 1 ;;
+esac
+"""
+
+
+class TestLaunchEnvironmentIsPartOfIdentity(LaunchTruthBase):
+    """P0 launch-contract tests: the complete final environment lives
+    inside the immutable LaunchCommand, and the behavior-affecting subset
+    of it is part of command identity.
+
+    The motivating hardware measurement: changing
+    GGML_OP_OFFLOAD_MOE_MIN_BATCH alone reverses the performance ranking
+    between storage-bound and VRAM-resident placements. Two commands that
+    differ only in it must not share a fingerprint, reuse each other's
+    observations, or preview identically.
+    """
+
+    def build(self, plan_env=None, backend=None):
+        import dataclasses
+        backend = backend or modelctl_launch.resolve_backend(self.profile)
+        plan = modelctl_plans.current_profile_plan(
+            self.profile, capabilities=backend.capabilities)
+        if plan_env is not None:
+            plan = dataclasses.replace(plan, env=plan_env)
+        return modelctl_launch.build_launch_command(
+            self.profile, plan, backend=backend)
+
+    def test_plan_env_is_inside_the_launch_environment(self):
+        # No caller assembly required: what the plan sets is already in
+        # the environment the command carries.
+        launch = self.build(plan_env={"GGML_OP_OFFLOAD_MOE_MIN_BATCH": "64"})
+        self.assertEqual(
+            launch.environment.get("GGML_OP_OFFLOAD_MOE_MIN_BATCH"), "64")
+
+    def test_offload_threshold_changes_command_identity(self):
+        backend = modelctl_launch.resolve_backend(self.profile)
+        base = self.build(backend=backend)
+        tuned = self.build(
+            plan_env={"GGML_OP_OFFLOAD_MOE_MIN_BATCH": "1"}, backend=backend)
+        self.assertEqual(base.argv, tuned.argv,
+                         "fixture drift: argv must be identical so only "
+                         "the environment differs")
+        self.assertNotEqual(base.environment_fingerprint,
+                            tuned.environment_fingerprint)
+        self.assertNotEqual(base.command_fingerprint, tuned.command_fingerprint)
+
+    def test_plan_env_cannot_drop_the_library_path(self):
+        backend = modelctl_launch.resolve_backend(self.profile)
+        expected = backend.environment.get("LD_LIBRARY_PATH", "")
+        launch = self.build(plan_env={"LD_LIBRARY_PATH": "/nowhere"},
+                            backend=backend)
+        got = launch.environment.get("LD_LIBRARY_PATH", "")
+        # The plan's value survives, but the binary's own directory is
+        # re-appended so the process can still load its runtime.
+        self.assertIn(str(Path(self.binary).parent), got)
+        if expected:
+            self.assertNotEqual(got, expected)
+
+    def test_ambient_noise_does_not_change_identity(self):
+        base = self.build()
+        with mock.patch.dict("os.environ", {"SSH_CLIENT": "10.0.0.5 1 22",
+                                            "LC_ALL": "C.UTF-8"}):
+            noisy = self.build()
+        self.assertEqual(base.environment_fingerprint,
+                         noisy.environment_fingerprint)
+        self.assertEqual(base.command_fingerprint, noisy.command_fingerprint)
+
+    def test_ambient_behavior_variable_changes_identity(self):
+        # The profile never declared it, but it changes what the runtime
+        # does -- so it is part of identity (this is what the old
+        # profile-declared-only fingerprint missed).
+        base = self.build()
+        with mock.patch.dict("os.environ",
+                             {"GGML_OP_OFFLOAD_MOE_MIN_BATCH": "1"}):
+            ambient = self.build()
+        self.assertNotEqual(base.environment_fingerprint,
+                            ambient.environment_fingerprint)
+
+    def test_identity_environment_is_a_normalized_whitelist(self):
+        ident = modelctl_launch.identity_environment({
+            "GGML_OP_OFFLOAD_MOE_MIN_BATCH": "32",
+            "ONEAPI_DEVICE_SELECTOR": "level_zero:0",
+            "LD_LIBRARY_PATH": "/opt/oneapi/lib",
+            "SSH_CLIENT": "10.0.0.5",       # noise: excluded
+            "LANG": "en_US.UTF-8",          # noise: excluded
+            "ZE_AFFINITY_MASK": "",          # empty: excluded
+        })
+        self.assertEqual(ident, {
+            "GGML_OP_OFFLOAD_MOE_MIN_BATCH": "32",
+            "LD_LIBRARY_PATH": "/opt/oneapi/lib",
+            "ONEAPI_DEVICE_SELECTOR": "level_zero:0",
+        })
+
+    def test_fingerprint_describes_the_carried_environment(self):
+        # Self-consistency: the fingerprint is derivable from the object,
+        # so no hidden inputs exist.
+        launch = self.build(plan_env={"GGML_OP_OFFLOAD_MOE_MIN_BATCH": "8"})
+        expected = modelctl_launch._env_fingerprint(
+            modelctl_launch.identity_environment(launch.environment))
+        self.assertEqual(launch.environment_fingerprint, expected)
+
+    def test_probe_runs_under_the_resolved_environment(self):
+        # A binary that cannot answer the probe without its environment
+        # (like a SYCL build without oneAPI) must be probed with the env
+        # it will launch under, not the bare process env.
+        self.binary.write_text(ENV_DEPENDENT_SERVER)
+        modelctl_capabilities.clear_cache()
+        profile = dict(self.profile)
+        profile["env"] = ["MODELCTL_TEST_REQUIRES_ME=1"]
+        backend = modelctl_launch.resolve_backend(profile)
+        self.assertEqual(backend.capabilities.get("_probe_status"), "ok",
+                         "probe did not run under the resolved launch "
+                         "environment")
+
+
 if __name__ == "__main__":
     unittest.main()

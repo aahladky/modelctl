@@ -65,7 +65,11 @@ class LaunchCommand:
     runtime history, observations, and decision traces.
     """
     argv: tuple[str, ...]        # tokenized command (never a shell string)
-    environment: dict[str, str]  # effective environment
+    # The COMPLETE launch environment: backend resolution + plan-specific
+    # overrides + library-path repair, in that order. Callers launch with
+    # exactly this dict and never mutate it -- a caller-side env change
+    # after this object exists would not be part of the fingerprints below.
+    environment: dict[str, str]
     backend: ResolvedBackend
     profile_name: str
     plan_id: str
@@ -73,6 +77,10 @@ class LaunchCommand:
     warnings: tuple[str, ...]
     validation: tuple            # tuple of ValidationMessage (or legacy tuples)
     command_fingerprint: str     # hash of normalized command identity
+    # Fingerprint of identity_environment(environment) -- the final env
+    # this command launches under, not the pre-plan backend one. Recorded
+    # with every run and observation.
+    environment_fingerprint: str = ""
 
     @property
     def errors(self) -> tuple:
@@ -102,6 +110,46 @@ class LaunchCommand:
         if self.errors:
             raise LaunchValidationError(self)
         return self
+
+
+# The environment variables that change what the launched process actually
+# does, and therefore belong to launch identity. Everything else in the
+# process environment (SSH vars, locale, terminal state) is noise: hashing
+# it would mass-stale observations on every unrelated shell change.
+#
+# Hardware measurements motivated this list: GGML_OP_OFFLOAD_MOE_MIN_BATCH
+# alone can reverse the performance ranking between storage-bound and
+# VRAM-resident placements, so two commands differing only in it must not
+# share an identity, reuse each other's observations, or show one preview.
+_IDENTITY_ENV_PREFIXES = (
+    "GGML_",      # ggml scheduler/offload behavior, incl. MoE thresholds
+    "LLAMA_",     # llama.cpp runtime switches
+    "SYCL_",      # SYCL runtime selection and caching
+    "ZE_",        # Level Zero (device visibility, affinity)
+    "ZES_",       # Level Zero sysman
+    "UR_",        # unified runtime adapter selection
+    "ONEAPI_",    # oneAPI device selector and roots
+)
+_IDENTITY_ENV_VARS = (
+    "LD_LIBRARY_PATH",       # selects which runtime libraries actually load
+    "CUDA_VISIBLE_DEVICES",
+    "HIP_VISIBLE_DEVICES",
+)
+
+
+def identity_environment(env: dict[str, str]) -> dict[str, str]:
+    """The normalized behavior-affecting subset of a launch environment.
+
+    This is the whitelist that goes into environment and command
+    fingerprints. Empty values are dropped: "unset" and "set to nothing"
+    must not produce two identities."""
+    out = {}
+    for k, v in env.items():
+        if not v:
+            continue
+        if k in _IDENTITY_ENV_VARS or k.startswith(_IDENTITY_ENV_PREFIXES):
+            out[k] = v
+    return dict(sorted(out.items()))
 
 
 def _env_fingerprint(env: dict[str, str]) -> str:
@@ -196,21 +244,24 @@ def resolve_backend(profile: dict, binary_override: str | None = None) -> Resolv
     env.update(overrides)
 
     binary_fp = modelctl_vram.file_fingerprint(binary)
-    # Fingerprint only the profile-declared environment, not the whole
-    # process env: unrelated shell changes (SSH vars, locale) must not
-    # mass-stale observations keyed to this fingerprint.
-    profile_env_vars = {}
-    for entry in profile.get("env") or []:
-        if "=" in entry:
-            k, v = entry.split("=", 1)
-            profile_env_vars[k] = v
-    env_fp = _env_fingerprint(profile_env_vars)
+    # Fingerprint the behavior-affecting subset of the EFFECTIVE
+    # environment -- profile-declared vars plus ambient whitelisted ones
+    # (offload thresholds, device visibility, library paths). It used to
+    # hash only profile-declared vars, so an ambient
+    # GGML_OP_OFFLOAD_MOE_MIN_BATCH changed runtime behavior without
+    # changing identity and measurements taken under it were offered as
+    # evidence for launches without it. Unrelated shell noise (SSH vars,
+    # locale) stays excluded by the whitelist.
+    env_fp = _env_fingerprint(identity_environment(env))
 
     # Probe capabilities.  Only llama-cpp binaries speak
     # --modelctl-capabilities; other backends get an empty (fail-closed)
-    # capability set.
+    # capability set.  The probe runs under the same environment the
+    # launch will use -- a SYCL binary probed under a different oneAPI
+    # environment than it launches with can report different devices, or
+    # nothing at all.
     if backend_name == "llama-cpp":
-        caps = modelctl_capabilities.probe_backend(binary)
+        caps = modelctl_capabilities.probe_backend(binary, env=env)
     else:
         caps = {"schema": 0, "backend": backend_name, "build": "",
                 "features": {}, "cli": {}, "_probe_status": "unsupported"}
@@ -279,12 +330,24 @@ def build_launch_command(
     adapter = get_backend(backend.name)
     argv = tuple(adapter.build_command(profile, plan, port, binary=backend.binary))
 
-    cmd_fp = _command_fingerprint(argv, backend.environment_fingerprint,
-                                  backend.binary_fingerprint)
+    # The final launch environment, assembled HERE and nowhere else:
+    # backend resolution already applied os.environ + preflight overrides;
+    # plan-specific env goes on top, then the library path is repaired in
+    # case a plan var clobbered the LD_LIBRARY_PATH preflight built.
+    # Workers and plan tests used to re-apply plan.env themselves after
+    # this object existed, which meant the previewed environment, the
+    # probed environment, and the launched one could all differ.
+    env = dict(backend.environment)
+    env.update(getattr(plan, "env", None) or {})
+    if backend.name == "llama-cpp" and backend.binary:
+        modelctl.ensure_binary_ld_library_path(env, backend.binary)
+
+    env_fp = _env_fingerprint(identity_environment(env))
+    cmd_fp = _command_fingerprint(argv, env_fp, backend.binary_fingerprint)
 
     return LaunchCommand(
         argv=argv,
-        environment=backend.environment,
+        environment=env,
         backend=backend,
         profile_name=profile.get("name", ""),
         plan_id=plan.id if hasattr(plan, "id") else "",
@@ -292,6 +355,7 @@ def build_launch_command(
         warnings=tuple(warnings),
         validation=tuple(validation),
         command_fingerprint=cmd_fp,
+        environment_fingerprint=env_fp,
     )
 
 

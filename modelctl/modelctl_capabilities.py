@@ -91,12 +91,18 @@ def _run_probe(binary_path: str, extra_env: dict | None) -> dict | None:
         return None
 
 
-def _probe_raw(binary_path: str) -> dict | None:
+def _probe_raw(binary_path: str, env: dict | None = None) -> dict | None:
     """Run --modelctl-capabilities and parse JSON, or None on failure.
 
-    SYCL builds initialize the backend registry (and thus the GPU driver)
-    even for the probe, so they crash without their oneAPI env. Retry with
-    the env scripts the launch path uses before giving up."""
+    Tries the caller-supplied launch environment first (the one the binary
+    will really run under), then the bare process env. SYCL builds
+    initialize the backend registry (and thus the GPU driver) even for the
+    probe, so they crash without their oneAPI env. Retry with the env
+    scripts the launch path uses before giving up."""
+    if env is not None:
+        raw = _run_probe(binary_path, env)
+        if raw is not None:
+            return raw
     raw = _run_probe(binary_path, None)
     if raw is not None:
         return raw
@@ -336,9 +342,16 @@ def _write_cache(binary_path: str, caps: dict):
         pass
 
 
-def probe_backend(binary_path: str) -> dict:
+def probe_backend(binary_path: str, env: dict | None = None) -> dict:
     """Probe a binary for backend capabilities.  Returns a normalized dict
     with schema 2 representation.
+
+    `env` is the environment the binary will actually launch under
+    (resolve_backend passes its resolved one). Probing under a different
+    environment than the launch is how a SYCL build reports the wrong
+    devices -- or fails to start at all -- while the real launch behaves
+    differently. Capabilities are compiled into the binary, so the cache
+    stays keyed by binary content alone.
 
     _probe_status is one of:
       "ok"         — binary responded with valid JSON
@@ -362,7 +375,7 @@ def probe_backend(binary_path: str) -> dict:
         return cached
 
     # Live probe.
-    raw = _probe_raw(binary_path)
+    raw = _probe_raw(binary_path, env=env)
     if raw is not None:
         raw.setdefault("schema", 1)
         raw.setdefault("backend", "unknown")
