@@ -1,11 +1,11 @@
 {
-  "generated_at": "2026-07-31T12:00:00-04:00",
-  "validated_modelctl_commit": "553fdb4",
-  "validated_llama_commit": "b9ce49c29c49190f6be882a436668eb0075c2624",
+  "generated_at": "2026-07-31T15:30:00-04:00",
+  "validated_modelctl_commit": "8457297",
+  "validated_llama_commit": "f6c0f56742e70b8ac5adda809843ad65c46825fa",
   "upstream_base": "9b2a08881",
   "validation_report": "docs/upstream-sync/2026-07-31-promotion-report-2.md",
-  "modelctl_commit": "553fdb4",
-  "llama_cpp_commit": "b9ce49c29c49190f6be882a436668eb0075c2624",
+  "modelctl_commit": "8457297",
+  "llama_cpp_commit": "f6c0f56742e70b8ac5adda809843ad65c46825fa",
   "llama_cpp_upstream_base": "9b2a08881",
   "llama_cpp_pre_sync_tag": "moe-cache-pre-upstream-2026-07-30",
   "llama_cpp_pre_sync_commit": "e7af6cf1996cb3d850963213b043d876ffe959ea",
@@ -16,10 +16,10 @@
     "moe_cache_metrics",
     "moe_cache_prefill_policy",
     "moe_cache_reset",
-    "moe_offload_threshold_control"
+    "moe_offload_threshold_control",
+    "moe_hybrid_cpu_miss"
   ],
   "unsupported_runtime_features": [
-    "moe_hybrid_cpu_miss",
     "moe_cache_prefetch"
   ],
   "release_channel": "experimental",

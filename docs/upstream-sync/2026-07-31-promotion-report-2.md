@@ -1,9 +1,12 @@
-# Runtime promotion report — 2026-07-31 (second, same day)
+# Runtime promotion report — 2026-07-31 (second and third, same day)
 
 Promotes `feature/sycl-moe-expert-cache@b9ce49c29` into the umbrella
 repository, replacing the pin at `724f705c1`. Driven by the local-first
 re-review (`modelctl/docs/modelctl-re-review-2026-07-31-local-first.md`),
 P1.4–6 and P2 (G3).
+
+**Addendum (same day): promotion 3 at `f6c0f5674` — hybrid execution.**
+See "Promotion 3" at the end of this report.
 
 ## What is being promoted
 
@@ -89,3 +92,51 @@ Also repaired: `llama-sycl-env.sh` exported the dead old build path into
 PATH, and the home-directory agent rules still named the old location;
 both now point at the moe-serving tree. `build-sycl-int` (the validation
 scratch build of the same commit) is redundant and can be deleted.
+
+---
+
+## Promotion 3 (same day): true hybrid GPU-hit/CPU-miss execution
+
+Promotes `f6c0f5674` (Tasks G4/G5 wired) on top of `b9ce49c29`.
+
+### What it is
+
+Under `--moe-hybrid-mode on`, a miss the cache declines to admit is
+never transferred to the device: the scheduler hook records it in a
+per-staged-tensor plan and `ggml_sycl_mul_mat_id` computes those
+experts' rows on CPU over the original host/mmap weights (threaded,
+ggml's own dequantizers), concurrently with the queued GPU rows, merging
+through the same in-order queue. Fused kernels stay off while a plan is
+pending. `/metrics` gains `moe_hybrid_*` counters.
+
+### Correctness gates (all token-identical, zero device loss)
+
+| condition | result |
+|---|---|
+| tiny-MoE, 6 distinct prompts × 16 tokens, hybrid vs cache-off | identical (programmatic diff) |
+| all-CPU-tier stress (admission 100: 5,577 CPU rows, 206 skips) | identical |
+| threaded CPU tier vs sequential | bit-identical (unit + fixture) |
+| main + draft two-context + hybrid | identical, clean exit |
+| **Qwen3.5-122B-A10B IQ1_M**, 24-token greedy, hybrid vs cache-only | identical; learned geometry 3×811008 B, 1765 slots |
+
+### Performance verdict (the honest number)
+
+Decode on the 122B IQ1_M target (`-ot exps=CPU`, threshold=1, 4 GiB
+cache, admission 2, 96 tokens):
+
+| condition | decode t/s |
+|---|---|
+| cache, GPU misses (B) | **4.33** |
+| hybrid, CPU misses, single-thread tier | 1.91 |
+| hybrid, CPU misses, threaded tier (C) | 2.46 |
+
+Hybrid avoided 35.9 GB of expert H2D transfer and still lost: IQ1_M
+dequantization on CPU costs more than the PCIe transfer it replaces at
+this miss rate. The design doc's §2 warning ("judge G against the
+op-aware threshold baseline") held. Consequently `moe_hybrid_cpu_miss`
+reports **implemented** (it is), the feature is **opt-in** and the
+control plane's experimental-margin guardrail will not auto-select it
+against these numbers. The acceptance matrix gained a `hybrid-cpu-miss`
+cell so the comparison reruns in one command; the likeliest change to
+flip the verdict is a vec_dot-grade CPU tier (needs a cross-backend
+path to ggml-cpu's kernels).
