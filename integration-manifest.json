@@ -1,11 +1,11 @@
 {
-  "generated_at": "2026-07-31T15:30:00-04:00",
-  "validated_modelctl_commit": "8457297",
-  "validated_llama_commit": "f6c0f56742e70b8ac5adda809843ad65c46825fa",
+  "generated_at": "2026-07-31T14:23:24-04:00",
+  "validated_modelctl_commit": "1bf57c7",
+  "validated_llama_commit": "b05cc90dd46dd7b84a91132ea536c662ce7523d5",
   "upstream_base": "9b2a08881",
   "validation_report": "docs/upstream-sync/2026-07-31-promotion-report-2.md",
-  "modelctl_commit": "8457297",
-  "llama_cpp_commit": "f6c0f56742e70b8ac5adda809843ad65c46825fa",
+  "modelctl_commit": "1bf57c7",
+  "llama_cpp_commit": "b05cc90dd46dd7b84a91132ea536c662ce7523d5",
   "llama_cpp_upstream_base": "9b2a08881",
   "llama_cpp_pre_sync_tag": "moe-cache-pre-upstream-2026-07-30",
   "llama_cpp_pre_sync_commit": "e7af6cf1996cb3d850963213b043d876ffe959ea",
@@ -25,5 +25,5 @@
   "release_channel": "experimental",
   "acceptance_report": "docs/upstream-sync/2026-07-31-promotion-report.md",
   "field_notes": "validated_* names the last modelctl+llama.cpp pair that passed hardware acceptance together -- the rollback target. The legacy modelctl_commit/llama_cpp_commit/llama_cpp_upstream_base/acceptance_report keys are the same values under their old ambiguous names, kept for ci/checks.sh and older readers.",
-  "notes": "Second same-day promotion: real build provenance (fixes the dynamic_backends and empty-commit limitations of the morning pin), learned cache geometry (fused/unequal projections), per-projection tensor-origin identity for multi-model device sharing, explicit device-queue ownership, and the G3 CPU-miss executor (host-tested, not yet wired -- moe_hybrid_cpu_miss still reports false, truthfully). Validated on this machine: token-identical greedy output across cache off/on/reset/distinct-prompt and main+draft two-context conditions on the tiny-moe fixture; learned geometry confirmed in the server log; no device loss. See the validation report for the full gate table."
+  "notes": "Comments-only promotion: the delta from the previous validated pair (8457297 + f6c0f5674) is documentation and code comments in both repos -- no executable change. Hardware-acceptance evidence from that pair carries forward. Verified for this pin: test-moe-cache and test-moe-hybrid pass, llama-server rebuilds clean, the capability probe output is unchanged, and the modelctl suite is green (969 tests, 11 skipped)."
 }
