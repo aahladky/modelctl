@@ -459,7 +459,12 @@ def is_sycl_cache_capable(caps: dict) -> bool:
 def supports_hybrid_miss(caps: dict) -> bool:
     """True if cache misses can execute on CPU without blocking GPU.
 
-    Always false until Phase 7 implements true hybrid execution.
+    Implemented by the fork's Tasks G4/G5 (2026-07-31): declined misses
+    skip staging entirely and their rows run on CPU inside mul_mat_id,
+    token-identical to the non-hybrid path. Measured SLOWER than the
+    plain transfer cache on the 122B IQ1_M target (2.5 vs 4.3 t/s), so
+    it stays opt-in; the experimental-margin guardrail keeps it from
+    outranking measured baselines automatically.
     """
     return bool(caps.get("features", {}).get("moe_hybrid_cpu_miss"))
 

@@ -57,6 +57,10 @@ class MatrixCell:
     # baseline and reports a difference of zero, which reads as a genuine
     # "no effect" result rather than as a variable the runtime ignored.
     needs_moe_offload_control: bool = False
+    # The runtime must implement hybrid GPU-hit/CPU-miss execution
+    # (moe_hybrid_cpu_miss). A cell asking for decode.miss_execution=cpu
+    # against a runtime without it silently measures the plain cache.
+    needs_hybrid_cpu_miss: bool = False
     min_free_vram_bytes: int = 0
     min_free_ram_bytes: int = 0
     concurrent_requests: int = 1
@@ -213,6 +217,19 @@ CELLS = (
         config={"device": "SYCL0", "mtp": "on", "extra": "", "fit": "off"},
         moe_cache={"mode": "off"},
         min_gpus=1, needs_draft_model=True, heavy=True),
+    MatrixCell(
+        name="hybrid-cpu-miss",
+        description="Hybrid execution: cache misses computed on CPU over "
+                    "host weights instead of transferred (compare against "
+                    "offload-D-moe-1, the same cache with GPU misses)",
+        config=_SWEEP_CONFIG,
+        moe_cache={**_SWEEP_CACHE,
+                   "decode": {"admit_to_gpu_cache": True,
+                              "miss_execution": "cpu"}},
+        env=("GGML_OP_OFFLOAD_MOE_MIN_BATCH=1",),
+        min_gpus=1, needs_cache_capable=True, needs_moe_model=True,
+        needs_moe_offload_control=True, needs_hybrid_cpu_miss=True,
+        heavy=True),
 )
 
 
@@ -248,6 +265,14 @@ def _precondition_failure(cell, snapshot, caps, profile, include_heavy):
             if not modelctl_capabilities.has_moe_offload_threshold_control(caps or {}):
                 return ("runtime has no MoE-specific offload threshold; "
                         "GGML_OP_OFFLOAD_MOE_MIN_BATCH would be ignored")
+        except Exception:
+            return "capability probe unavailable"
+    if cell.needs_hybrid_cpu_miss:
+        try:
+            import modelctl_capabilities
+            if not modelctl_capabilities.supports_hybrid_miss(caps or {}):
+                return ("runtime does not report moe_hybrid_cpu_miss; the "
+                        "cell would silently measure the plain cache")
         except Exception:
             return "capability probe unavailable"
     if cell.needs_moe_model:

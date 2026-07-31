@@ -199,16 +199,45 @@ quantized (Q8_0 / Q4_K / Q6_K) comparison against an independent
 dequantize-and-dot reference and an end-to-end
 partition→execute→weighted-merge check.
 
-**Not delivered:** G4 (GPU hit dispatch from cache slots inside
-`ggml_sycl_mul_mat_id`), G5 (the in-op merge on device), G6 (async
-promotion + the full metrics wiring; `moe_hybrid_metrics` exists, nothing
-fills it), G7 (control-plane integration). These are the pieces that
-cannot be validated without the Arc GPUs: they restructure how the
-scheduler stages experts (a miss expert must NOT be staged — that is the
-entire saving) and how the op consumes them, and per the re-review's own
-rules that work must not be declared from plausible code. Wire them in
-G4→G5→G6→G7 order on the integration branch, validating each against
-§3.9's token-identical oracle before the next.
+**Delivered (G4/G5/G7, 2026-07-31, same-day continuation):** true hybrid
+execution, wired and hardware-validated. Under `--moe-hybrid-mode on`, a
+miss the cache declines to admit is **never staged to the device** — the
+scheduler hook records it in a per-staged-tensor plan (keyed by the
+`input_cpy` device base, which two models cannot collide on) and copies
+only the 512-byte MMQ padding head. `ggml_sycl_mul_mat_id` takes the
+plan exactly once, keeps fused kernels off while one is pending, queues
+the GPU rows asynchronously, computes the skipped experts' rows on CPU
+(threaded `moe_cpu_execute_gemvs`, contiguous chunks, bit-identical to
+sequential) **while the GPU works**, and lands the results through the
+same in-order queue. Both the batch-1 and the batched-prompt branch are
+covered; metrics (`moe_hybrid_*` in `/metrics`) record cpu/gpu rows,
+avoided H2D bytes, staging skips, and CPU/merge time. Note one deviation
+from §3.2/§3.6: because `MUL_MAT_ID` output rows are per-(token,expert)
+and the graph applies routing weights downstream, the in-op merge is a
+disjoint-row scatter — the weighted-sum merge machinery remains for any
+future merge at the fused-MoE level.
 
-`moe_hybrid_cpu_miss` stays `false` until G3–G5 exist and pass §3.9. The
-capability must never lead the implementation.
+**§3.9 oracle results:** token-identical to the non-hybrid reference on
+the tiny-MoE fixture (6 distinct prompts × 16 tokens, including an
+all-CPU-tier stress with 5,577 CPU rows and a main+draft two-context
+run) AND on the real target (Qwen3.5-122B-A10B IQ1_M, 24-token greedy,
+identical to the cache-only condition). Zero device loss.
+
+**Performance verdict (2026-07-31, this machine):** hybrid **loses** to
+the plain transfer cache on the current target and placement — 2.46 vs
+4.33 t/s decode (96 tokens, threshold=1, 4 GiB cache, admission 2),
+despite avoiding 35.9 GB of expert H2D transfer. The threaded CPU tier
+(ggml-base dequant + dot) moved it from 1.91 to 2.46 t/s but IQ1_M
+dequantization cost still exceeds the PCIe transfer it replaces at this
+miss rate. §2's warning held. Consequence: `moe_hybrid_cpu_miss` now
+truthfully reports **implemented**, the feature stays **opt-in and
+never auto-selected** (the H2 experimental-margin guardrail sees the
+measured loss), and the acceptance matrix gained a `hybrid-cpu-miss`
+cell so the comparison reruns in one command when anything changes.
+
+**Not delivered / future:** G6's full asynchrony (promotions are already
+queue-async and never block the miss path, but promotion-delay and
+eviction-before-reuse counters are not recorded); a vec_dot-grade CPU
+tier (reaching ggml-cpu's optimized kernels from the SYCL backend needs
+a cross-backend interface — the single change most likely to flip the
+verdict); per-projection (rather than per-expert) skip decisions.
