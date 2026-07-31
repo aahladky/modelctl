@@ -98,7 +98,10 @@ class TestResolveBackend(unittest.TestCase):
     def test_stock_binary_returns_unsupported(self):
         with TemporaryDirectory() as d:
             script = Path(d) / "fake-server"
-            script.write_text("#!/bin/sh\nexit 1\n")
+            # Coherent rejection (message + exit 1): a silent exit 1 is
+            # now "error" (transient, uncached), not "unsupported".
+            script.write_text(
+                '#!/bin/sh\necho "error: invalid argument: $1" >&2\nexit 1\n')
             script.chmod(0o755)
             profile = {"backend": "llama-cpp", "binary": str(script),
                       "model_path": str(Path(d) / "model.gguf")}

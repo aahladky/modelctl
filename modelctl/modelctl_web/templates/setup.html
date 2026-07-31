@@ -37,6 +37,12 @@
     </tr>
     {% endfor %}
   </table>
+  <form method="post" action="/setup/reprobe" style="margin-top:0.5rem">
+    <button type="submit">re-probe capabilities</button>
+    <span class="muted">drops every cached capability verdict and probes
+    the binary fresh -- use after a rebuild, driver change, or a probe
+    that failed under load</span>
+  </form>
 </div>
 
 <h2>this console</h2>

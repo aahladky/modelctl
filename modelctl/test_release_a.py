@@ -86,7 +86,11 @@ class TestReleaseACommandIdentity(unittest.TestCase):
     def test_resolve_backend_returns_capabilities(self):
         with TemporaryDirectory() as d:
             script = Path(d) / "fake-server"
-            script.write_text("#!/bin/sh\nexit 1\n")
+            # A coherent stock-binary rejection (message + exit 1). A
+            # silent exit 1 now classifies "error" (transient, uncached)
+            # -- see test_capability_cache_truth.py.
+            script.write_text(
+                '#!/bin/sh\necho "error: invalid argument: $1" >&2\nexit 1\n')
             script.chmod(0o755)
             with mock.patch("modelctl_launch.modelctl.find_env_script_candidates",
                            return_value=[]):

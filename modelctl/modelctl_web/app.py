@@ -253,6 +253,16 @@ def create_app(token=None, store=None, runner=None):
 
     # ---- dashboard ------------------------------------------------------
     # ---- first run / setup ----------------------------------------------
+    @app.post("/setup/reprobe")
+    def setup_reprobe():
+        # The reprobe escape hatch: drop every cached capability verdict
+        # and let the setup page's live probe rebuild them. Without this,
+        # recovering from a poisoned entry meant hand-deleting files in
+        # the state dir (documented nowhere).
+        import modelctl_capabilities
+        modelctl_capabilities.clear_cache()
+        return RedirectResponse("/setup", status_code=303)
+
     @app.get("/setup", response_class=HTMLResponse)
     def setup_page(request: Request):
         import modelctl_setup

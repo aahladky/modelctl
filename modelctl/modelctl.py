@@ -3823,6 +3823,31 @@ def cmd_web(args):
                 log_level="info")
 
 
+
+def cmd_capabilities(args):
+    """Show (and with --reprobe, refresh) a binary's capability verdict.
+
+    The reprobe flag is the recovery path for a poisoned cache entry --
+    a probe that crashed or timed out once (SYCL driver init under load)
+    used to brand the binary featureless until it was rebuilt, with the
+    only fix an undocumented file deletion in the state dir.
+    """
+    import modelctl_capabilities
+    binary = args.binary or LLAMA_SERVER_BIN
+    if args.reprobe:
+        modelctl_capabilities.clear_cache(binary)
+        print(f"dropped cached capability entries for {binary}")
+    caps = modelctl_capabilities.probe_backend(binary)
+    print(json.dumps(caps, indent=2))
+    status = caps.get("_probe_status")
+    if status == "error":
+        print("\nWARNING: the probe itself failed (crash/timeout/garbage "
+              "output). This verdict is NOT cached; fix the environment "
+              "(oneAPI env? driver?) and re-run.", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_doctor(args):
     """Print readiness, the integration manifest, and backend capabilities;
     optionally write a support bundle.
@@ -4378,6 +4403,15 @@ def build_arg_parser():
     p_router_unload = router_sub.add_parser("unload", help="unload a model now to free its GPU memory")
     p_router_unload.add_argument("name")
     p_router_unload.set_defaults(func=cmd_router_unload)
+
+    p_caps = sub.add_parser(
+        "capabilities",
+        help="probe the llama-server binary's fork capabilities (--reprobe drops cached verdicts first)")
+    p_caps.add_argument("binary", nargs="?",
+                        help="binary path (default: the resolved llama-server)")
+    p_caps.add_argument("--reprobe", action="store_true",
+                        help="drop this binary's cached verdicts (all env variants) and probe fresh")
+    p_caps.set_defaults(func=cmd_capabilities)
 
     return parser
 
