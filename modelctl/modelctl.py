@@ -3747,6 +3747,38 @@ def web_console_url(bind=None):
     return f"http://{host}:{port}/"
 
 
+def web_exposure(bind=None):
+    """What the configured bind address actually exposes, in plain terms.
+
+    This is a trusted-user local control plane that can launch processes
+    and change runtime configuration, so the operator should always be
+    able to see whether it listens on loopback only or on the LAN.
+    LAN binding is a legitimate personal default here; exposure to an
+    untrusted network is unsupported.
+    """
+    bind = bind or os.environ.get("MODELCTL_WEB_BIND", "0.0.0.0:9293")
+    host, _, port = bind.rpartition(":")
+    host = host or "0.0.0.0"
+    port = port or "9293"
+    loopback = host in ("127.0.0.1", "localhost", "::1", "[::1]")
+    mode = "loopback-only" if loopback else "LAN-accessible"
+    warning = ""
+    if not loopback:
+        warning = ("the console is reachable from the network on plain HTTP "
+                   "(the token is sent unencrypted); fine on a trusted home "
+                   "LAN, unsupported on untrusted networks. Bind "
+                   "MODELCTL_WEB_BIND=127.0.0.1:9293 for loopback-only.")
+    return {
+        "bind": f"{host}:{port}",
+        "host": host,
+        "port": port,
+        "mode": mode,
+        "scheme": "http",
+        "url": web_console_url(bind),
+        "warning": warning,
+    }
+
+
 def web_token():
     """The console's bearer token, creating one if this is a first run."""
     from modelctl_web.app import load_or_create_token
@@ -3760,7 +3792,11 @@ def cmd_web(args):
     from modelctl_web.app import app
     bind = os.environ.get("MODELCTL_WEB_BIND", "0.0.0.0:9293")
     host, _, port = bind.rpartition(":")
-    print(f"modelctl-web on {web_console_url(bind)}")
+    exposure = web_exposure(bind)
+    print(f"modelctl-web on {exposure['url']} ({exposure['mode']}, "
+          f"bound to {exposure['bind']})")
+    if exposure["warning"]:
+        print(f"note: {exposure['warning']}")
     print(f"token: {web_token()}")
     uvicorn.run(app, host=host or "0.0.0.0", port=int(port or 9293),
                 log_level="info")
@@ -3823,7 +3859,11 @@ def cmd_doctor(args):
 
 def cmd_web_url(args):
     """Print where the console is and how to authenticate to it."""
-    print(web_console_url())
+    exposure = web_exposure()
+    print(exposure["url"])
+    print(f"mode: {exposure['mode']} (bound to {exposure['bind']})")
+    if exposure["warning"]:
+        print(f"note: {exposure['warning']}")
     print(f"token: {web_token()}")
     return 0
 

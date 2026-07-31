@@ -256,6 +256,30 @@ def _check_runtime_env() -> SetupCheck:
         fix_url="/settings")
 
 
+def _check_network_exposure() -> SetupCheck:
+    """The console can launch processes and rewrite runtime config, so its
+    reach must always be visible: loopback-only or LAN-accessible, and on
+    what address. LAN over plain HTTP is an acceptable personal default on
+    a trusted home network; exposure to untrusted networks is unsupported
+    (roadmap: local-first re-review, P1)."""
+    exposure = modelctl.web_exposure()
+    if exposure["mode"] == "loopback-only":
+        return SetupCheck(
+            id="network_exposure", title="network exposure", severity="ok",
+            detail=f"loopback-only on {exposure['bind']} -- reachable from "
+                   "this machine only")
+    return SetupCheck(
+        id="network_exposure", title="network exposure", severity="warning",
+        detail=f"LAN-accessible on {exposure['bind']} ({exposure['url']}), "
+               "plain HTTP with token auth",
+        fix="Fine on a trusted home LAN; the token travels unencrypted, so "
+            "untrusted-network exposure is unsupported. For loopback-only, "
+            "set MODELCTL_WEB_BIND=127.0.0.1:9293 in the service "
+            "environment.",
+        fix_command="systemctl --user edit modelctl-web  "
+                    "# add Environment=MODELCTL_WEB_BIND=127.0.0.1:9293")
+
+
 def probe_setup(probe_backend: bool = False) -> SetupStatus:
     """Run every readiness check.
 
@@ -271,4 +295,5 @@ def probe_setup(probe_backend: bool = False) -> SetupStatus:
         _check_hardware(),
         _check_llama_swap(),
         _check_runtime_env(),
+        _check_network_exposure(),
     ))

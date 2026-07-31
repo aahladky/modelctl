@@ -1,5 +1,6 @@
 """Task C1: first-run readiness, and the setup page built on it."""
 import json
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -214,6 +215,58 @@ class TestWebEntryPointCommands(unittest.TestCase):
                  mock.patch("builtins.print"):
                 rc = modelctl.cmd_web_install(mock.Mock(bind=None))
         self.assertEqual(rc, 1)
+
+
+class TestNetworkExposure(unittest.TestCase):
+    """P1: the console's reach is always visible -- loopback vs LAN, on
+    which address, with the plain-HTTP caveat stated where the user looks."""
+
+    def test_default_bind_is_lan_accessible_and_says_so(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MODELCTL_WEB_BIND", None)
+            exp = modelctl.web_exposure()
+        self.assertEqual(exp["mode"], "LAN-accessible")
+        self.assertEqual(exp["bind"], "0.0.0.0:9293")
+        self.assertIn("plain HTTP", exp["warning"])
+        self.assertIn("unsupported", exp["warning"])
+
+    def test_loopback_bind_reports_loopback_and_no_warning(self):
+        exp = modelctl.web_exposure("127.0.0.1:9293")
+        self.assertEqual(exp["mode"], "loopback-only")
+        self.assertEqual(exp["warning"], "")
+
+    def test_setup_check_warns_on_lan_exposure(self):
+        import modelctl_setup
+        with mock.patch.dict(os.environ,
+                             {"MODELCTL_WEB_BIND": "0.0.0.0:9293"}):
+            check = modelctl_setup._check_network_exposure()
+        self.assertEqual(check.severity, "warning")
+        self.assertIn("LAN-accessible", check.detail)
+        self.assertIn("0.0.0.0:9293", check.detail)
+        self.assertIn("unsupported", check.fix)
+        self.assertIn("127.0.0.1:9293", check.fix_command)
+
+    def test_setup_check_ok_on_loopback(self):
+        import modelctl_setup
+        with mock.patch.dict(os.environ,
+                             {"MODELCTL_WEB_BIND": "127.0.0.1:9293"}):
+            check = modelctl_setup._check_network_exposure()
+        self.assertEqual(check.severity, "ok")
+        self.assertIn("loopback-only", check.detail)
+
+    def test_exposure_check_is_part_of_setup_probe(self):
+        import modelctl_setup
+        status = modelctl_setup.probe_setup()
+        self.assertIn("network_exposure", [c.id for c in status.checks])
+
+    def test_lan_exposure_never_blocks_the_workflow(self):
+        # A warning, not an error: LAN binding is the intended personal
+        # default, and it must not flip the setup page to "not ready".
+        import modelctl_setup
+        with mock.patch.dict(os.environ,
+                             {"MODELCTL_WEB_BIND": "0.0.0.0:9293"}):
+            check = modelctl_setup._check_network_exposure()
+        self.assertNotEqual(check.severity, "error")
 
 
 if __name__ == "__main__":

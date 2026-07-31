@@ -219,10 +219,14 @@ live in `docs/superpowers/specs/` (design docs) and
 
 ## Web console (`modelctl web` / modelctl-web.service)
 
-A FastAPI + HTMX console on `:9293` for the cases the CLI's auto-config
-doesn't cover. The CLI remains the primary path; the UI is for visibility
-and edge-case overrides.
+A FastAPI + HTMX console on `:9293`. The browser is the primary
+management interface; the CLI remains fully supported for bootstrap,
+automation, diagnostics, and recovery.
 
+- **Add model (`/add`)**: THE acquisition workflow — HF search or local
+  file, verification, quant inspection, download, analysis, plan
+  selection, measured testing, registration. The old pull/import pages
+  redirect into it pre-populated.
 - **Dashboard**: all profiles with live state (llama-swap loaded/registered),
   per-GPU VRAM and RAM gauges.
 - **Profile edit**: every config field (device, split, ctx, KV types, fit,
@@ -230,15 +234,27 @@ and edge-case overrides.
   regenerate artifacts and re-sync.
 - **Tier planner**: the `place --tiers` dry-run rendered per profile (layout
   table, warnings, config diff) with one-click apply.
-- **Pull wizard**: HF search → quant table with the auto recommendation →
-  background download job with progress → auto-config profile.
 - **Benchmarks**: speed.py runs as jobs with persistent history.
 - **Jobs**: everything long-running is a serialized background job (SQLite at
   `~/.local/share/modelctl/web_jobs.db`) — all mutations flow through a
   single writer, since profiles and the llama-swap config are plain files.
 
-Auth: one shared token (Bearer header, `?token=`, or login cookie). Stored at
-`~/.local/share/modelctl/web_token` (created on first start, override with
-`MODELCTL_WEB_TOKEN`). Binds `MODELCTL_WEB_BIND` (default `0.0.0.0:9293`).
+Auth: one shared token (Bearer header or login cookie; tokens in URLs are
+rejected). Stored at `~/.local/share/modelctl/web_token` (created on first
+start, override with `MODELCTL_WEB_TOKEN`).
+
+### Network exposure
+
+Binds `MODELCTL_WEB_BIND` (default `0.0.0.0:9293`, i.e. LAN-accessible).
+This is a trusted-user control plane that can launch processes and change
+runtime configuration, so its reach is always shown explicitly: `modelctl
+web`, `modelctl web url`, and the `/setup` page all report whether the
+console is loopback-only or LAN-accessible and on which address. LAN
+access uses plain HTTP — the token travels unencrypted — which is an
+acceptable personal default on a trusted home LAN. **Exposure to
+untrusted networks is unsupported**; there is deliberately no
+multi-user/permissions system. For loopback-only operation set
+`MODELCTL_WEB_BIND=127.0.0.1:9293`.
+
 Run in the foreground with `modelctl web`, or as a service:
 `systemctl --user enable --now modelctl-web`.
