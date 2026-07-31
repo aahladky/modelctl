@@ -382,7 +382,9 @@ class TestConfigureScreen(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 await pilot.click("#submit-config")
                 await pilot.pause()
-                self.assertEqual(app.state.config["ctx"], "32768")
+                # int, not "32768": the screen coerces its text inputs,
+                # so an emptied field can't render `-c ''` into run.sh.
+                self.assertEqual(app.state.config["ctx"], 32768)
                 self.assertEqual(app.state.config["cache_type_k"], "q8_0")
                 self.assertEqual(app.state.config["cache_type_v"], "q8_0")
                 self.assertNotIn("kv_quant", app.state.config)

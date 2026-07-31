@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% block title %}runtime - modelctl{% endblock %}
 {% block content %}
+{% if reset_error %}<p class="err">cache reset failed -- {{ reset_error }}</p>{% endif %}
+{% if reset_ok %}<p class="muted">cache reset on {{ reset_ok }}</p>{% endif %}
 <h1>runtime</h1>
 {% if not runtime %}
 <div class="card"><span class="warn">llama-swap unreachable or no models registered</span></div>

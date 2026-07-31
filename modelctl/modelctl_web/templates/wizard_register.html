@@ -34,13 +34,32 @@
 <div class="card">
   <p>This will register <strong>{{ profile.name }}</strong> with llama-swap
   and perform a warm-load verification.</p>
+  {% set test_block = w.blocking_reason('test') %}
+  {% if test_block %}
+  <p class="err">The test step did not pass: {{ test_block }}.</p>
+  <p class="muted">Registering now records a plan whose test never
+  succeeded. Prefer re-running the test.</p>
+  {% endif %}
 </div>
 
+{% if w.errors %}
+<p class="err">{{ w.errors[-1].message }}</p>
+{% endif %}
+
+{% if w.blocking_reason('test') %}
+<div class="actions">
+  <a href="/add/{{ w.wizard_id }}/test" class="btn btn-primary">Back to the test</a>
+  <form method="post" action="/add/{{ w.wizard_id }}/register?register_untested=1">
+    <button type="submit" class="btn">Register untested anyway</button>
+  </form>
+</div>
+{% else %}
 <form method="post" action="/add/{{ w.wizard_id }}/register">
   <div class="actions">
-    <button type="submit" class="btn btn-primary">Register & Verify</button>
+    <button type="submit" class="btn btn-primary">Register &amp; Verify</button>
   </div>
 </form>
+{% endif %}
 {% endif %}
 {% else %}
 <p class="error">Profile not found.</p>

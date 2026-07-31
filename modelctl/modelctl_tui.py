@@ -23,6 +23,19 @@ STEP_ORDER = ["search", "quant", "vision_mtp", "configure", "name", "download", 
 SKIP_LABEL = "(skip)"
 
 
+def _int_or(value, default):
+    """Coerce a form field to int, falling back to `default`.
+
+    The wizard's ctx/ttl inputs are text; storing them as strings put
+    `-c ''` into the generated run.sh when a field was cleared, and left
+    every consumer doing int() on a value that might be "".
+    """
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass
 class WizardState:
     """Carried through wizard screens via constructor args. Mirrors the
@@ -313,11 +326,11 @@ class ConfigureScreen(Screen):
             "device": self.query_one("#config-device", Input).value,
             "split_mode": self.query_one("#config-split-mode", Input).value,
             "tensor_split": self.query_one("#config-tensor-split", Input).value,
-            "ctx": self.query_one("#config-ctx", Input).value,
+            "ctx": _int_or(self.query_one("#config-ctx", Input).value, 8192),
             "cache_type_k": self.query_one("#config-cache-type-k", Input).value,
             "cache_type_v": self.query_one("#config-cache-type-v", Input).value,
             "flash_attn": self.query_one("#config-flash-attn", Input).value,
-            "ttl": self.query_one("#config-ttl", Input).value,
+            "ttl": _int_or(self.query_one("#config-ttl", Input).value, 3600),
             "mtp": self.query_one("#config-mtp", Input).value,
             "extra": self.query_one("#config-extra", Input).value,
         }

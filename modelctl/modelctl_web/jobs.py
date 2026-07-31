@@ -187,6 +187,17 @@ class JobContext:
         self._cancel.set()
 
     def register_process(self, proc):
+        # Record the child's process group so cancellation can signal the
+        # whole group. Callers start these with preexec_fn=os.setpgrp, but
+        # nothing set .pgid, so _terminate_process silently fell back to
+        # terminating the direct child only -- a cancelled benchmark left
+        # its llama-server running, contradicting this module's own
+        # "real SIGTERM/SIGKILL cancellation via process groups".
+        if not hasattr(proc, "pgid") and hasattr(os, "getpgid"):
+            try:
+                proc.pgid = os.getpgid(proc.pid)
+            except (OSError, AttributeError):
+                pass
         with self._lock:
             self._processes.append(proc)
 

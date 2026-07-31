@@ -58,6 +58,10 @@ else:
         style = "|" if "\n" in data else None
         return dumper.represent_scalar("tag:yaml.org,2002:str", data, style=style)
     yaml.add_representer(str, _yaml_str_presenter)
+    # SafeDumper too: llama-swap entries are built as data and written with
+    # safe_dump, and without this their multi-line cmd: would come out as
+    # an escaped one-line flow scalar.
+    yaml.add_representer(str, _yaml_str_presenter, Dumper=yaml.SafeDumper)
 
 import modelctl_fsutil
 import modelctl_paths
@@ -677,6 +681,41 @@ def strip_quant_from_label(label: str) -> str:
     # Remove common bracketed quant forms like [Q4_K_M].
     name = re.sub(r"\s*[\[(](?:Q|F|IQ|BF)[0-9][A-Za-z0-9_]*[\])]\s*$", "", name, flags=re.IGNORECASE)
     return name.strip("-_. ")
+
+
+
+# Profile names become filesystem paths (PROFILES_DIR/<name>.json, the
+# artifacts directory) and llama-swap YAML keys, so they are restricted
+# rather than sanitized at each use: "../defaults" resolved out of the
+# profiles directory and `modelctl remove` deleted the real defaults.json,
+# and a name like "no" or "a: b" produced a config.yaml nobody could parse.
+_PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def validate_profile_name(name):
+    """Return the name if it is safe to use as a path and a YAML key.
+
+    Raises ValueError otherwise. Callers that take names from humans
+    (CLI prompts, the TUI, web forms) must go through this.
+    """
+    name = (name or "").strip()
+    if not _PROFILE_NAME_RE.match(name):
+        raise ValueError(
+            f"invalid profile name {name!r}: use letters, digits, dot, "
+            "underscore or dash, starting with a letter or digit "
+            "(max 64 characters)")
+    return name
+
+
+
+def _prompt_profile_name(prompt, default):
+    """Prompt until the answer is a usable profile name."""
+    while True:
+        raw = input(f"{prompt} [{default}]: ").strip() or default
+        try:
+            return validate_profile_name(raw)
+        except ValueError as e:
+            print(f"  {e}")
 
 
 def next_unique_profile_name(base_name: str) -> str:
@@ -1732,7 +1771,8 @@ def cmd_pull(args):
         # still override.
         clean_label = strip_quant_from_label(g["label"])
         name_default = next_unique_profile_name(slugify(clean_label))
-        name = input(f"Profile name for '{g['label']}' [{name_default}]: ").strip() or name_default
+        name = _prompt_profile_name(
+            f"Profile name for '{g['label']}'", name_default)
 
         config = dict(shared_config)
 
@@ -1880,7 +1920,8 @@ def cmd_ovms_add(args):
     so registering a profile is just recording the config ovms-proxy.py needs."""
     repo_id = args.repo_id
     name_default = next_unique_profile_name(slugify(repo_id.split("/")[-1]))
-    name = input(f"Profile name (this becomes the llama-swap model ID) [{name_default}]: ").strip() or name_default
+    name = _prompt_profile_name(
+        "Profile name (this becomes the llama-swap model ID)", name_default)
 
     dest_dir = OVMS_MODEL_REPOSITORY / repo_id
     if dest_dir.exists() and any(dest_dir.iterdir()):
@@ -2036,7 +2077,8 @@ def cmd_ovms_convert(args):
     were always the same path on disk)."""
     repo_id = args.repo_id
     name_default = next_unique_profile_name(slugify(repo_id.split("/")[-1]))
-    name = input(f"Profile name (this becomes the llama-swap model ID) [{name_default}]: ").strip() or name_default
+    name = _prompt_profile_name(
+        "Profile name (this becomes the llama-swap model ID)", name_default)
 
     task_default, is_vlm_default = detect_default_task(repo_id)
     conv_cfg = prompt_conversion_config(repo_id, task_default, is_vlm_default)
@@ -2082,6 +2124,7 @@ def cmd_ovms_convert(args):
 
 
 def save_profile(profile):
+    validate_profile_name(profile.get("name"))
     with modelctl_fsutil.state_lock():
         PROFILES_DIR.mkdir(parents=True, exist_ok=True)
         path = PROFILES_DIR / f"{profile['name']}.json"
@@ -2132,6 +2175,13 @@ def normalize_profile(profile: dict) -> dict:
 
 
 def load_profile(name):
+    # Validate before building a path: "../defaults" used to resolve out
+    # of the profiles directory, and `modelctl remove` then deleted the
+    # real defaults.json.
+    try:
+        name = validate_profile_name(name)
+    except ValueError:
+        raise modelctl_errors.ProfileNotFoundError(name)
     path = PROFILES_DIR / f"{name}.json"
     if not path.exists():
         raise modelctl_errors.ProfileNotFoundError(name)
@@ -2468,31 +2518,45 @@ def update_runtime_policy(name, runtime, resync=True):
     return profile
 
 
-def _render_worker_entry(profile, ok, effective_env, messages):
-    """Managed-runtime llama-swap entry: launch the modelctl worker, which
-    picks the launch plan at start time. Shared by llama-cpp and OVMS."""
+def _entry_to_yaml(entry):
+    """Serialize one {name: body} llama-swap entry to YAML text.
+
+    Always through the YAML dumper, never string interpolation: a
+    profile's env value or binary path is arbitrary operator input, and
+    pasting one into hand-built YAML either broke every future sync
+    (unparseable file) or -- with a newline and a crafted key -- injected
+    a second `cmd:` for llama-swap to execute.
+    """
+    return yaml.safe_dump(entry, default_flow_style=False, sort_keys=False,
+                          width=10 ** 6)
+
+
+def _worker_entry_body(profile, effective_env):
+    """Managed-runtime llama-swap entry body: launch the modelctl worker,
+    which picks the launch plan at start time. Shared by llama-cpp and OVMS."""
     log_path = PROFILES_DIR / profile["name"] / "llama-swap.log"
     launcher = shutil.which("modelctl") or "modelctl"
-    lines = [
-        f"{profile['name']}:",
-        "  cmd: |",
-        f"    {launcher} _worker {profile['name']} --port ${{PORT}}",
-        f'  logFile: "{log_path}"',
-    ]
+    body = {
+        "cmd": (f"{shlex.quote(launcher)} _worker "
+                f"{shlex.quote(profile['name'])} --port ${{PORT}}"),
+        "logFile": str(log_path),
+    }
     if effective_env:
-        lines.append("  env:")
-        lines.extend(f'    - "{k}={v}"' for k, v in effective_env.items())
+        body["env"] = [f"{k}={v}" for k, v in effective_env.items()]
     # OVMS's proxy answers /v2/health/ready, not /health -- llama-swap's
     # default health check would time out waiting for the wrong endpoint.
     if profile.get("backend") == "ovms":
-        lines.append("  checkEndpoint: /v2/health/ready")
-    lines.append(f"  ttl: {profile['config']['ttl']}")
-    ctx = int(profile['config'].get('ctx', 0))
+        body["checkEndpoint"] = "/v2/health/ready"
+    body["ttl"] = profile["config"]["ttl"]
+    ctx = int(profile["config"].get("ctx", 0))
     if ctx > 0:
-        lines.append("  capabilities:")
-        lines.append(f"    context: {ctx}")
-        lines.append("    tools: true")
-    return "\n".join(lines) + "\n", ok, messages
+        body["capabilities"] = {"context": ctx, "tools": True}
+    return body
+
+
+def _render_worker_entry(profile, ok, effective_env, messages):
+    entry = {profile["name"]: _worker_entry_body(profile, effective_env)}
+    return _entry_to_yaml(entry), ok, messages
 
 
 def render_llama_swap_entry(profile):
@@ -2510,29 +2574,28 @@ def render_llama_swap_entry(profile):
     ok = ok and cmd.is_valid
     effective_bin, args = cmd.argv[0], cmd.argv[1:]
     effective_env = cmd.backend.environment_overrides
-    # The cmd: block scalar is a *shell* command line, so quote for the
-    # shell (shlex), not YAML -- json.dumps-style double quotes would leave
-    # `$` and backticks live inside the string.
+    # cmd is a *shell* command line, so every token is shell-quoted
+    # (shlex) -- including the binary path, which is operator input too.
+    # YAML escaping is then the dumper's job, not ours.
+    # Binary and --port stay on the first line (as before); the rest
+    # continue on wrapped lines. ${PORT} is llama-swap's placeholder and
+    # must stay literal, so it is not shell-quoted.
     args_str = " \\\n      ".join(shlex.quote(str(a)) for a in args)
     log_path = PROFILES_DIR / profile["name"] / "llama-swap.log"
-    lines = [
-        f"{profile['name']}:",
-        "  cmd: |",
-        f"    {effective_bin} --port ${{PORT}} \\\n      {args_str}",
-        f'  logFile: "{log_path}"',
-    ]
+    body = {
+        "cmd": (f"{shlex.quote(str(effective_bin))} --port ${{PORT}} "
+                f"\\\n      {args_str}"),
+        "logFile": str(log_path),
+    }
     if effective_env:
-        lines.append("  env:")
-        lines.extend(f'    - "{k}={v}"' for k, v in effective_env.items())
-    lines.append(f"  ttl: {profile['config']['ttl']}")
+        body["env"] = [f"{k}={v}" for k, v in effective_env.items()]
+    body["ttl"] = profile["config"]["ttl"]
     # Expose context_length and tool support in /v1/models so clients
     # (Hermes, Open WebUI, etc.) can auto-detect model capabilities.
-    ctx = int(profile['config'].get('ctx', 0))
+    ctx = int(profile["config"].get("ctx", 0))
     if ctx > 0:
-        lines.append("  capabilities:")
-        lines.append(f"    context: {ctx}")
-        lines.append("    tools: true")
-    return "\n".join(lines) + "\n", ok, messages
+        body["capabilities"] = {"context": ctx, "tools": True}
+    return _entry_to_yaml({profile["name"]: body}), ok, messages
 
 
 def preflight_ovms(profile, auto_fix=True):
@@ -2594,19 +2657,21 @@ def render_ovms_llama_swap_entry(profile):
     if cfg.get("reasoning_parser"):
         args += ["--reasoning-parser", cfg["reasoning_parser"]]
     args_str = " \\\n      ".join(shlex.quote(str(a)) for a in args)
+    # llama-swap substitutes these placeholders; shell quoting would make
+    # them literals.
+    for placeholder in ("${PORT}", "${MODEL_ID}"):
+        args_str = args_str.replace(f"'{placeholder}'", placeholder)
 
     log_path = PROFILES_DIR / name / "llama-swap.log"
-    lines = [
-        f"{name}:",
-        "  cmd: |",
-        f"    {args_str}",
-        '  proxy: "http://127.0.0.1:${PORT}"',
-        '  checkEndpoint: "/v2/health/ready"',
-        "  cmdStop: docker stop ${MODEL_ID}",
-        f'  logFile: "{log_path}"',
-        f"  ttl: {cfg.get('ttl', OVMS_DEFAULT_TTL)}",
-    ]
-    return "\n".join(lines) + "\n", ok, messages
+    body = {
+        "cmd": args_str,
+        "proxy": "http://127.0.0.1:${PORT}",
+        "checkEndpoint": "/v2/health/ready",
+        "cmdStop": "docker stop ${MODEL_ID}",
+        "logFile": str(log_path),
+        "ttl": cfg.get("ttl", OVMS_DEFAULT_TTL),
+    }
+    return _entry_to_yaml({name: body}), ok, messages
 
 
 def generate_ovms_artifacts(profile, out_dir):
@@ -2708,6 +2773,17 @@ ROUTER_PRESET_HEADER = (
 )
 
 
+
+def _prune_config_backups(path, keep=10):
+    """Keep the newest `keep` dated backups of path, delete the rest."""
+    backups = sorted(path.parent.glob(path.name + ".bak.*"))
+    for old_backup in backups[:-keep] if len(backups) > keep else []:
+        try:
+            old_backup.unlink()
+        except OSError:
+            pass
+
+
 def sync_llama_swap_config(restart: bool = True) -> int:
     """Rebuild the REAL llama-swap config.yaml (LLAMA_SWAP_CONFIG_PATH) from
     every enabled llama-cpp- AND ovms-backend profile, merging by model name
@@ -2790,7 +2866,13 @@ def _sync_llama_swap_config_locked(restart: bool) -> int:
         return len(profiles)
 
     if LLAMA_SWAP_CONFIG_PATH.exists():
-        backup = LLAMA_SWAP_CONFIG_PATH.with_suffix(LLAMA_SWAP_CONFIG_PATH.suffix + ".bak")
+        # Dated backups, keeping the last few: a single .bak was
+        # overwritten by the very next sync, so the copy that still had
+        # the operator's hand-edits was gone one save later.
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup = LLAMA_SWAP_CONFIG_PATH.with_suffix(
+            LLAMA_SWAP_CONFIG_PATH.suffix + f".bak.{stamp}")
+        _prune_config_backups(LLAMA_SWAP_CONFIG_PATH, keep=10)
         shutil.copy2(LLAMA_SWAP_CONFIG_PATH, backup)
         print(f"(previous llama-swap config backed up to {backup})")
 
