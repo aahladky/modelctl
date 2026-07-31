@@ -19,7 +19,7 @@
       <td><strong>{{ p.label }}</strong></td>
       <td class="muted">{{ p.source }}</td>
       <td>{{ "%.1f" | format(p.estimated.total_vram / 1073741824) }} GiB</td>
-      <td>{{ "%.1f" | format(p.estimated.ram / 1073741824) }} GiB</td>
+      <td>{{ "%.1f" | format(p.estimated.ram / 1073741824) }} GiB{% if p.estimated.get('mmap') %} <span class="muted">(+{{ "%.1f" | format(p.estimated.mmap / 1073741824) }} GiB mmap)</span>{% endif %}</td>
       <td>{{ p.claim.storage_mode }}</td>
       <td>{{ p.estimated.context }}</td>
     </tr>

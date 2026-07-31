@@ -139,6 +139,64 @@ class TestVramDecomposition(unittest.TestCase):
                          c.device_breakdown("SYCL0")["total"])
 
 
+class TestCanonicalAdmission(unittest.TestCase):
+    """vram_admission_bytes()/ram_admission_bytes() are the only place
+    admission semantics are defined; every feasibility, reservation, and
+    matrix path charges these values."""
+
+    def test_vram_admission_includes_the_cache_budget(self):
+        c = claim_for(moe_cache={"mode": "manual",
+                                 "gpu": {"budgets_bytes": {"SYCL0": 2 << 30}}})
+        peak = c.vram_admission_bytes()
+        self.assertEqual(peak["SYCL0"],
+                         c.vram_bytes["SYCL0"] + (2 << 30))
+
+    def test_vram_admission_matches_the_breakdown_peak(self):
+        c = claim_for(moe_cache={"mode": "manual",
+                                 "gpu": {"budgets_bytes": {"SYCL0": 2 << 30}}})
+        peak = c.vram_admission_bytes()
+        for dev in peak:
+            self.assertEqual(peak[dev], c.device_breakdown(dev)["peak"])
+
+    def test_vram_admission_without_cache_is_the_static_claim(self):
+        c = claim_for()
+        self.assertEqual(c.vram_admission_bytes(), c.vram_bytes)
+
+    def test_cache_on_a_device_with_no_static_claim_is_still_admitted(self):
+        # A cache budget on a device the static placement skipped is a
+        # real allocation on that device.
+        c = ResourceClaim(vram_bytes={"SYCL0": 8 << 30}, ram_bytes=0,
+                          storage_mode="none", expected_context=8192,
+                          vram_cache_bytes={"SYCL1": 2 << 30})
+        peak = c.vram_admission_bytes()
+        self.assertEqual(peak["SYCL0"], 8 << 30)
+        self.assertEqual(peak["SYCL1"], 2 << 30)
+
+    def test_mmap_bytes_are_not_charged_as_ram_admission(self):
+        c = claim_for({"extra": "-ngl 10"})
+        self.assertEqual(c.storage_mode, "mmap")
+        self.assertGreater(c.mmap_bytes, 0)
+        self.assertEqual(c.ram_admission_bytes(), 0)
+
+    def test_no_mmap_charges_resident_bytes(self):
+        c = claim_for({"extra": "-ngl 10 --no-mmap"})
+        self.assertEqual(c.ram_admission_bytes(), c.ram_resident_bytes)
+        self.assertGreater(c.ram_admission_bytes(), 0)
+
+    def test_legacy_claim_without_resident_split_falls_back_to_ram_bytes(self):
+        # Claims built before the D1 split have ram_resident_bytes == 0;
+        # for a non-mmap claim ram_bytes is the resident figure.
+        c = ResourceClaim(vram_bytes={}, ram_bytes=4 << 30,
+                          storage_mode="none", expected_context=8192)
+        self.assertEqual(c.ram_admission_bytes(), 4 << 30)
+
+    def test_staging_bytes_are_part_of_ram_admission(self):
+        c = ResourceClaim(vram_bytes={}, ram_bytes=0, storage_mode="mmap",
+                          expected_context=8192, ram_resident_bytes=1 << 30,
+                          mmap_bytes=32 << 30, staging_bytes=1 << 29)
+        self.assertEqual(c.ram_admission_bytes(), (1 << 30) + (1 << 29))
+
+
 class TestStorageIdentity(unittest.TestCase):
     def test_claim_records_the_backing_device(self):
         # Two plans reading from different disks do not have the same read

@@ -471,24 +471,19 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
                profile.get("backend", "llama-cpp"), ""),
            "started_at": started, "success": False, "log_path": ""}
 
-    # Reserve the RAM that must actually be resident, not the bytes the
-    # model merely addresses. claim.ram_bytes counts mmap'd model bytes,
-    # which the page cache holds only as far as it decides to -- reserving
-    # against it refuses every oversized MoE served through mmap, which is
-    # the case this project exists for. A 71 GiB Q4_K_M with 36.7 GiB of
-    # experts on mmap needs 0 bytes resident and was being denied against
-    # 26.5 GiB available. Task D1's rule, applied to admission: mmap size is
-    # not guaranteed resident RAM.
-    #
-    # ram_resident_bytes is 0 for legacy rows and for claims built before
-    # the split existed, so fall back to ram_bytes when the plan is not an
-    # mmap plan and the resident figure was never computed.
-    resident = plan.claim.ram_resident_bytes
-    if plan.claim.storage_mode != "mmap" and not resident:
-        resident = plan.claim.ram_bytes
-    claim = {"vram_bytes": dict(plan.claim.vram_bytes),
-             "ram_bytes": resident,
-             "storage_mode": plan.claim.storage_mode}
+    # Canonical admission values: VRAM includes the dynamic expert-cache
+    # budget, RAM counts resident bytes rather than mmap-addressed ones.
+    # The rationale (a 71 GiB Q4_K_M on mmap needs 0 bytes resident and
+    # was being denied against 26.5 GiB available) lives on
+    # ResourceClaim.ram_admission_bytes(); this path must charge the same
+    # numbers the managed worker does, or a plan that passes browser
+    # testing gets rejected by managed serving.
+    claim = {"vram_bytes": plan.claim.vram_admission_bytes(),
+             "ram_bytes": plan.claim.ram_admission_bytes(),
+             "storage_mode": plan.claim.storage_mode,
+             "vram_cache_bytes": dict(plan.claim.vram_cache_bytes),
+             "ram_resident_bytes": plan.claim.ram_resident_bytes,
+             "mmap_bytes": plan.claim.mmap_bytes}
     budgets = {g.device: max(0, g.free_bytes - g.reserve_bytes)
                for g in modelctl_hardware.enabled_gpus(snap)}
     budgets["RAM"] = max(0, snap.ram_available_bytes - snap.ram_reserve_bytes)

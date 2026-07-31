@@ -106,6 +106,40 @@ class ResourceClaim:
             "cache": cache, "total": total, "peak": total + cache,
         }
 
+    # --- canonical admission semantics -------------------------------
+    # Feasibility, reservations, the coexistence matrix, and capacity
+    # display must all admit against the same numbers. These two methods
+    # are the only place those numbers are defined; callers never rebuild
+    # them from the decomposed fields.
+
+    def vram_admission_bytes(self) -> dict:
+        """Peak per-device VRAM the plan needs admitted: the static
+        reservation (weights + KV + overhead) plus the dynamic expert-cache
+        budget, which is an additional allocation, not a slice of the
+        static claim."""
+        peak = dict(self.vram_bytes)
+        for dev, cache in self.vram_cache_bytes.items():
+            peak[dev] = peak.get(dev, 0) + cache
+        return peak
+
+    def ram_admission_bytes(self) -> int:
+        """RAM the plan needs admitted: bytes that will actually be
+        resident, plus staging buffers. mmap-addressed model bytes are
+        NOT included -- the page cache holds them only as far as it
+        decides, and charging them as resident refuses every oversized
+        MoE served through mmap. They stay visible in mmap_bytes /
+        page_cache_working_set_bytes as storage-pressure information,
+        and the global page-cache headroom is the budget side's
+        configured RAM reserve.
+
+        ram_resident_bytes is 0 for claims built before the D1 split, so
+        a non-mmap claim with no resident figure falls back to ram_bytes
+        (for such a plan the two mean the same thing)."""
+        resident = self.ram_resident_bytes
+        if self.storage_mode != "mmap" and not resident:
+            resident = self.ram_bytes
+        return resident + self.staging_bytes
+
 
 @dataclass(frozen=True)
 class LaunchPlan:
@@ -551,8 +585,13 @@ def _make_plan(profile, config, source, hardware, extra_warnings=(), decision=No
         argv=tuple(args),
         env=env,
         claim=claim,
-        estimated={"total_vram": sum(claim.vram_bytes.values()),
-                   "ram": claim.ram_bytes, "context": claim.expected_context},
+        # Capacity figures shown in the UI are the admission values, so
+        # what the wizard displays is what the worker will actually admit
+        # against. The mmap-addressed size stays as separate information.
+        estimated={"total_vram": sum(claim.vram_admission_bytes().values()),
+                   "ram": claim.ram_admission_bytes(),
+                   "mmap": claim.mmap_bytes,
+                   "context": claim.expected_context},
         source=source,
         warnings=tuple(extra_warnings),
         decision_data=decision or {},

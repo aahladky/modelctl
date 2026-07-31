@@ -9,7 +9,7 @@ supported, but new user-facing capability belongs in the console first.
 
 ## Active Roadmap
 
-The current implementation plan is `docs/modelctl-task-by-task-roadmap-2026-07-30.md` (supersedes the 2026-07-29 revision — the live repository had already implemented much of that plan's early/middle phases, and this revision adds a Phase 0 controlled upstream-sync/maintenance strategy ahead of further runtime work). Read the relevant phase/task before implementing. Key invariants: experimental features fail closed (§2.5), one canonical launch path (§2.2), cold/warm measurements never conflated, control plane stays in Python, tensor execution stays in the `../llama.cpp` fork.
+The authoritative work order is `docs/modelctl-re-review-2026-07-31-local-first.md` (the local-first re-review; it is authoritative over the earlier roadmaps and over anything else in the project — work its P0→P3 priorities in order). `docs/modelctl-task-by-task-roadmap-2026-07-30.md` remains as background for task numbering and phase context. Key invariants: experimental features fail closed (§2.5), one canonical launch path (§2.2), cold/warm measurements never conflated, control plane stays in Python, tensor execution stays in the `../llama.cpp` fork.
 
 ## Setup
 

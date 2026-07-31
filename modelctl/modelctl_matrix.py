@@ -38,13 +38,15 @@ def profile_claim(profile, inventory, defaults=None):
         plans = modelctl_plans.compile_launch_plans(profile, snap)
         if runtime.get("mode") == "managed" and runtime.get("pinned_plan_id"):
             plans = [p for p in plans if p.id == runtime["pinned_plan_id"]]
-        # Conservative envelope: max claim per resource across eligible plans
+        # Conservative envelope: max admission claim per resource across
+        # eligible plans (peak VRAM including cache, resident RAM).
         env = {}
         for plan in plans:
-            for dev, b in plan.claim.vram_bytes.items():
+            for dev, b in plan.claim.vram_admission_bytes().items():
                 env[dev] = max(env.get(dev, 0), b)
-            if plan.claim.ram_bytes:
-                env["RAM"] = max(env.get("RAM", 0), plan.claim.ram_bytes)
+            ram = plan.claim.ram_admission_bytes()
+            if ram:
+                env["RAM"] = max(env.get("RAM", 0), ram)
         if not any(env.values()):
             return None  # unknown claim -- do not guess
         return env
@@ -58,10 +60,11 @@ def profile_claim(profile, inventory, defaults=None):
                      or p.source == "current-profile"]
         env = {}
         for plan in plans:
-            for dev, b in plan.claim.vram_bytes.items():
+            for dev, b in plan.claim.vram_admission_bytes().items():
                 env[dev] = max(env.get(dev, 0), b)
-            if plan.claim.ram_bytes:
-                env["RAM"] = max(env.get("RAM", 0), plan.claim.ram_bytes)
+            ram = plan.claim.ram_admission_bytes()
+            if ram:
+                env["RAM"] = max(env.get("RAM", 0), ram)
         return env if any(env.values()) else None
 
     weights = 0
@@ -98,6 +101,18 @@ def profile_claim(profile, inventory, defaults=None):
         claim[device or (inventory[0]["device"] if inventory else "SYCL0")] = total - cpu_share
     if cpu_share:
         claim["RAM"] = cpu_share
+
+    # Peak admission includes the dynamic expert-cache budget, same rule
+    # as ResourceClaim.vram_admission_bytes(): the runtime allocates one
+    # UNIFORM per-GPU budget (the max of the declared ones) on every
+    # device the profile names.
+    mc = profile.get("moe_cache", {})
+    if mc.get("mode", "off") != "off":
+        budgets_cfg = mc.get("gpu", {}).get("budgets_bytes", {})
+        declared = {d: b for d, b in budgets_cfg.items() if b > 0}
+        uniform = max(declared.values(), default=0)
+        for dev in declared:
+            claim[dev] = claim.get(dev, 0) + uniform
     return claim
 
 

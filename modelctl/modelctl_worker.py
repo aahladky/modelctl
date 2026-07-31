@@ -157,15 +157,20 @@ def worker_main(profile_name, port):
 
     feasible = []
     for plan, score in ranked:
-        fits = all(b <= _effective(dev) for dev, b in plan.claim.vram_bytes.items()) \
-               and plan.claim.ram_bytes <= _effective("RAM")
+        # Admission uses the canonical peak values: VRAM includes the
+        # dynamic expert-cache budget, RAM counts resident bytes rather
+        # than mmap-addressed ones (ResourceClaim.vram_admission_bytes /
+        # ram_admission_bytes).
+        vram_need = plan.claim.vram_admission_bytes()
+        ram_need = plan.claim.ram_admission_bytes()
+        fits = all(b <= _effective(dev) for dev, b in vram_need.items()) \
+               and ram_need <= _effective("RAM")
         if fits:
             feasible.append((plan, score))
         else:
             rdb.record_event("plan_infeasible", profile_name,
                              {"plan_id": plan.id,
-                              "claim": {**{d: b for d, b in plan.claim.vram_bytes.items()},
-                                        "RAM": plan.claim.ram_bytes},
+                              "claim": {**vram_need, "RAM": ram_need},
                               "effective": {r: _effective(r) for r in budgets}})
     ranked = feasible
 
@@ -188,10 +193,17 @@ def worker_main(profile_name, port):
     my_pid = os.getpid()
 
     for plan, score in ranked:
+        # vram_bytes/ram_bytes in a reservation claim are the ADMISSION
+        # values -- what acquire_reservation() charges against budgets and
+        # what other workers see as pending. The decomposed fields ride
+        # along for explanation only.
         claim_dict = {
-            "vram_bytes": dict(plan.claim.vram_bytes),
-            "ram_bytes": plan.claim.ram_bytes,
+            "vram_bytes": plan.claim.vram_admission_bytes(),
+            "ram_bytes": plan.claim.ram_admission_bytes(),
             "storage_mode": plan.claim.storage_mode,
+            "vram_cache_bytes": dict(plan.claim.vram_cache_bytes),
+            "ram_resident_bytes": plan.claim.ram_resident_bytes,
+            "mmap_bytes": plan.claim.mmap_bytes,
         }
 
         rdb.record_event("plan_selected", profile_name,
@@ -253,9 +265,7 @@ def worker_main(profile_name, port):
             run["environment_fingerprint"] = launch.backend.environment_fingerprint
             run["capability_schema"] = launch.backend.capabilities.get("schema", 0)
             run["capability_digest"] = launch.backend.capability_fingerprint
-            run["claim"] = {"vram_bytes": dict(plan.claim.vram_bytes),
-                            "ram_bytes": plan.claim.ram_bytes,
-                            "storage_mode": plan.claim.storage_mode}
+            run["claim"] = dict(claim_dict)
             run["decision"] = plan.decision_data or {}
             print(f"modelctl-worker: launching plan '{plan.label}' "
                   f"(id={plan.id}) on port {port}", file=sys.stderr)

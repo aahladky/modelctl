@@ -242,6 +242,14 @@ class RuntimeDB:
         Uses BEGIN IMMEDIATE to serialize concurrent acquisitions.
         Cleans up stale reservations from dead PIDs first.
 
+        claim_dict's "vram_bytes" and "ram_bytes" are ADMISSION values:
+        peak per-device VRAM including the dynamic expert-cache budget,
+        and resident (not mmap-addressed) RAM. Callers produce them with
+        ResourceClaim.vram_admission_bytes()/ram_admission_bytes() rather
+        than rebuilding them from decomposed fields; extra keys (e.g.
+        vram_cache_bytes, mmap_bytes) are explanation only and are not
+        charged here.
+
         When `budgets` ({resource: bytes}, with per-device VRAM keys and
         "RAM") is given, admission is BYTE-BASED: the claim plus every other
         live pending/starting claim must fit the budget for each resource.
