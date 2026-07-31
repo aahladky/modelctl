@@ -429,6 +429,34 @@ def plan_tiers(profile, inventory, limit_pct, primary, ram_available=None,
         warnings, analysis, result)
 
 
+def apply_plan_cache_budgets(profile, plan, log=print):
+    """Write the plan's effective cache budgets back into the profile.
+
+    Keeps the runtime consistent with the plan: the planner reserves a
+    uniform per-GPU cache budget (the fork applies one budget to every
+    device) and may disable the cache entirely when it doesn't fit.
+    Every apply path -- CLI and web alike -- must call this before saving,
+    so build_moe_cache_args emits exactly what the planner reserved,
+    never the stale request. Returns True if the profile was modified.
+    """
+    mc = profile.get("moe_cache", {})
+    if mc.get("mode", "off") == "off":
+        return False
+    requested = mc.get("gpu", {}).get("budgets_bytes", {})
+    effective = plan.get("cache_budgets") or {}
+    if effective == requested:
+        return False
+    if not effective:
+        log("planner disabled the expert cache (budget exceeds usable "
+            "VRAM); clearing moe_cache budgets so the server matches the plan")
+    else:
+        gib = {d: round(b / (1 << 30), 1) for d, b in effective.items()}
+        log(f"planner reserved a uniform per-GPU cache budget: {gib} GiB")
+    mc.setdefault("gpu", {})["budgets_bytes"] = effective
+    profile["moe_cache"] = mc
+    return True
+
+
 def _expert_assignment(layers_bytes, ordered_devs, budgets):
     """Greedy fastest-tier-first whole-layer assignment.
     Returns (assignment: {device: [layers]}, cpu_layers: [layers])."""

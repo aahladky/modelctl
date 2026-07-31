@@ -2,7 +2,8 @@
 
 Reads are direct calls into modelctl (concurrent); every write goes through
 the single JobRunner worker (see jobs.py). Auth: one shared token, checked
-as Bearer header, ?token= query param, or the login cookie.
+as Bearer header or the login cookie (never a query param -- tokens in URLs
+leak into logs and history).
 """
 import json
 import os
@@ -19,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import modelctl
+import modelctl_errors
 import modelctl_vram
 
 from . import mutate
@@ -36,11 +38,16 @@ LLAMA_SWAP_ROOT = LLAMA_SWAP_BASE.rsplit("/v1/", 1)[0]
 
 
 def load_or_create_token():
-    env = os.environ.get("MODELCTL_WEB_TOKEN")
+    env = os.environ.get("MODELCTL_WEB_TOKEN", "").strip()
     if env:
         return env
     try:
-        return TOKEN_PATH.read_text().strip()
+        stored = TOKEN_PATH.read_text().strip()
+        # An empty token file (interrupted write, `touch`, full disk) must
+        # never mean "no auth": an anonymous request supplies "" too, and
+        # "" == "" would open the whole console. Regenerate instead.
+        if stored:
+            return stored
     except OSError:
         pass
     token = secrets.token_hex(16)
@@ -78,6 +85,14 @@ def create_app(token=None, store=None, runner=None):
     app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")),
               name="static")
 
+    @app.exception_handler(modelctl_errors.ProfileNotFoundError)
+    async def profile_not_found(request: Request, exc):
+        # A stale bookmark or a profile deleted in another tab is a 404,
+        # not a 500 with a traceback in the journal.
+        if request.url.path.startswith("/api/"):
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        return PlainTextResponse(f"{exc}\n", status_code=404)
+
     @app.middleware("http")
     async def auth(request: Request, call_next):
         if request.url.path in ("/login", "/healthz") or request.url.path.startswith("/static"):
@@ -85,10 +100,11 @@ def create_app(token=None, store=None, runner=None):
         supplied = (
             request.headers.get("authorization", "").removeprefix("Bearer ").strip()
             or request.cookies.get(COOKIE_NAME, ""))
-        if supplied != token:
+        if not supplied or not secrets.compare_digest(supplied, token):
             if request.url.path.startswith("/api/"):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
-            return RedirectResponse(f"/login?next={request.url.path}")
+            return RedirectResponse(f"/login?next={request.url.path}",
+                                    status_code=303)
         if request.method == "POST":
             origin = (request.headers.get("origin")
                       or request.headers.get("referer") or "")
@@ -197,20 +213,41 @@ def create_app(token=None, store=None, runner=None):
         return templates.TemplateResponse(request=request, name="login.html", context=ctx(
             request, next=next, error=""))
 
+    # Global (not per-IP): this is a single-user console; the goal is to
+    # blunt unattended guessing, not to referee concurrent users.
+    login_failures = {"count": 0, "last": 0.0}
+
     @app.post("/login")
-    def login(next: str = Form("/"), token_field: str = Form("")):
-        if token_field != token:
-            return RedirectResponse("/login")
+    def login(request: Request, next: str = Form("/"), token_field: str = Form("")):
         if not next.startswith("/") or next.startswith("//"):
             next = "/"
-        resp = RedirectResponse(next)
+        now = time.monotonic()
+        if login_failures["count"] >= 5 and now - login_failures["last"] < 30.0:
+            return templates.TemplateResponse(
+                request=request, name="login.html", status_code=429,
+                context=ctx(request, next=next,
+                            error="Too many failed attempts -- wait 30 seconds."))
+        if not token_field or not secrets.compare_digest(token_field, token):
+            login_failures["count"] += 1
+            login_failures["last"] = now
+            # Render the form with the error instead of redirecting: a 307
+            # redirect used to re-POST the same body in a loop, and the old
+            # template had no error slot at all.
+            return templates.TemplateResponse(
+                request=request, name="login.html", status_code=401,
+                context=ctx(request, next=next, error="Wrong token."))
+        login_failures["count"] = 0
+        # 303 turns the follow-up into a GET; the default 307 re-POSTed to
+        # `next`, which both broke the login flow (405 on /) and let a
+        # crafted ?next= re-POST a fresh login into a mutating endpoint.
+        resp = RedirectResponse(next, status_code=303)
         resp.set_cookie(COOKIE_NAME, token, httponly=True, samesite="strict",
                         secure=os.environ.get("MODELCTL_WEB_SECURE_COOKIE", "") == "1")
         return resp
 
     @app.get("/logout")
     def logout():
-        resp = RedirectResponse("/login")
+        resp = RedirectResponse("/login", status_code=303)
         resp.delete_cookie(COOKIE_NAME)
         return resp
 
@@ -368,7 +405,10 @@ def create_app(token=None, store=None, runner=None):
         inventory = modelctl.get_gpu_inventory()
         d = modelctl.load_defaults()
         primary = modelctl.resolve_primary_gpu(inventory, d)
-        plan = modelctl_tiers.plan_tiers(p, inventory, d["vram_limit_pct"], primary)
+        # cache_request keeps the preview identical to what submit_tier_apply
+        # will actually compute and apply.
+        plan = modelctl_tiers.plan_tiers(p, inventory, d["vram_limit_pct"], primary,
+                                         cache_request=p.get("moe_cache"))
         return p, plan
 
     @app.get("/profiles/{name}/tiers", response_class=HTMLResponse)
@@ -393,7 +433,8 @@ def create_app(token=None, store=None, runner=None):
         for p in profiles():
             if not p.get("model_path"):
                 continue
-            plan = modelctl_tiers.plan_tiers(p, inventory, d["vram_limit_pct"], primary)
+            plan = modelctl_tiers.plan_tiers(p, inventory, d["vram_limit_pct"], primary,
+                                             cache_request=p.get("moe_cache"))
             plans.append({"name": p["name"], "plan": plan})
         return templates.TemplateResponse(request=request, name="tiers_all.html", context=ctx(
             request, plans=plans))
@@ -915,9 +956,8 @@ def create_app(token=None, store=None, runner=None):
             profile = None
             try:
                 profile = modelctl.load_profile(mid)
-            except (Exception, SystemExit):
-                # llama-swap may run models with no modelctl profile;
-                # load_profile sys.exit()s on those (not an Exception).
+            except Exception:
+                # llama-swap may run models with no modelctl profile.
                 pass
             if not profile:
                 continue

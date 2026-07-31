@@ -61,7 +61,9 @@ class TestAuth(WebTestBase):
 
     def test_page_redirects_to_login(self):
         resp = self.client.get("/", follow_redirects=False)
-        self.assertEqual(resp.status_code, 307)
+        # 303, never 307: a 307 preserves the method, so an unauthenticated
+        # POST would be re-POSTed at /login instead of landing on the form.
+        self.assertEqual(resp.status_code, 303)
         self.assertIn("/login", resp.headers["location"])
 
     def test_bearer_works(self):
