@@ -439,6 +439,35 @@ def _prompt_sequence(prompt):
     return seq or _MEASURE_PROMPTS
 
 
+# A "cold" run whose model is still more resident than this fraction is
+# not cold; it is relabeled warm rather than recorded as a measurement of
+# something it did not measure.
+_COLD_RESIDENCY_MAX = 0.05
+
+
+def _effective_cache_state(warmed_up: bool, plan_cache_bytes: int,
+                           residency_at_start) -> str:
+    """The honest cache state of a measurement (P3: cold page cache, warm
+    page cache, and warm expert cache are three different things).
+
+      "cold"        no warmup, and the model's pages were verified evicted
+      "warm"        page cache holds the model (after warmup, or because a
+                    requested-cold run's eviction did not take -- another
+                    process maps the file, or the store is RAM-backed)
+      "warm-expert" warmed up AND the plan reserves a GPU expert cache, so
+                    the warmup also filled that
+
+    residency_at_start is the page-cache fraction measured after the
+    pre-launch eviction attempt, or None when it could not be measured
+    (residency unknown => trust the eviction attempt, the conservative
+    reading for ranking purposes since cold numbers rank lower)."""
+    if warmed_up:
+        return "warm-expert" if (plan_cache_bytes or 0) > 0 else "warm"
+    if residency_at_start is not None and residency_at_start > _COLD_RESIDENCY_MAX:
+        return "warm"
+    return "cold"
+
+
 def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
                      max_tokens=128, runs=2, binary=None,
                      proc_register=None, cancel_check=None,
@@ -447,8 +476,13 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
 
     When warmup_tokens > 0, a warmup generation runs first to fill the
     expert cache and OS page cache.  The measured runs then capture
-    warm-cache performance.  The run dict includes:
-      cache_state: "cold" (no warmup) or "warm" (after warmup)
+    warm-cache performance.  For a cold run (warmup_tokens == 0) the
+    model's pages are evicted from the page cache before launch and the
+    residual residency is recorded; if eviction does not take, the run is
+    honestly labeled warm instead of pretending to be cold.  The run dict
+    includes:
+      cache_state: "cold", "warm" (page cache), or "warm-expert"
+                   (warmed up with a GPU expert cache reserved)
       warmup_generation_tps: speed during the warmup phase (if any)
 
     profile_override supplies the profile dict directly instead of loading
@@ -525,6 +559,31 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
         # included) and is what the fingerprint describes -- no caller-side
         # environment assembly.
         child_env = dict(launch.environment)
+        # A cold run means COLD: evict the model's pages before launch and
+        # measure what remains, instead of trusting that nothing else has
+        # touched the file. Best-effort -- eviction legitimately fails when
+        # another server maps the file or the store is RAM-backed, and the
+        # residual residency then relabels the run warm (see
+        # _effective_cache_state).
+        residency_at_start = None
+        if not warmup_tokens:
+            try:
+                import modelctl_benchmark
+                import modelctl_vram
+                shards = modelctl_vram._shard_paths(
+                    profile.get("model_path", "")) or []
+                shards = [str(s) for s in shards]
+                if shards:
+                    modelctl_benchmark.evict_from_page_cache(shards)
+                    res = modelctl_benchmark.page_cache_residency(shards)
+                    if res is not None:
+                        residency_at_start = round(res.fraction, 4)
+                        run["details"] = {
+                            **run.get("details", {}),
+                            "page_cache_residency_at_start": residency_at_start}
+            except Exception as e:
+                log(f"page-cache eviction skipped: {e}")
+
         # The per-profile directory is created by generate_artifacts(), but a
         # plan test must not require artifacts to have been generated first:
         # testing a plan before registering anything is the normal wizard
@@ -561,7 +620,7 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
             # Warmup phase: fill expert cache and OS page cache before
             # measuring.  When warmup_tokens is 0, the run is "cold".
             io_at_ready = sampler.io_snapshot()
-            run["cache_state"] = "cold"
+            warmed_up = False
             run["warmup_generation_tps"] = None
             if warmup_tokens and warmup_tokens > 0:
                 log(f"warmup: {warmup_tokens} tokens ...")
@@ -574,7 +633,13 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
                 if wt.get("predicted_per_second"):
                     run["warmup_generation_tps"] = round(wt["predicted_per_second"], 2)
                     log(f"warmup gen {run['warmup_generation_tps']} tok/s")
-                run["cache_state"] = "warm"
+                warmed_up = True
+            run["cache_state"] = _effective_cache_state(
+                warmed_up, plan.claim.cache_bytes, residency_at_start)
+            if not warmed_up and run["cache_state"] == "warm":
+                log(f"requested a cold run but {residency_at_start:.0%} of "
+                    "the model is still in the page cache -- recording it "
+                    "as warm")
 
             io_after_warmup = sampler.io_snapshot()
             run["read_bytes_warmup"] = io_after_warmup["read_bytes"] - io_at_ready["read_bytes"]

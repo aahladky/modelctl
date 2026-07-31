@@ -385,6 +385,23 @@ class TestReleaseAColdWarmSeparation(unittest.TestCase):
         self.assertTrue(all(o["cache_state"] == "warm" for o in obs.values()))
         self.assertEqual(obs["b"]["generation_tps"], 45.0)
 
+    def test_warm_page_cache_and_warm_expert_cache_never_mix(self):
+        # A warm-expert number (GPU cache filled by warmup) is not
+        # comparable to a warm page-cache number. Equal coverage: the
+        # more conservative plain-warm state wins.
+        self.rdb.record_plan_run(self._run("a", "warm", 30.0, 100))
+        self.rdb.record_plan_run(self._run("b", "warm-expert", 60.0, 101))
+        obs = self.rdb.observations_for_profile("m")
+        self.assertIn("a", obs)
+        self.assertNotIn("b", obs)
+
+    def test_cold_outranks_warm_expert_on_a_tie(self):
+        self.rdb.record_plan_run(self._run("a", "warm-expert", 60.0, 100))
+        self.rdb.record_plan_run(self._run("b", "cold", 10.0, 101))
+        obs = self.rdb.observations_for_profile("m")
+        self.assertEqual(obs["b"]["cache_state"], "cold")
+        self.assertNotIn("a", obs)
+
 
 class TestExperimentalGuardrail(unittest.TestCase):
     """Task H2: an experimental plan outranks a safe baseline only on

@@ -183,7 +183,10 @@
           {% if e.observed.get('prompt_tps') %}prompt {{ e.observed.prompt_tps | round(1) }} t/s · {% endif %}
           {% if e.observed.get('load_seconds') %}load {{ e.observed.load_seconds | round(1) }}s · {% endif %}
           {% if e.observed.get('actual_context') %}context {{ e.observed.actual_context }} · {% endif %}
-          <span class="{{ 'ok' if e.cache_state == 'warm' else 'warn' }}">{{ e.cache_state or 'unknown' }} cache</span>
+          {# three states: cold, warm page cache, warm expert cache #}
+          <span class="{{ 'ok' if e.cache_state in ('warm', 'warm-expert') else 'warn' }}">{{
+            {'cold': 'cold', 'warm': 'warm page cache',
+             'warm-expert': 'warm expert cache'}.get(e.cache_state, e.cache_state or 'unknown state') }}</span>
           {% if e.stale %}<br><span class="warn">measured under different hardware
             or a different backend build — not comparable</span>{% endif %}
         {% else %}

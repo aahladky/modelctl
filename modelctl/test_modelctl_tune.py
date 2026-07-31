@@ -84,5 +84,43 @@ class TestPlanRunIoColumns(unittest.TestCase):
         self.assertIsNone(rows[0]["major_faults"])
 
 
+class TestEffectiveCacheState(unittest.TestCase):
+    """P3: cold page cache, warm page cache, and warm expert cache are
+    three different measurement conditions, decided from what actually
+    happened rather than from what was requested."""
+
+    def state(self, **kw):
+        args = {"warmed_up": False, "plan_cache_bytes": 0,
+                "residency_at_start": 0.0}
+        args.update(kw)
+        return modelctl_tune._effective_cache_state(**args)
+
+    def test_verified_evicted_run_is_cold(self):
+        self.assertEqual(self.state(residency_at_start=0.01), "cold")
+
+    def test_failed_eviction_relabels_the_run_warm(self):
+        # Another server maps the file, or the store is RAM-backed: the
+        # pages are resident, so this run measured a warm page cache no
+        # matter what was requested.
+        self.assertEqual(self.state(residency_at_start=0.9), "warm")
+
+    def test_unknown_residency_trusts_the_eviction_attempt(self):
+        self.assertEqual(self.state(residency_at_start=None), "cold")
+
+    def test_warmup_without_expert_cache_is_page_cache_warm(self):
+        self.assertEqual(self.state(warmed_up=True), "warm")
+
+    def test_warmup_with_expert_cache_is_expert_warm(self):
+        self.assertEqual(
+            self.state(warmed_up=True, plan_cache_bytes=2 << 30),
+            "warm-expert")
+
+    def test_expert_cache_without_warmup_is_not_expert_warm(self):
+        # An empty expert cache is not a warm one.
+        self.assertEqual(
+            self.state(plan_cache_bytes=2 << 30, residency_at_start=0.0),
+            "cold")
+
+
 if __name__ == "__main__":
     unittest.main()

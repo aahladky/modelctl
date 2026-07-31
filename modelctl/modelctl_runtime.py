@@ -504,9 +504,14 @@ class RuntimeDB:
                 plans_for_state[d["plan_id"]] = d
         if not by_state:
             return {}
+        # Coverage first; conservatism breaks ties. "warm" (page cache
+        # only) sits between "cold" and "warm-expert" (page cache plus a
+        # filled GPU expert cache) -- three distinct states, never
+        # compared against each other.
+        conservatism = {"cold": 0, "warm": 1, "warm-expert": 2}
         chosen_state = sorted(
             by_state,
-            key=lambda s: (-len(by_state[s]), 0 if s == "cold" else 1))[0]
+            key=lambda s: (-len(by_state[s]), conservatism.get(s, 1)))[0]
         # The positional fingerprints and the identity object describe the
         # same current setup, so fold them together rather than choosing.
         ident = identity or ObservationIdentity()

@@ -68,7 +68,7 @@ class PlanEvidence:
     # --- evidence ---
     observation: dict | None = None
     measured_at: float | None = None
-    cache_state: str = ""                # "cold" / "warm" / ""
+    cache_state: str = ""                # "cold" / "warm" / "warm-expert" / ""
     estimated: dict = field(default_factory=dict)
     observed: dict = field(default_factory=dict)
     # --- provenance ---
@@ -294,8 +294,19 @@ def _selection_reason(winner, observations, policy) -> str:
                     "profile's own configuration is used unchanged")
         return f"no measurement of {label} yet; ranked on estimated claims"
 
-    state = f"{winner.cache_state} " if winner.cache_state else ""
+    state = (f"{cache_state_label(winner.cache_state)} "
+             if winner.cache_state else "")
     return f"best measured {state}{label} of the selectable plans"
+
+
+def cache_state_label(state: str) -> str:
+    """Human words for a cache_state value. Three states, three different
+    claims about what was warm when the number was taken."""
+    return {
+        "cold": "cold",
+        "warm": "warm-page-cache",
+        "warm-expert": "warm-expert-cache",
+    }.get(state, state)
 
 
 def build_decision_trace(evidence, ranked=None, policy=None, observations=None,
@@ -351,7 +362,8 @@ def build_decision_trace(evidence, ranked=None, policy=None, observations=None,
         ev.append("measured " + (
             time.strftime("%Y-%m-%d %H:%M", time.localtime(when)) if when
             else "at an unrecorded time")
-            + (f", {obs['cache_state']} cache" if obs.get("cache_state") else ""))
+            + (f", {cache_state_label(obs['cache_state'])} measurement"
+               if obs.get("cache_state") else ""))
         if obs.get("stale"):
             ev.append("measurement is stale: " +
                       "; ".join(obs.get("stale_reasons") or ["identity changed"]))
