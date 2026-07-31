@@ -1559,15 +1559,35 @@ def import_local(file_path: str, name: str | None = None, copy: bool = False,
     companions = {"mmproj": [], "mtp": []}
     split_parts = [str(path)]
 
+    # Companions must belong to THIS model. Matching "any mmproj*.gguf in
+    # the directory" silently attached another model's vision projector
+    # whenever downloads shared a flat directory -- the profile then
+    # launched with mismatched weights and nothing recorded that the
+    # pairing was a directory accident.
+    base = stem.rsplit("-", 1)[0] if "-" in stem else stem
+    base_key = re.sub(r"[^a-z0-9]", "", base.lower())
+
+    def _belongs(sibling_stem):
+        key = re.sub(r"[^a-z0-9]", "", sibling_stem.lower())
+        return base_key and (base_key in key or key in base_key)
+
     for sibling in sorted(parent.glob("*.gguf")):
         if sibling == path:
             continue
         sname = sibling.name.lower()
         if sname.startswith("mmproj"):
-            companions["mmproj"].append(str(sibling))
+            if _belongs(sibling.stem):
+                companions["mmproj"].append(str(sibling))
+            else:
+                print(f"note: ignoring {sibling.name} -- its name does not "
+                      f"match this model ({base}); pass --mmproj to override")
         elif "mtp" in sname or "draft" in sname:
-            companions["mtp"].append(str(sibling))
-        elif sibling.stem.startswith(stem.rsplit("-", 1)[0] if "-" in stem else stem):
+            if _belongs(sibling.stem):
+                companions["mtp"].append(str(sibling))
+            else:
+                print(f"note: ignoring {sibling.name} -- its name does not "
+                      f"match this model ({base})")
+        elif sibling.stem.startswith(base):
             # Likely a split part of the same model.
             split_parts.append(str(sibling))
 
@@ -1604,7 +1624,16 @@ def import_local(file_path: str, name: str | None = None, copy: bool = False,
         dest = dest_dir / path.name
         if not dest.exists():
             shutil.copy2(path, dest)
-            model_path = str(dest)
+        elif dest.stat().st_size != path.stat().st_size:
+            # A previous interrupted copy: finish it rather than leaving
+            # the profile pointing at a truncated managed file.
+            print(f"note: {dest} exists with a different size -- recopying")
+            shutil.copy2(path, dest)
+        # Outside the if: copy=True promises the profile references the
+        # managed copy. Setting it only on a fresh copy meant a re-import
+        # silently kept depending on the original file, which the
+        # "copy into the managed directory" flow invites deleting.
+        model_path = str(dest)
         for aux_list, aux_key in [(companions["mmproj"], "mmproj"),
                                    (companions["mtp"], "mtp")]:
             if aux_list:
@@ -3059,12 +3088,22 @@ def cmd_verify(args):
             base_dir = Path(c["path"]).parent
             # If the file already lives under a per-repo directory (a
             # previous --fix run, or a profile pulled after the collision
-            # fix), reuse the grandparent as the base so a second repair
-            # pass doesn't nest <repo_id>/<repo_id>/... underneath itself.
-            repo_suffix = Path(profile["repo_id"])
-            if base_dir.as_posix().endswith(repo_suffix.as_posix()):
-                for _ in repo_suffix.parts:
-                    base_dir = base_dir.parent
+            # fix), cut the path back to the directory ABOVE that repo
+            # segment so a second repair pass doesn't nest
+            # <repo_id>/<repo_id>/... underneath itself.
+            #
+            # Cut at the repo segment wherever it appears, not only when
+            # the path ends with it: download_if_needed lays files out as
+            # <base>/<repo_id>/<subfolder>/<file> for repos that ship
+            # subfolders (e.g. BF16/model.gguf), so the parent directory
+            # ends with the SUBFOLDER and the old endswith() check never
+            # fired -- each repair pass nested another copy.
+            repo_parts = Path(profile["repo_id"]).parts
+            parts = base_dir.parts
+            for i in range(len(parts) - len(repo_parts) + 1):
+                if parts[i:i + len(repo_parts)] == repo_parts:
+                    base_dir = Path(*parts[:i]) if i else Path(base_dir.anchor or ".")
+                    break
             new_path = download_if_needed(profile["repo_id"], c["repo_filename"], base_dir)
             profile[c["field"]] = new_path
             changed = True
