@@ -52,7 +52,7 @@ The top-level repository should remain the reproducible integration unit. A chec
 | Area | Live state | Remaining work |
 |---|---|---|
 | Canonical backend resolution | Implemented in `modelctl_launch.py` | Prove every preview, artifact, worker, test, and llama-swap path uses it |
-| Capability schema | Schema 2 implemented in modelctl | Runtime probe is still not truthful or backend-derived |
+| Capability schema | Schema 2 implemented in modelctl | **Done** (Phase 0 port): probe is backend-derived; CPU-only reports every SYCL/cache feature false, verified on both builds |
 | Cache preflight | Integrated into `build_launch_command()` | Audit all legacy callers and prohibit bypasses |
 | Operation/service layer | Profile, plan, runtime, hardware, and cache services exist | Move remaining route and CLI mutation logic behind services |
 | Atomic mutations | `Transaction` exists | Ensure all multi-file operations use it and add crash/fault tests |
@@ -62,8 +62,8 @@ The top-level repository should remain the reproducible integration unit. A chec
 | Web settings/hardware | Implemented | Expand backend/build/storage setup and first-run diagnostics |
 | Release A tests | Control-plane acceptance tests exist | Add real-process, llama-swap, storage, concurrency, and target-hardware acceptance |
 | Release B tests | Control-plane scaffolding exists | Runtime hybrid execution does not exist |
-| SYCL expert transfer cache | Experimental implementation exists | Admission, prefill, capability, ownership, allocation, and deterministic correctness remain blockers |
-| True CPU-miss hybrid execution | Modelctl contract and test scaffolding exist | Entire runtime data path remains to be implemented |
+| SYCL expert transfer cache | **Phase F complete** (F1-F8) | Admission, prefill, capability, ownership and allocation all corrected; F8 tests build and run host-only. Remaining: none |
+| True CPU-miss hybrid execution | G1 design + G2 partition representation done | G3-G7 remain. **Premise weakened** -- see the Phase G note: the cache now serves decode at +148% on the storage-bound target |
 | Runtime upstream alignment | Feature branch is materially behind current llama.cpp master | Sync now on a protected integration branch, then maintain a regular drift and promotion cadence |
 
 ---
@@ -934,6 +934,24 @@ Compare logits, expert outputs, or deterministic token IDs—not merely coherent
 ---
 
 # Phase G — Implement true GPU-hit / CPU-miss execution
+
+**2026-07-30 premise correction.** Phase G was justified by the transfer
+cache being unable to serve interactive decode. That came from one model and
+did not survive measurement on the quant actually served. On
+Qwen3.5-122B-A10B Q4_K_M (71.3 GiB, larger than VRAM and RAM combined),
+giving routed MoE ops their own offload threshold makes decode **2.5x faster
+than the default**, with the cache contributing +61% of that — see
+`moe-offload-threshold-q4km-2026-07-30.md`.
+
+G is therefore no longer the only route to useful batch-1 decode, and its
+cost/benefit has to be re-derived against that baseline rather than against
+the default configuration. Its CPU-miss execution avoids the PCIe round trip
+entirely and may still go further, but "the cache cannot serve decode" is no
+longer a reason to build it.
+
+G1 and G2 are done — see `moe-hybrid-execution-design.md`, which also
+records four defects in the pre-existing moe-hybrid scaffolding that made it
+produce wrong output. G3–G7 remain, G3 being the largest single piece.
 
 The existing modelctl Release B tests are a useful contract scaffold. They do not constitute runtime implementation.
 

@@ -280,3 +280,53 @@ class TestMeasurementPrompts(unittest.TestCase):
         import modelctl_tune
         self.assertEqual(modelctl_tune._prompt_sequence([]),
                          modelctl_tune._MEASURE_PROMPTS)
+
+
+class TestCacheMetricsCapture(unittest.TestCase):
+    """A throughput number without cache counters cannot distinguish "the
+    cache did not help" from "the cache never ran"."""
+
+    def test_parser_extracts_counters_per_device(self):
+        import modelctl
+        from unittest import mock
+        import io
+        text = (
+            "# HELP llamacpp:moe_cache_hits_total MoE expert cache hits\n"
+            "# TYPE llamacpp:moe_cache_hits_total counter\n"
+            'llamacpp:moe_cache_hits_total{device="SYCL0"} 846\n'
+            'llamacpp:moe_cache_misses_total{device="SYCL0"} 72\n'
+            'llamacpp:moe_cache_hits_total{device="SYCL1"} 5\n'
+            "unrelated_metric 1\n")
+        cm = mock.MagicMock()
+        cm.__enter__.return_value = io.BytesIO(text.encode())
+        with mock.patch("urllib.request.urlopen", return_value=cm):
+            stats = modelctl.scrape_moe_cache_metrics(1234)
+        self.assertEqual(stats["SYCL0"]["hits_total"], "846")
+        self.assertEqual(stats["SYCL0"]["misses_total"], "72")
+        self.assertEqual(stats["SYCL1"]["hits_total"], "5")
+        self.assertNotIn("unrelated_metric", str(stats))
+
+    def test_unreachable_server_reads_as_unknown_not_zero(self):
+        # Reporting zero for an unreachable endpoint would look exactly
+        # like an inert cache, which is the failure this exists to expose.
+        import modelctl
+        from unittest import mock
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("refused")):
+            self.assertIsNone(modelctl.scrape_moe_cache_metrics(1234))
+
+    def test_server_without_cache_metrics_reads_as_unknown(self):
+        import modelctl
+        from unittest import mock
+        import io
+        cm = mock.MagicMock()
+        cm.__enter__.return_value = io.BytesIO(b"other_metric 3\n")
+        with mock.patch("urllib.request.urlopen", return_value=cm):
+            self.assertIsNone(modelctl.scrape_moe_cache_metrics(1234))
+
+    def test_web_app_shares_the_same_parser(self):
+        # Two copies could drift, and the one on screen would be the one
+        # not used by the measurement.
+        import modelctl
+        from modelctl_web import app as webapp
+        self.assertIs(webapp._scrape_moe_cache_metrics,
+                      modelctl.scrape_moe_cache_metrics)

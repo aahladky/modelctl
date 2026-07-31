@@ -58,34 +58,9 @@ def _fetch_json(url, timeout=2):
         return None
 
 
-def _scrape_moe_cache_metrics(port):
-    """Fetch /metrics from a running model and extract moe_cache stats.
-
-    Label-shape agnostic: the device label may be absent, reordered, or
-    accompanied by extra labels -- parse the label block generically and
-    pull device out of it instead of requiring exactly one device="...".
-    Metrics without a device label land under the "" key.
-    """
-    import re as _re
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=3) as r:
-            text = r.read().decode()
-        stats = {}
-        for line in text.splitlines():
-            if not line.startswith("llamacpp:moe_cache_"):
-                continue
-            m = _re.match(r"llamacpp:moe_cache_(\w+)(\{[^}]*\})?\s+(\S+)", line)
-            if not m:
-                continue
-            key, labels, val = m.group(1), m.group(2) or "", m.group(3)
-            dev = ""
-            dm = _re.search(r'device="([^"]*)"', labels)
-            if dm:
-                dev = dm.group(1)
-            stats.setdefault(dev, {})[key] = val
-        return stats or None
-    except Exception:
-        return None
+# Shared with the measurement path, which needs the same counters to say
+# whether a benchmark's cache was actually running.
+_scrape_moe_cache_metrics = modelctl.scrape_moe_cache_metrics
 
 
 def create_app(token=None, store=None, runner=None):

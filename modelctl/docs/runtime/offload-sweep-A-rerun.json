@@ -1,0 +1,24 @@
+[
+  {
+    "cell": "offload-A-default",
+    "status": "passed",
+    "reason": "",
+    "elapsed_s": 288.1,
+    "generation_tps": 3.77,
+    "prompt_tps": 4.36,
+    "load_seconds": 58.16,
+    "ttft_seconds": 12.554,
+    "peak_vram_bytes": {
+      "SYCL0": 28603056128,
+      "SYCL1": 6748635136
+    },
+    "peak_ram_bytes": 28028325888,
+    "storage_activity": "storage-backed",
+    "cache_state": "warm",
+    "command_fingerprint": "e96588d7acd073d7",
+    "read_bytes": 774737907712,
+    "disk_read_bytes": 395886059520,
+    "major_faults": 773822,
+    "environment_fingerprint": "4f53cda18c2baa0c"
+  }
+]

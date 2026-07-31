@@ -471,8 +471,23 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
                profile.get("backend", "llama-cpp"), ""),
            "started_at": started, "success": False, "log_path": ""}
 
+    # Reserve the RAM that must actually be resident, not the bytes the
+    # model merely addresses. claim.ram_bytes counts mmap'd model bytes,
+    # which the page cache holds only as far as it decides to -- reserving
+    # against it refuses every oversized MoE served through mmap, which is
+    # the case this project exists for. A 71 GiB Q4_K_M with 36.7 GiB of
+    # experts on mmap needs 0 bytes resident and was being denied against
+    # 26.5 GiB available. Task D1's rule, applied to admission: mmap size is
+    # not guaranteed resident RAM.
+    #
+    # ram_resident_bytes is 0 for legacy rows and for claims built before
+    # the split existed, so fall back to ram_bytes when the plan is not an
+    # mmap plan and the resident figure was never computed.
+    resident = plan.claim.ram_resident_bytes
+    if plan.claim.storage_mode != "mmap" and not resident:
+        resident = plan.claim.ram_bytes
     claim = {"vram_bytes": dict(plan.claim.vram_bytes),
-             "ram_bytes": plan.claim.ram_bytes,
+             "ram_bytes": resident,
              "storage_mode": plan.claim.storage_mode}
     budgets = {g.device: max(0, g.free_bytes - g.reserve_bytes)
                for g in modelctl_hardware.enabled_gpus(snap)}
@@ -611,13 +626,21 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
                     gen_tps.append(t["predicted_per_second"])
 
             run["success"] = True
+            # Scraped before the server is torn down, because afterwards
+            # there is no way to tell whether the cache served anything.
+            # A throughput number without this cannot distinguish "the
+            # cache did not help" from "the cache never ran" -- the exact
+            # confusion behind two earlier misleading results. None means
+            # not recorded, never zero.
+            cache_metrics = modelctl.scrape_moe_cache_metrics(port)
             # Which measurement protocol produced these numbers. Rotated
             # prompts and a single repeated prompt are not comparable --
             # the repeated one reuses the KV cache -- and rows recorded
             # before this existed have no key here at all.
             run["details"] = {**run.get("details", {}),
                               "prompt_count": len(prompts),
-                              "requests_issued": issued}
+                              "requests_issued": issued,
+                              "cache_metrics": cache_metrics}
             run["actual_context"] = actual_ctx or plan.claim.expected_context
             run["ttft_seconds"] = round(min(ttfts), 3) if ttfts else None
             run["prompt_tps"] = round(sum(prompt_tps) / len(prompt_tps), 2) if prompt_tps else None

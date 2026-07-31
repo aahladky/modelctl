@@ -64,10 +64,24 @@ class MatrixCell:
     heavy: bool = False
 
 
+# Placement comes from the fixture profile, not from the cells. An
+# oversized MoE needs placement derived for its own size and quant -- the
+# Q4_K_M run that had to be thrown away inherited a tensor split tuned for
+# a quant 2.2x smaller and left ~10 GiB of the second GPU unused. Pinning a
+# device here would rebuild that mistake into the harness. The cells share
+# one empty config so they cannot differ from each other.
+_SWEEP_CONFIG: dict = {}
+
+
 # One cache configuration across the sweep, so the only thing varying
 # between its cells is the offload threshold.
+# Budgets on every device that holds experts. The cache is ADDITIONAL to
+# the weight claim (see ResourceClaim.vram_cache_bytes), so placement has to
+# be derived with it reserved -- deriving for the model alone and adding the
+# cache afterwards overcommitted SYCL0 by ~1 GiB and lost the device
+# mid-decode with UR_RESULT_ERROR_DEVICE_LOST.
 _SWEEP_CACHE = {"mode": "manual",
-                "gpu": {"budgets_bytes": {"SYCL0": 4 << 30},
+                "gpu": {"budgets_bytes": {"SYCL0": 4 << 30, "SYCL1": 2 << 30},
                         "policy": "slru", "admission_misses": 2},
                 "decode": {"admit_to_gpu_cache": True,
                            "miss_execution": "gpu"}}
@@ -165,14 +179,14 @@ CELLS = (
     MatrixCell(
         name="offload-A-default",
         description="Offload sweep A: default thresholds, cache on (inert)",
-        config={"device": "SYCL0", "extra": "", "fit": "off"},
+        config=_SWEEP_CONFIG,
         moe_cache=_SWEEP_CACHE,
         min_gpus=1, needs_cache_capable=True, needs_moe_model=True,
         heavy=True),
     MatrixCell(
         name="offload-B-global-1",
         description="Offload sweep B: global minimum 1, cache on",
-        config={"device": "SYCL0", "extra": "", "fit": "off"},
+        config=_SWEEP_CONFIG,
         moe_cache=_SWEEP_CACHE,
         env=("GGML_OP_OFFLOAD_MIN_BATCH=1",),
         min_gpus=1, needs_cache_capable=True, needs_moe_model=True,
@@ -180,7 +194,7 @@ CELLS = (
     MatrixCell(
         name="offload-D-moe-1",
         description="Offload sweep D: MoE-only minimum 1, cache on",
-        config={"device": "SYCL0", "extra": "", "fit": "off"},
+        config=_SWEEP_CONFIG,
         moe_cache=_SWEEP_CACHE,
         env=("GGML_OP_OFFLOAD_MOE_MIN_BATCH=1",),
         min_gpus=1, needs_cache_capable=True, needs_moe_model=True,
@@ -188,7 +202,7 @@ CELLS = (
     MatrixCell(
         name="offload-E-moe-1-no-cache",
         description="Offload sweep E: MoE-only minimum 1, cache off",
-        config={"device": "SYCL0", "extra": "", "fit": "off"},
+        config=_SWEEP_CONFIG,
         moe_cache={"mode": "off"},
         env=("GGML_OP_OFFLOAD_MOE_MIN_BATCH=1",),
         min_gpus=1, needs_cache_capable=True, needs_moe_model=True,
@@ -281,12 +295,18 @@ def plan_matrix(profile, snapshot=None, backend=None, include_heavy=False):
 
 
 def run_matrix(profile, snapshot=None, backend=None, include_heavy=False,
-               only=None, max_tokens=32, log=print):
+               only=None, max_tokens=32, log=print, runs=1, warmup_tokens=0):
     """Execute the runnable cells against real processes.
 
     Each cell is measured through the same plan-test path a user's browser
     drives, so a passing matrix says the product works, not that a bespoke
     test harness works.
+
+    runs / warmup_tokens are passed to test_launch_plan(). A single cold run
+    is fine for pass/fail cells, but a throughput comparison across cells
+    needs a warmup to reach a comparable cache and page-cache state first,
+    and more than one measured run to show the spread -- on a model larger
+    than RAM that spread is itself the signal.
     """
     import modelctl_launch
     import modelctl_plans
@@ -332,7 +352,8 @@ def run_matrix(profile, snapshot=None, backend=None, include_heavy=False,
             log(f"run  {cell.name}: {cell.description}")
             run = modelctl_tune.test_launch_plan(
                 cell_profile["name"], plan.id, log=lambda *a: None,
-                max_tokens=max_tokens, runs=1,
+                max_tokens=max_tokens, runs=runs,
+                warmup_tokens=warmup_tokens,
                 binary=backend.binary, profile_override=cell_profile)
             result.measurement = {
                 "generation_tps": run.get("generation_tps"),
@@ -356,6 +377,10 @@ def run_matrix(profile, snapshot=None, backend=None, include_heavy=False,
                 "major_faults": run.get("major_faults"),
                 "ttft_seconds": run.get("ttft_seconds"),
                 "environment_fingerprint": run.get("environment_fingerprint"),
+                # Whether the cache actually served this cell. A cell that
+                # reports a throughput difference without these cannot say
+                # whether the cache caused it or was inert the whole time.
+                "cache_metrics": (run.get("details") or {}).get("cache_metrics"),
             }
             if run.get("success"):
                 result.status = "passed"

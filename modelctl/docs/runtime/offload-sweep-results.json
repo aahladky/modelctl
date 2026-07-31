@@ -1,0 +1,74 @@
+[
+  {
+    "cell": "offload-A-default",
+    "status": "failed",
+    "reason": "TimeoutError: timed out",
+    "elapsed_s": 751.1
+  },
+  {
+    "cell": "offload-B-global-1",
+    "status": "passed",
+    "reason": "",
+    "elapsed_s": 190.7,
+    "generation_tps": 9.38,
+    "prompt_tps": 4.57,
+    "load_seconds": 58.23,
+    "ttft_seconds": 12.825,
+    "peak_vram_bytes": {
+      "SYCL0": 29052895232,
+      "SYCL1": 6748635136
+    },
+    "peak_ram_bytes": 28195667968,
+    "storage_activity": "storage-backed",
+    "cache_state": "warm",
+    "command_fingerprint": "1efc043f7a552145",
+    "read_bytes": 279425544192,
+    "disk_read_bytes": 144869040128,
+    "major_faults": 69860,
+    "environment_fingerprint": "3fe6106a294b6213"
+  },
+  {
+    "cell": "offload-D-moe-1",
+    "status": "passed",
+    "reason": "",
+    "elapsed_s": 189.4,
+    "generation_tps": 9.36,
+    "prompt_tps": 4.31,
+    "load_seconds": 56.77,
+    "ttft_seconds": 13.666,
+    "peak_vram_bytes": {
+      "SYCL0": 29149364224,
+      "SYCL1": 6748635136
+    },
+    "peak_ram_bytes": 28362649600,
+    "storage_activity": "storage-backed",
+    "cache_state": "warm",
+    "command_fingerprint": "f1e4408cae8498a1",
+    "read_bytes": 292239593472,
+    "disk_read_bytes": 151815462912,
+    "major_faults": 80249,
+    "environment_fingerprint": "ab269873dc9f4d22"
+  },
+  {
+    "cell": "offload-E-moe-1-no-cache",
+    "status": "passed",
+    "reason": "",
+    "elapsed_s": 229.0,
+    "generation_tps": 5.81,
+    "prompt_tps": 3.9,
+    "load_seconds": 54.55,
+    "ttft_seconds": 13.847,
+    "peak_vram_bytes": {
+      "SYCL0": 24861736960,
+      "SYCL1": 6748635136
+    },
+    "peak_ram_bytes": 28086009856,
+    "storage_activity": "storage-backed",
+    "cache_state": "warm",
+    "command_fingerprint": "cc4ef734aaeba125",
+    "read_bytes": 310215745536,
+    "disk_read_bytes": 160086532096,
+    "major_faults": 81207,
+    "environment_fingerprint": "ab269873dc9f4d22"
+  }
+]

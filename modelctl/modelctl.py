@@ -3938,6 +3938,40 @@ def parse_prometheus_text(text: str) -> dict:
     return out
 
 
+def scrape_moe_cache_metrics(port, timeout: int = 3):
+    """MoE cache counters from a running server's /metrics, by device.
+
+    Lives here rather than in the web app because measurement needs it too:
+    a benchmark that reports throughput without recording whether the cache
+    served anything cannot distinguish "the cache did not help" from "the
+    cache was never running", which is the specific confusion that produced
+    two misleading results before anyone checked.
+
+    Label-shape agnostic: the device label may be absent, reordered, or
+    accompanied by extra labels, so parse the label block generically
+    rather than requiring exactly one device="...". Metrics with no device
+    label land under the "" key. Returns None on any failure -- absent
+    counters must read as unknown, never as zero.
+    """
+    try:
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/metrics", timeout=timeout) as r:
+            text = r.read().decode()
+    except Exception:
+        return None
+    stats = {}
+    for line in text.splitlines():
+        if not line.startswith("llamacpp:moe_cache_"):
+            continue
+        m = re.match(r"llamacpp:moe_cache_(\w+)(\{[^}]*\})?\s+(\S+)", line)
+        if not m:
+            continue
+        key, labels, val = m.group(1), m.group(2) or "", m.group(3)
+        dm = re.search(r'device="([^"]*)"', labels)
+        stats.setdefault(dm.group(1) if dm else "", {})[key] = val
+    return stats or None
+
+
 def fetch_model_metrics(name: str, timeout: int = 10):
     """GET one loaded model's own /metrics directly from its upstream
     llama-server port. llama-swap's front-door /metrics is process-wide
