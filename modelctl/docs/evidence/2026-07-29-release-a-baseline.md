@@ -1,5 +1,11 @@
 # modelctl Release A — July 29, 2026
 
+> **Historical validation snapshot.** Do not use this file as current
+> project status or a work order. The "remaining work" table and the
+> "hybrid always false" decision describe July 29; hybrid CPU-miss
+> execution has since shipped (see
+> [../runtime/hybrid-moe.md](../runtime/hybrid-moe.md)).
+
 ## Starting Point
 
 - **modelctl commit**: `484021d` (Add review packet: MoE cache + modelctl integration)

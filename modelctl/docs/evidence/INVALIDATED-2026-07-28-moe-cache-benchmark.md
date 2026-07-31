@@ -1,4 +1,12 @@
-# MoE expert cache — benchmark results
+# INVALIDATED: MoE expert cache — 2026-07-28 benchmark results
+
+> **Do not quote these performance numbers.** The 07-28 runs used
+> incorrect cached weights (up/down projection hits served gate bytes)
+> and are preserved only as debugging history. For valid cache
+> measurements use
+> [2026-07-30-batch1-transfer-cache.md](2026-07-30-batch1-transfer-cache.md)
+> and
+> [2026-07-30-q4km-offload-threshold.md](2026-07-30-q4km-offload-threshold.md).
 
 Model: Laguna-S-2.1, 19/47 expert layers on CPU (`ffn_.*_exps=CPU`).
 Config: 1 GiB cache budget, SLRU policy, admission=1.

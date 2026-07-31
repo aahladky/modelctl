@@ -1,7 +1,7 @@
 # Release A target-hardware matrix — 2026-07-30
 
-**Roadmap:** Task E3. Run with `modelctl_acceptance.run_matrix()`; see
-`test_release_a_matrix.py` for the harness test.
+> Dated evidence. Run with `modelctl_acceptance.run_matrix()`; see
+> `test_release_a_matrix.py` for the harness test.
 
 **Hardware:** SYCL0 Intel Arc Pro B70 (31.9 GiB) · SYCL1 Intel Arc B580
 (11.9 GiB) · 22.6 GiB RAM available · model store on `/dev/nvme1n1p1`
@@ -45,8 +45,8 @@ time, and `main-plus-draft` needs a fixture with an MTP companion (the
 within noise of each other, and if anything slightly slower. The model
 fits comfortably in SYCL0's VRAM, so there is nothing for the cache to
 avoid transferring; this is the expected result for a model that is not
-oversized, and it is exactly why Phase H requires a measured improvement
-before an experimental plan may outrank a safe one. The cache's value has
+oversized, and it is exactly why an experimental plan requires a
+measured improvement before it may outrank a safe one. The cache's value has
 to be demonstrated on a model that does not fit, which is the
 `ram-spill` / oversized case still outstanding.
 
@@ -67,9 +67,9 @@ one in the report:
 
 1. **Cells inherited the fixture profile's `moe_cache` configuration.**
    The `qwen3.5-35b` profile sets `mode=manual` with
-   `decode.miss_execution=cpu`, and the runtime does not implement
-   `moe_hybrid_cpu_miss` (that is Phase G). Phase B's fail-closed launch
-   gate correctly refused to launch — a product success being reported as
+   `decode.miss_execution=cpu`, and the runtime at this date did not
+   implement `moe_hybrid_cpu_miss`. The fail-closed launch gate
+   correctly refused to launch — a product success being reported as
    a matrix failure. Cells now declare their own cache state.
 
 2. **The failure reason was uninformative.** `preflight_failed` is a

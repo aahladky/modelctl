@@ -2,7 +2,7 @@
 description: Sanity-check the live llama-swap (:9292) and modelctl web (:9293) services.
 ---
 
-Run the live checks from `docs/REVIEW-2026-07-29-moe-cache-integration.md` section 7:
+Run the live checks:
 
 ```bash
 curl -s localhost:9292/v1/models

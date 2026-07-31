@@ -7,10 +7,10 @@ before measuring.
 
 ## Why this was worth measuring
 
-Phase E's hardware matrix found `cache-enabled` ≈ `cache-disabled`, and
+The Release A hardware matrix found `cache-enabled` ≈ `cache-disabled`, and
 attempts to observe the cache's counters found no cache instance at all.
 The cause is documented in
-`../../docs/upstream-sync/2026-07-30-cache-inactivity-rootcause.md`: the
+`../../../docs/upstream-sync/2026-07-30-cache-inactivity-rootcause.md`: the
 scheduler hook only fires for cross-backend weight copies, gated on
 
 ```cpp
@@ -18,14 +18,15 @@ get_op_batch_size(op) >= sycl_ctx->op_offload_min_batch_size   // default 32
 ```
 
 Decode is batch 1, so on the default configuration the cache **never
-activates during generation** — exactly the case Phase G names as the
-requirement ("useful interactive decoding, not only large prompt
-batches"). `GGML_OP_OFFLOAD_MIN_BATCH` overrides the threshold, making
+activates during generation** — exactly the interactive-decode case
+the hybrid CPU-miss design was written for ("useful interactive
+decoding, not only large prompt batches"). `GGML_OP_OFFLOAD_MIN_BATCH` overrides the threshold, making
 the question answerable directly.
 
 ## Setup
 
-Runtime `build-sycl-f` at fork commit `9d175c28a` (Phase F fixes in).
+Runtime `build-sycl-f` at fork commit `9d175c28a` (metrics and
+per-projection admission fixes in).
 One warmup plus two measured generations of 128 tokens, temperature 0.
 SLRU, admission 2, prefill admission on.
 
@@ -86,7 +87,7 @@ cross-backend copy, and that blanket cost is what the cache is fighting:
 -41% before it does anything. It recovers 48% of a 41% hole and lands
 12% short.
 
-**That framing suggests the fix, and it is not Phase G.** The threshold
+**That framing suggests the fix, and it is not CPU-miss execution.** The threshold
 is a property of the *offload decision*, not of the cache. Nothing
 requires it to be uniform across op types. If routed MoE expert ops were
 exempted from the minimum — or given their own, lower one — the cache
@@ -96,7 +97,7 @@ because the +48% would be measured against the default 25.50 t/s rather
 than against a self-inflicted 15.16.
 
 That is a small, local change to `ggml_backend_sycl_device_offload_op`
-and worth trying before any of Phase G.
+and worth trying before any hybrid CPU-miss work.
 
 ## Revised conclusions
 
@@ -106,25 +107,26 @@ and worth trying before any of Phase G.
    deliberately handicapped baseline.
 2. **The binding constraint is the global offload threshold, not the
    cache.** Per-op-type offload policy is the next thing to test, and it
-   is far cheaper than implementing Phase G.
-3. **Phase G is not invalidated, but it is also not the next step.** Its
+   is far cheaper than implementing CPU-miss execution.
+3. **Hybrid CPU-miss execution is not invalidated, but it is also not the next step.** Its
    design (execute miss rows on CPU rather than copying weights over
    PCIe) still avoids this cost class entirely. But if an op-aware
-   threshold makes the existing cache a win, G's cost/benefit changes
+   threshold makes the existing cache a win, its cost/benefit changes
    substantially and should be re-derived from that baseline.
 4. **Any future cache A/B must set `GGML_OP_OFFLOAD_MIN_BATCH` or verify
    activation**, or the cache is silently inert and the comparison
    reports "no difference" for the wrong reason. This is what happened in
-   Phase E, where the result was attributed to the model fitting in VRAM.
+   the Release A matrix, where the result was attributed to the model
+   fitting in VRAM.
 
 ## Incidental validation
 
 First observation of the cache counters at all, which exercised two
-Phase F fixes end to end: the renamed metrics appear correctly as
+recent fixes end to end: the renamed metrics appear correctly as
 `moe_cache_served_projections_total` and
 `moe_cache_host_weight_copy_fallbacks_total` with `# HELP`/`# TYPE`
 emitted once per family, and 12,477 promotions at `admission_misses=2`
-means the per-projection admission path from F3 ran. Neither substitutes
+means the per-projection admission path ran. Neither substitutes
 for `tests/test-moe-cache.cpp`, which still does not build.
 
 ## Reproducing
@@ -189,7 +191,7 @@ stopped.
 
 Re-run all three conditions with `--tensor-split 8,3`, confirm both GPUs
 are meaningfully used before trusting anything, and follow
-`moe-cache-testing-methodology.md`. The open question this would answer
+[`../runtime/moe-cache-testing.md`](../runtime/moe-cache-testing.md). The open question this would answer
 is the interesting one: **in a genuinely storage-bound regime, where a
 cache miss can cost a disk read rather than a PCIe copy, does the cache
 finally pay for itself outright?** Neither smaller quant could answer

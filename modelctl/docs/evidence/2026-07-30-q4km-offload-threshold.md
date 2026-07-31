@@ -88,12 +88,12 @@ does not opt in.
 
 ## What this changes
 
-**Phase G's premise no longer holds as stated.** G was justified by the
-transfer cache being unable to serve interactive decode. On the storage-bound
-target it serves it at +148% over the default. G's CPU-miss execution avoids
-the PCIe round trip entirely and may still go further, but its cost/benefit
-has to be re-derived against this baseline rather than against the default
-configuration.
+**The hybrid CPU-miss premise no longer holds as stated.** It was
+justified by the transfer cache being unable to serve interactive
+decode. On the storage-bound target it serves it at +148% over the
+default. CPU-miss execution avoids the PCIe round trip entirely and may
+still go further, but its cost/benefit has to be re-derived against this
+baseline rather than against the default configuration.
 
 **The earlier "-12% net" result was specific to a quant that fits in VRAM.**
 Where the model fits, lowering the threshold costs more than the cache
@@ -126,7 +126,7 @@ cache.
 ```bash
 cd ~/workspace/moe-serving/modelctl
 source /opt/intel/oneapi/setvars.sh --force
-.venv/bin/python /home/aaron/tmp/moe-minbatch-correctness/run_offload_sweep.py
+.venv/bin/python docs/evidence/offload-sweeps/run_offload_sweep.py
 ```
 
 Placement is derived in that script with the cache reserved. Deriving for

@@ -12,6 +12,7 @@ The run this replaces inherited a split tuned for a quant 2.2x smaller and
 had to be thrown away.
 """
 import json
+import os
 import sys
 import time
 
@@ -34,7 +35,9 @@ OT = (r"blk\.(?:[0-9]|1[0-2])\.ffn_.*_exps=SYCL0,"
       r"ffn_.*_exps=CPU")
 CELLS = ("offload-A-default", "offload-B-global-1",
          "offload-D-moe-1", "offload-E-moe-1-no-cache")
-OUT = "/home/aaron/tmp/moe-minbatch-correctness/offload-sweep-results.json"
+# Written next to this script so the sweep and its result travel together.
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                   "offload-sweep-results.json")
 
 
 def main():
