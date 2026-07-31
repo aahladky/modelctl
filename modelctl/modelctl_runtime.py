@@ -168,6 +168,15 @@ _MIGRATIONS = [
     ("decision_json", "TEXT NOT NULL DEFAULT '{}'", "{}"),
     ("parent_job_id", "TEXT", None),
     ("fallback_ordinal", "INTEGER", None),
+    # What produced this row. "benchmark" rows are measurements: a
+    # controlled run that reports throughput. "serving" rows are
+    # bookkeeping from the managed worker -- a real llama-swap load,
+    # which has no throughput numbers and whose duration says nothing
+    # about the plan. Ranking, validation, and autotune consider only
+    # benchmarks; a serving row used to shadow the real measurement for
+    # the same plan (newest-per-plan wins), so a measured plan read back
+    # as "validated (None tok/s)" and lost its measured advantage.
+    ("run_kind", "TEXT NOT NULL DEFAULT 'benchmark'", "benchmark"),
     # Cold/warm separation: measurements carry their cache
     # state ("cold"/"warm"/"" for legacy rows) and ranking never compares
     # across states.
@@ -415,13 +424,13 @@ class RuntimeDB:
                 "command_fingerprint, command_argv_json, binary_path, binary_fingerprint, "
                 "environment_fingerprint, capability_schema, capability_digest, "
                 "claim_json, decision_json, parent_job_id, fallback_ordinal, "
-                "cache_state, read_bytes, read_bytes_warmup, read_bytes_generation, "
+                "cache_state, run_kind, read_bytes, read_bytes_warmup, read_bytes_generation, "
                 "major_faults, minor_faults, "
                 "peak_pss_bytes, read_syscalls, disk_read_bytes, storage_device, "
                 "baseline_vram_json, final_vram_json, storage_activity, "
                 "storage_activity_detail, rates_json) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
-                "?,?,?,?,?,?,?,?,?)",
+                "?,?,?,?,?,?,?,?,?,?)",
                 (run["profile_name"], run["plan_id"],
                  run.get("hardware_fingerprint", ""), run.get("backend_fingerprint", ""),
                  run.get("started_at", time.time()), run.get("finished_at"),
@@ -444,6 +453,7 @@ class RuntimeDB:
                  run.get("parent_job_id"),
                  run.get("fallback_ordinal"),
                  run.get("cache_state", ""),
+                 run.get("run_kind", "benchmark"),
                  run.get("read_bytes"),
                  run.get("read_bytes_warmup"),
                  run.get("read_bytes_generation"),
@@ -489,15 +499,20 @@ class RuntimeDB:
         are bucketed with "cold" (the conservative interpretation) rather
         than forming a third state that could shadow real measurements."""
         with self._conn() as c:
+            # Benchmarks only. A serving row carries no throughput and
+            # its duration reflects a user session, not the plan; letting
+            # one into this set made the newest-per-plan rule discard the
+            # real measurement.
             rows = c.execute(
                 "SELECT * FROM plan_runs WHERE profile_name=? AND success=1 "
+                "AND run_kind='benchmark' "
                 "ORDER BY started_at DESC", (profile_name,)).fetchall()
         # Newest successful run per (cache_state, plan_id); rows are
         # newest-first so the first sighting of a plan wins.
         by_state = {}
         for r in rows:
             d = dict(r)
-            state = d.get("cache_state") or "cold"
+            state = d.get("cache_state") or "unknown"
             plans_for_state = by_state.setdefault(state, {})
             if d["plan_id"] not in plans_for_state:
                 plans_for_state[d["plan_id"]] = d
@@ -507,7 +522,9 @@ class RuntimeDB:
         # only) sits between "cold" and "warm-expert" (page cache plus a
         # filled GPU expert cache) -- three distinct states, never
         # compared against each other.
-        conservatism = {"cold": 0, "warm": 1, "warm-expert": 2}
+        # "unknown" (legacy rows with no recorded state) is the most
+        # conservative: it cannot be claimed as either cold or warm.
+        conservatism = {"unknown": -1, "cold": 0, "warm": 1, "warm-expert": 2}
         chosen_state = sorted(
             by_state,
             key=lambda s: (-len(by_state[s]), conservatism.get(s, 1)))[0]

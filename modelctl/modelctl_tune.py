@@ -218,12 +218,43 @@ def classify_bottleneck(run):
 
     # H2D: the expert cache is missing often enough that every token drags
     # weights across PCIe.
-    cache = run.get("cache_metrics") if hasattr(run, "get") else None
-    if isinstance(cache, dict) and cache.get("lookups"):
-        hit_ratio = cache.get("hit_ratio")
-        if hit_ratio is None and cache.get("lookups"):
-            hit_ratio = cache.get("hits", 0) / cache["lookups"]
-        if hit_ratio is not None and hit_ratio < 0.5:
+    #
+    # Metrics live in details["cache_metrics"] as {device: {name: value}}
+    # (scrape_moe_cache_metrics), persisted through details_json. This
+    # branch used to read a flat run["cache_metrics"] with numeric
+    # hits/lookups keys -- a shape nothing ever produced -- so every
+    # transfer-bound run fell through and was reported, confidently, as
+    # GPU-bound.
+    cache = {}
+    try:
+        details = run["details_json"] if "details_json" in run.keys() \
+            else run.get("details_json") or run.get("details") or {}
+    except (AttributeError, TypeError, KeyError, IndexError):
+        details = run.get("details") if hasattr(run, "get") else {}
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except ValueError:
+            details = {}
+    if isinstance(details, dict):
+        cache = details.get("cache_metrics") or {}
+    hits = lookups = 0
+    if isinstance(cache, dict):
+        for per_device in cache.values():
+            if not isinstance(per_device, dict):
+                continue
+            def _n(name):
+                try:
+                    return float(per_device.get(name, 0) or 0)
+                except (TypeError, ValueError):
+                    return 0.0
+            hits += _n("hits_total") or _n("hits")
+            lookups += (_n("lookups_total") or _n("lookups")
+                        or (_n("hits_total") or _n("hits"))
+                        + (_n("misses_total") or _n("misses")))
+    if lookups:
+        hit_ratio = hits / lookups
+        if hit_ratio < 0.5:
             return ("h2d",
                     f"expert cache hit rate is {hit_ratio * 100:.0f}% — most "
                     f"tokens transfer expert weights over PCIe")
@@ -407,6 +438,34 @@ class _Sampler:
         except OSError:
             pass
         return read_bytes, minor, major, syscr
+
+
+
+def _classify_failure_from_log(profile, exit_code, log_path, tail_bytes=8192):
+    """Failure class for a backend that died or never became ready.
+
+    Reads the tail of the run's log and asks the backend adapter to
+    classify it (modelctl_backends.*.classify_failure), so permanent
+    failures get a class that plan ranking can suppress rather than the
+    generic backend_crash it retries.
+    """
+    tail = ""
+    try:
+        with open(log_path, "rb") as f:
+            try:
+                f.seek(-tail_bytes, os.SEEK_END)
+            except OSError:
+                f.seek(0)
+            tail = f.read().decode("utf-8", "replace")
+    except OSError:
+        pass
+    try:
+        import modelctl_backends
+        adapter = modelctl_backends.get_backend(
+            (profile or {}).get("backend", "llama-cpp"))
+        return adapter.classify_failure(exit_code, tail)
+    except Exception:
+        return "health_timeout" if exit_code is None else "backend_crash"
 
 
 def _wait_ready(port, proc, timeout=900):
@@ -600,8 +659,15 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
                       storage_device=plan.claim.storage_device) as sampler:
             ready, load_s = _wait_ready(port, proc)
             if not ready:
-                run["failure_class"] = "health_timeout" if proc.poll() is None else "backend_crash"
                 run["exit_code"] = proc.poll()
+                # Classify from the log tail rather than defaulting to a
+                # generic crash: the suppression classes
+                # (unsupported_architecture, invalid_argument) only exist
+                # if something produces them, and nothing did -- so a
+                # plan that can never work was retried on every managed
+                # launch forever instead of being permanently suppressed.
+                run["failure_class"] = _classify_failure_from_log(
+                    profile, run["exit_code"], log_path)
                 log(f"backend failed to become ready (class={run['failure_class']})")
                 return run
 
@@ -765,6 +831,7 @@ def autotune_profile(profile_name, objective="balanced", candidate_ids=None,
         snap.backend_fingerprints.get(profile.get("backend", "llama-cpp"), ""))
 
     candidates = []
+    skipped_validated = 0
     for p in plans:
         if cancel_check and cancel_check():
             raise InterruptedError("autotune cancelled")
@@ -772,8 +839,10 @@ def autotune_profile(profile_name, objective="balanced", candidate_ids=None,
             continue
         obs = existing.get(p.id)
         if obs and not obs.get("stale") and not retest:
+            tps = obs.get("generation_tps")
             log(f"skip {p.label} -- already validated on this hardware "
-                f"({obs['generation_tps']} tok/s)")
+                + (f"({tps} tok/s)" if tps else "(no throughput recorded)"))
+            skipped_validated += 1
             continue
         candidates.append(p)
 
@@ -793,7 +862,10 @@ def autotune_profile(profile_name, objective="balanced", candidate_ids=None,
     scored = sorted(
         (r for r in results if r.get("success")),
         key=lambda r: -(r.get("generation_tps") or 0))
-    return {"tested": len(results), "skipped_validated": len(plans) - len(candidates),
+    # Counted where the skip happens: len(plans) - len(candidates) also
+    # counted plans excluded by a candidate_ids filter, so a run testing
+    # 2 of 10 selected plans reported 8 "already validated".
+    return {"tested": len(results), "skipped_validated": skipped_validated,
             "results": results, "best": scored[0]["plan_id"] if scored else None}
 
 

@@ -45,7 +45,14 @@ def _find_mount_point(path: str) -> str:
                 parts = line.split()
                 if len(parts) >= 2:
                     mount = parts[1]
-                    if str(p).startswith(mount) and len(mount) > best_len:
+                    # Component-boundary match, not raw startswith:
+                    # "/mnt/models2/x.gguf" is not on the "/mnt/models"
+                    # mount, and treating it as such probed the wrong
+                    # device for transport, rotational and free-space.
+                    if (str(p) == mount
+                            or str(p).startswith(
+                                mount if mount.endswith("/") else mount + "/")) \
+                            and len(mount) > best_len:
                         best = mount
                         best_len = len(mount)
     except OSError:

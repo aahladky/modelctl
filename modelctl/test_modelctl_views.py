@@ -23,9 +23,23 @@ GB = 1 << 30
 TOKEN = "test-token"
 
 
-def run(**kw):
+def run(cache_metrics=None, **kw):
+    """A plan_run row as the DB really stores one.
+
+    cache_metrics is given as {hits, lookups} for readability and is
+    rendered into the shape scrape_moe_cache_metrics actually produces:
+    details_json -> {"cache_metrics": {device: {metric: value}}}. The
+    old helper put a flat numeric dict at run["cache_metrics"], a shape
+    nothing in production ever wrote -- which is how the H2D branch
+    stayed "tested" while being unreachable for real runs.
+    """
     base = {"read_bytes_generation": 0, "major_faults": 0,
             "generation_tps": 20.0, "claim_json": json.dumps({"ram_bytes": 0})}
+    if cache_metrics is not None:
+        hits = cache_metrics["hits"]
+        misses = cache_metrics["lookups"] - hits
+        base["details_json"] = json.dumps({"cache_metrics": {
+            "SYCL0": {"hits_total": str(hits), "misses_total": str(misses)}}})
     base.update(kw)
     return base
 
