@@ -153,6 +153,55 @@ print(','.join(k for k, v in f.items() if v) or 'none')
     fi
 fi
 
+# --- 5. sanitizer pass over the host-only cache/hybrid tests ----------
+# The staging/hybrid path's worst failure mode is a lifetime bug that
+# corrupts silently (the 2026-07 use-after-free shipped green through
+# every functional test). ASan/UBSan turns that whole class into a
+# deterministic red test, with no GPU required.
+head "sanitizer pass (ASan/UBSan, host-only tests)"
+if [ "$QUICK" = "1" ]; then
+    printf '  \033[33mSKIP\033[0m  sanitizers (--quick)\n'
+else
+    SBUILD="${MODELCTL_CI_SAN_BUILD_DIR:-/tmp/ci-build-san}"
+    # -fno-sanitize=function: upstream ggml's type-traits table stores
+    # dequantizers cast to a generic signature; every indirect call
+    # through it trips clang's function-type check. That UB is upstream's
+    # to fix -- the checks we are here for (lifetimes, bounds, overflow)
+    # all stay on.
+    SANFLAGS="-fsanitize=address,undefined -fno-sanitize=function -fno-sanitize-recover=all"
+    # Pick a toolchain whose sanitizer runtime actually links: gcc needs
+    # the libasan/libubsan RPMs, clang carries compiler-rt statically.
+    SAN_CC=""; SAN_CXX=""
+    for pair in "gcc:g++" "clang:clang++"; do
+        c="${pair%%:*}"; cxx="${pair##*:}"
+        if command -v "$c" >/dev/null && command -v "$cxx" >/dev/null \
+           && echo 'int main(){return 0;}' | "$c" $SANFLAGS -x c - \
+                -o /tmp/ci-santest 2>/dev/null; then
+            SAN_CC="$c"; SAN_CXX="$cxx"; break
+        fi
+    done
+    rm -f /tmp/ci-santest
+    if [ -z "$SAN_CC" ]; then
+        printf '  \033[33mSKIP\033[0m  no toolchain with a working sanitizer runtime (dnf install libasan libubsan, or install clang)\n'
+    elif cmake -B "$SBUILD" -S "$REPO/llama.cpp" -DGGML_SYCL=OFF \
+            -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_TESTS=ON \
+            -DLLAMA_BUILD_EXAMPLES=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER="$SAN_CC" -DCMAKE_CXX_COMPILER="$SAN_CXX" \
+            -DCMAKE_C_FLAGS="$SANFLAGS" -DCMAKE_CXX_FLAGS="$SANFLAGS" \
+            > /tmp/ci-cmake-san.log 2>&1 \
+       && cmake --build "$SBUILD" --target test-moe-cache test-moe-hybrid \
+            -j"$(nproc)" > /tmp/ci-build-san.log 2>&1; then
+        if "$SBUILD/bin/test-moe-cache" > /dev/null 2>&1; then
+            pass "test-moe-cache under ASan/UBSan"
+        else fail "test-moe-cache under ASan/UBSan"; fi
+        if "$SBUILD/bin/test-moe-hybrid" > /dev/null 2>&1; then
+            pass "test-moe-hybrid under ASan/UBSan"
+        else fail "test-moe-hybrid under ASan/UBSan"; fi
+    else
+        fail "sanitizer build -- see /tmp/ci-build-san.log"
+    fi
+fi
+
 head "result"
 if [ "$FAILURES" -eq 0 ]; then
     printf '  \033[32mall checks passed\033[0m\n\n'
