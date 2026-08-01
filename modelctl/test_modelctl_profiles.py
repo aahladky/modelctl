@@ -15,6 +15,20 @@ class TestNormalizeProfile(unittest.TestCase):
         self.assertEqual(p["config"]["cache_type_k"], "q8_0")
         self.assertEqual(p["config"]["cache_type_v"], "q8_0")
 
+    def test_profile_without_fit_stays_fit_off(self):
+        # Additive-migration invariant (docs/architecture.md): a profile
+        # saved before the fit feature existed must keep its pre-fit launch
+        # behavior (explicit -ngl/-c). fit="on" is opt-in at creation time
+        # (_auto_config's tier-1 primary-GPU pin), never a migration default.
+        raw = {"name": "test", "config": {"ctx": 4096}}
+        p = modelctl_profiles.normalize_profile(raw)
+        self.assertEqual(p["config"]["fit"], "off")
+
+    def test_explicit_fit_on_preserved(self):
+        raw = {"name": "test", "config": {"ctx": 4096, "fit": "on"}}
+        p = modelctl_profiles.normalize_profile(raw)
+        self.assertEqual(p["config"]["fit"], "on")
+
     def test_legacy_kv_quant_migrated(self):
         raw = {"name": "test", "config": {"ctx": 4096, "kv_quant": "q4_0"}}
         p = modelctl_profiles.normalize_profile(raw)

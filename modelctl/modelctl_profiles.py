@@ -90,7 +90,10 @@ _DEFAULT_CONFIG = {
     "flash_attn": "auto",
     "ttl": 3600,
     "mtp": "off",
-    "fit": "on",
+    # "off" preserves the pre-fit launch behavior (-ngl 999 -c <ctx>) for
+    # every profile saved before the fit feature existed. Tier-1 zero-config
+    # pulls opt into "on" explicitly at creation (_auto_config).
+    "fit": "off",
     "extra": "",
 }
 
@@ -248,7 +251,7 @@ def validate_profile(profile: dict) -> list[ValidationMessage]:
             field="config.flash_attn",
         ))
 
-    fit = cfg.get("fit", "on")
+    fit = cfg.get("fit", "off")
     if fit not in _VALID_FIT:
         messages.append(ValidationMessage(
             code="invalid_config",

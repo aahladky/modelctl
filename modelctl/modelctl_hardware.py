@@ -118,12 +118,17 @@ def _backend_fingerprints():
     except Exception:
         binary = None
     if binary:
+        version = "unknown"
         try:
-            result = subprocess.run(
-                [binary, "--version"], capture_output=True, text=True, timeout=5)
-            version = (result.stdout or result.stderr).strip().split("\n")[0]
+            import modelctl as _mc_probe
+            result = _mc_probe.run_llama_probe(binary, ["--version"], timeout=5)
+            # Non-zero exit means the probe printed crash noise, not a
+            # version (SYCL builds abort without the oneAPI env) -- keep
+            # "unknown" rather than fingerprinting the abort banner.
+            if result is not None and result.returncode == 0:
+                version = (result.stdout or result.stderr).strip().split("\n")[0]
         except Exception:
-            version = "unknown"
+            pass
         fps["llama-cpp"] = f"{version}#{modelctl_vram.file_fingerprint(binary)}"
     else:
         fps["llama-cpp"] = "unavailable"

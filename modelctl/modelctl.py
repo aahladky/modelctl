@@ -764,23 +764,88 @@ def find_llama_server_candidates():
     return [f for f in found if os.access(f, os.X_OK)]
 
 
+_PROBE_ENV_CACHE = None
+
+
+def _probe_env_candidates():
+    """Environments to try for llama-server probes: the bare process env
+    first, then each known env script's exports (SYCL builds need the oneAPI
+    LD_LIBRARY_PATH to enumerate devices at all). Memoized -- the auto-fix
+    sweep probes several binaries per profile and sourcing setvars.sh costs
+    whole seconds each time."""
+    global _PROBE_ENV_CACHE
+    if _PROBE_ENV_CACHE is None:
+        envs = [None]
+        for script in find_env_script_candidates():
+            env = source_env_script(script)
+            if env:
+                envs.append(env)
+        _PROBE_ENV_CACHE = envs
+    return _PROBE_ENV_CACHE
+
+
+def _promote_probe_env(env):
+    """Remember the env that just made a probe succeed so later probes --
+    any probe path -- try it before the bare environment. On a box where
+    the bare run aborts (SYCL without the oneAPI env), bare-first costs a
+    coredump per probe."""
+    global _PROBE_ENV_CACHE
+    if env is None:
+        return
+    if _PROBE_ENV_CACHE is None:
+        _PROBE_ENV_CACHE = [env, None]
+        return
+    if env in _PROBE_ENV_CACHE:
+        _PROBE_ENV_CACHE.remove(env)
+    _PROBE_ENV_CACHE.insert(0, env)
+
+
+def run_llama_probe(binary_path: str, args: list, timeout=15):
+    """Run a llama-server probe invocation (--version, --list-devices, ...)
+    through the known env candidates, returning the first CompletedProcess
+    that exited 0 -- or the last attempt when none did (None when every
+    attempt failed to launch at all). Any llama-server invocation initializes
+    the backend registry, so a SYCL build aborts without the oneAPI env and
+    prints crash noise; callers must treat a non-zero exit as 'no answer',
+    never parse its output."""
+    result = None
+    candidates = _probe_env_candidates()
+    for i, env in enumerate(list(candidates)):
+        full_env = {**os.environ, **env} if env else None
+        try:
+            attempt = subprocess.run(
+                [binary_path] + list(args), capture_output=True, text=True,
+                timeout=timeout, env=full_env)
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+        result = attempt
+        if attempt.returncode == 0:
+            _promote_probe_env(env)
+            return attempt
+    return result
+
+
 def binary_supports_device(binary_path: str, device: str, timeout=15) -> bool:
-    """Run --list-devices and check whether the requested device's backend
-    prefix (SYCL, CUDA, VULKAN, ...) actually shows up. A Vulkan-only build
+    """Check whether --list-devices actually enumerates a device with the
+    requested backend prefix (SYCL, CUDA, VULKAN, ...). A Vulkan-only build
     and a SYCL-only build both satisfy 'a llama-server exists here' but only
     one of them can actually serve a SYCL0 device, so existence alone isn't
-    enough to call a candidate usable."""
+    enough to call a candidate usable.
+
+    Support means a parsed device line -- the same structured parse the GPU
+    inventory uses -- never a substring of raw output: a binary that dies
+    with an uncaught sycl::exception prints 'sycl' on the way down, and that
+    must read as broken, not as SYCL support. When the bare probe sees no
+    devices the known env scripts are tried before giving up."""
     backend = re.match(r"[A-Za-z]+", device)
     backend = backend.group(0).upper() if backend else device.upper()
-    try:
-        result = subprocess.run(
-            [binary_path, "--list-devices"],
-            capture_output=True, timeout=timeout, text=True,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return False
-    output = (result.stdout or "") + (result.stderr or "")
-    return backend in output.upper()
+    for env in list(_probe_env_candidates()):
+        devices = modelctl_vram.llama_list_devices(
+            binary_path, timeout=timeout, env=env)
+        if any(d["device"].upper().startswith(backend) for d in devices):
+            _promote_probe_env(env)
+            return True
+    return False
 
 
 def find_env_script_candidates():
@@ -1678,7 +1743,7 @@ def _default_config() -> dict:
         "flash_attn": d.get("flash_attn", "auto"),
         "ttl": int(d.get("ttl", 3600)),
         "mtp": d.get("mtp", "off"),
-        "fit": d.get("fit", "on"),
+        "fit": d.get("fit", "off"),
         "extra": "",
     }
 
@@ -3438,11 +3503,20 @@ def _gpu_inventory_from_llama() -> list:
         if b and b not in binaries:
             binaries.append(b)
     binaries.sort(key=lambda b: ("sycl" not in b.lower(), b))
+    # Built fresh each call (not via _probe_env_candidates): this is the
+    # xpu-smi fallback path, and its callers/tests expect the patched
+    # script finders to take effect per call.
     envs = [None]
     for script in find_env_script_candidates():
         env = source_env_script(script)
         if env:
             envs.append(env)
+    # An env already proven to work this process goes before the bare
+    # attempt: without this, a box whose bare probe aborts (missing oneAPI
+    # env) dumps one core per inventory call -- once per console page load
+    # when xpu-smi is absent.
+    if _PROBE_ENV_CACHE and _PROBE_ENV_CACHE[0] is not None:
+        envs.insert(0, _PROBE_ENV_CACHE[0])
     for binary in binaries:
         for env in envs:
             devices = modelctl_vram.llama_list_devices(binary, env=env)
@@ -3451,6 +3525,7 @@ def _gpu_inventory_from_llama() -> list:
                            if not re.search(GPU_EXCLUDE_PATTERN, d["name"],
                                             re.IGNORECASE)]
             if devices:
+                _promote_probe_env(env)
                 return sorted(
                     ({"device": d["device"], "name": d["name"],
                       "total_bytes": d["total_mib"] * MiB,

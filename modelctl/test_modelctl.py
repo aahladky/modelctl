@@ -484,6 +484,130 @@ class TestSyncLlamaSwapConfigOvms(unittest.TestCase):
         self.assertNotIn("stale-model", config["models"])
 
 
+class TestFitDefaults(unittest.TestCase):
+    def test_default_config_fit_defaults_off(self):
+        # New-profile defaults keep fit opt-in; only the tier-1 zero-config
+        # pull path turns it on. A defaults.json with an explicit "fit" key
+        # still wins.
+        with mock.patch.object(modelctl, "load_defaults", return_value={}):
+            self.assertEqual(modelctl._default_config()["fit"], "off")
+
+    def test_auto_config_tier1_pull_opts_into_fit(self):
+        defaults = {"device": "", "split_mode": "layer", "tensor_split": "4,1",
+                    "ctx": 64000, "flash_attn": "auto", "ttl": 3600}
+        with mock.patch.object(modelctl, "load_defaults", return_value=defaults):
+            cfg = modelctl._auto_config({"fits": True, "primary": "SYCL0"})
+            self.assertEqual(cfg.get("fit"), "on")
+            cfg_no_rec = modelctl._auto_config(None)
+            self.assertNotEqual(cfg_no_rec.get("fit"), "on")
+
+
+class TestBinarySupportsDevice(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        # Each test controls the probe env candidates explicitly; reset the
+        # memoized candidate list so patched script finders take effect.
+        self._old_cache = getattr(modelctl, "_PROBE_ENV_CACHE", None)
+        modelctl._PROBE_ENV_CACHE = None
+        self.addCleanup(setattr, modelctl, "_PROBE_ENV_CACHE", self._old_cache)
+
+    def _fake_binary(self, script_body):
+        path = Path(self.tmp.name) / "llama-server"
+        path.write_text("#!/bin/sh\n" + script_body)
+        path.chmod(0o755)
+        return str(path)
+
+    def test_crashing_binary_mentioning_sycl_is_not_support(self):
+        # An uncaught sycl::exception abort prints "sycl" to stderr; that
+        # must not count as SYCL support. (2026-07-31: with the oneAPI env
+        # missing, every bare probe crashed exactly this way yet was
+        # "confirmed to support 'SYCL0'" and AUTO-FIXED into configs.)
+        bin_path = self._fake_binary(
+            "echo \"terminate called after throwing an instance of "
+            "'sycl::_V1::exception'\" >&2\n"
+            "exit 134\n")
+        with mock.patch.object(modelctl, "find_env_script_candidates",
+                               return_value=[]):
+            self.assertFalse(modelctl.binary_supports_device(bin_path, "SYCL0"))
+
+    def test_enumerated_device_is_support(self):
+        bin_path = self._fake_binary(
+            'echo "Available devices:"\n'
+            'echo "  SYCL0: Intel(R) Arc(TM) Pro B70 Graphics '
+            '(32656 MiB, 30422 MiB free)"\n'
+            'exit 0\n')
+        with mock.patch.object(modelctl, "find_env_script_candidates",
+                               return_value=[]):
+            self.assertTrue(modelctl.binary_supports_device(bin_path, "SYCL0"))
+            self.assertFalse(modelctl.binary_supports_device(bin_path, "CUDA0"))
+
+    def test_env_script_fallback_when_bare_probe_sees_nothing(self):
+        # SYCL builds need the oneAPI env (LD_LIBRARY_PATH); when the bare
+        # probe enumerates nothing, the known env scripts must be tried --
+        # the same fallback _gpu_inventory_from_llama already does.
+        bin_path = self._fake_binary(
+            'if [ -n "$MODELCTL_TEST_PROBE_OK" ]; then\n'
+            '  echo "  SYCL0: Fake GPU (1024 MiB, 512 MiB free)"\n'
+            '  exit 0\n'
+            'fi\n'
+            'exit 1\n')
+        with mock.patch.object(modelctl, "find_env_script_candidates",
+                               return_value=["/fake/env.sh"]), \
+             mock.patch.object(modelctl, "source_env_script",
+                               return_value={"MODELCTL_TEST_PROBE_OK": "1"}):
+            self.assertTrue(modelctl.binary_supports_device(bin_path, "SYCL0"))
+
+    def test_working_env_promoted_for_later_probes(self):
+        # Once an env script is what made a probe succeed, later probes must
+        # try it first. Otherwise every probe in the process re-runs the
+        # doomed bare attempt -- on a box where bare crashes (missing oneAPI
+        # env) that is one coredump per probe instead of one per process.
+        bin_path = self._fake_binary(
+            'if [ -n "$MODELCTL_TEST_PROBE_OK" ]; then\n'
+            '  echo "  SYCL0: Fake GPU (1024 MiB, 512 MiB free)"\n'
+            '  exit 0\n'
+            'fi\n'
+            'exit 1\n')
+        with mock.patch.object(modelctl, "find_env_script_candidates",
+                               return_value=["/fake/env.sh"]), \
+             mock.patch.object(modelctl, "source_env_script",
+                               return_value={"MODELCTL_TEST_PROBE_OK": "1"}):
+            self.assertTrue(modelctl.binary_supports_device(bin_path, "SYCL0"))
+        self.assertEqual(modelctl._PROBE_ENV_CACHE[0],
+                         {"MODELCTL_TEST_PROBE_OK": "1"})
+
+
+class TestBackendFingerprints(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._old_cache = getattr(modelctl, "_PROBE_ENV_CACHE", None)
+        modelctl._PROBE_ENV_CACHE = None
+        self.addCleanup(setattr, modelctl, "_PROBE_ENV_CACHE", self._old_cache)
+
+    def test_crashing_binary_yields_unknown_not_crash_text(self):
+        # The hardware fingerprint's version component must read "unknown"
+        # when --version cannot run cleanly -- not the first line of a SYCL
+        # abort banner.
+        import modelctl_hardware
+        bin_path = Path(self.tmp.name) / "llama-server"
+        bin_path.write_text(
+            "#!/bin/sh\n"
+            "echo \"terminate called after throwing an instance of "
+            "'sycl::_V1::exception'\" >&2\n"
+            "exit 134\n")
+        bin_path.chmod(0o755)
+        with mock.patch.object(modelctl, "LLAMA_SERVER_BIN", str(bin_path)), \
+             mock.patch.object(modelctl, "find_llama_server_candidates",
+                               return_value=[]), \
+             mock.patch.object(modelctl, "find_env_script_candidates",
+                               return_value=[]):
+            fps = modelctl_hardware._backend_fingerprints()
+        self.assertNotIn("terminate", fps["llama-cpp"])
+        self.assertTrue(fps["llama-cpp"].startswith("unknown#"))
+
+
 class TestBuildServerArgs(unittest.TestCase):
     def test_jinja_and_parallel_always_present(self):
         profile = {
@@ -540,6 +664,52 @@ class TestBuildServerArgs(unittest.TestCase):
         }
         args = modelctl.build_server_args(profile)
         self.assertNotIn("--spec-type", args)
+
+    def test_normalized_legacy_profile_keeps_ngl_and_ctx(self):
+        # The llama-swap regen path is load_profile -> normalize_profile ->
+        # build_server_args. A pre-fit profile must come out the other end
+        # with explicit -ngl/-c and no --fit, or every regen silently
+        # rewrites its launch command (the 2026-07-31 laguna-s2.1 outage).
+        profile = modelctl.normalize_profile({
+            "name": "legacy",
+            "model_path": "/home/aaron/models/test.gguf",
+            "config": {
+                "flash_attn": "auto",
+                "ctx": 64000,
+                "split_mode": "layer",
+                "tensor_split": "4,1",
+                "ttl": 3600,
+                "extra": "",
+                # no "fit" key at all -- matches every profile saved before
+                # the fit feature existed
+            },
+        })
+        args = modelctl.build_server_args(profile)
+        self.assertNotIn("--fit", args)
+        self.assertIn("-ngl", args)
+        self.assertEqual(args[args.index("-ngl") + 1], "999")
+        self.assertIn("-c", args)
+        self.assertEqual(args[args.index("-c") + 1], "64000")
+
+    def test_fit_on_replaces_ngl_and_ctx(self):
+        profile = {
+            "model_path": "/home/aaron/models/test.gguf",
+            "mmproj_path": None,
+            "config": {
+                "flash_attn": "auto",
+                "ctx": 64000,
+                "split_mode": "layer",
+                "tensor_split": "4,1",
+                "ttl": 3600,
+                "extra": "",
+                "fit": "on",
+            },
+        }
+        args = modelctl.build_server_args(profile)
+        self.assertIn("--fit", args)
+        self.assertEqual(args[args.index("--fit") + 1], "on")
+        self.assertNotIn("-ngl", args)
+        self.assertNotIn("-c", args)
 
     def test_mtp_on_bundled_omits_spec_draft_model(self):
         """Most current MTP GGUFs (Qwen3.5/3.6) bundle the draft heads in the
@@ -1130,6 +1300,40 @@ class TestGpuInventoryFromLlama(unittest.TestCase):
     env-script retries when the bare binary sees no devices."""
     DEVS = [{"device": "SYCL0", "name": "big", "total_mib": 32657, "free_mib": 30000},
             {"device": "SYCL1", "name": "small", "total_mib": 12215, "free_mib": 12000}]
+
+    def setUp(self):
+        # The inventory consults the process-wide promoted probe env; reset
+        # it so each test controls what has been "proven to work".
+        self._old_cache = getattr(modelctl, "_PROBE_ENV_CACHE", None)
+        modelctl._PROBE_ENV_CACHE = None
+        self.addCleanup(setattr, modelctl, "_PROBE_ENV_CACHE", self._old_cache)
+
+    def test_working_env_tried_first_on_later_calls(self):
+        # Once an env script is what made the probe succeed, later inventory
+        # calls must try it before the bare env -- on a box where the bare
+        # probe aborts (missing oneAPI env), bare-first costs one coredump
+        # per call, i.e. per console page load when xpu-smi is absent.
+        envs = []
+
+        def fake_list(binary, timeout=30, env=None):
+            envs.append(env)
+            return self.DEVS if env else []
+
+        with mock.patch.object(modelctl, "LLAMA_SERVER_BIN",
+                               "/x/build-sycl/bin/llama-server"), \
+             mock.patch.object(modelctl, "find_llama_server_candidates",
+                               return_value=["/x/build-sycl/bin/llama-server"]), \
+             mock.patch.object(modelctl, "find_env_script_candidates",
+                               return_value=["/x/env.sh"]), \
+             mock.patch.object(modelctl, "source_env_script",
+                               return_value={"LD_LIBRARY_PATH": "/opt/intel"}), \
+             mock.patch.object(modelctl.modelctl_vram, "llama_list_devices",
+                               side_effect=fake_list):
+            modelctl._gpu_inventory_from_llama()
+            envs.clear()
+            inv = modelctl._gpu_inventory_from_llama()
+        self.assertEqual(envs[0], {"LD_LIBRARY_PATH": "/opt/intel"})
+        self.assertEqual([d["device"] for d in inv], ["SYCL0", "SYCL1"])
 
     def test_sycl_binary_probed_before_vulkan(self):
         calls = []

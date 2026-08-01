@@ -94,13 +94,19 @@ def _binary_fingerprint(binary_path: str) -> str:
 
 
 def _version_string(binary_path: str) -> str:
-    """Extract --version output for cache invalidation."""
+    """Extract --version output for cache invalidation.
+
+    Probed through modelctl's env candidates: a SYCL binary aborts without
+    the oneAPI env, and its crash banner must not be stamped into the cache
+    as a version identity. A probe that never exits 0 has no version."""
     try:
-        r = subprocess.run([binary_path, "--version"],
-                           capture_output=True, text=True, timeout=5)
-        return (r.stdout + r.stderr).strip()[:200]
+        import modelctl
+        r = modelctl.run_llama_probe(binary_path, ["--version"], timeout=5)
     except Exception:
         return ""
+    if r is None or r.returncode != 0:
+        return ""
+    return (r.stdout + r.stderr).strip()[:200]
 
 
 def _run_probe(binary_path: str, extra_env: dict | None) -> tuple:

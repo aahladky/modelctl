@@ -8,6 +8,51 @@ from unittest import mock
 import modelctl_capabilities
 
 
+class TestVersionStringProbe(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        import modelctl
+        self.modelctl = modelctl
+        self._old_cache = getattr(modelctl, "_PROBE_ENV_CACHE", None)
+        modelctl._PROBE_ENV_CACHE = None
+        self.addCleanup(setattr, modelctl, "_PROBE_ENV_CACHE", self._old_cache)
+
+    def _fake_binary(self, script_body):
+        path = Path(self.tmp.name) / "llama-server"
+        path.write_text("#!/bin/sh\n" + script_body)
+        path.chmod(0o755)
+        return str(path)
+
+    def test_crash_text_never_becomes_version(self):
+        # A SYCL binary run without the oneAPI env aborts printing an
+        # uncaught-exception banner; that text must not be stamped into the
+        # capability cache as a version identity.
+        bin_path = self._fake_binary(
+            "echo \"terminate called after throwing an instance of "
+            "'sycl::_V1::exception'\" >&2\n"
+            "exit 134\n")
+        with mock.patch.object(self.modelctl, "find_env_script_candidates",
+                               return_value=[]):
+            self.assertEqual(
+                modelctl_capabilities._version_string(bin_path), "")
+
+    def test_env_fallback_recovers_version(self):
+        bin_path = self._fake_binary(
+            'if [ -n "$MODELCTL_TEST_PROBE_OK" ]; then\n'
+            '  echo "version: b6100 (test)"\n'
+            '  exit 0\n'
+            'fi\n'
+            'exit 134\n')
+        with mock.patch.object(self.modelctl, "find_env_script_candidates",
+                               return_value=["/fake/env.sh"]), \
+             mock.patch.object(self.modelctl, "source_env_script",
+                               return_value={"MODELCTL_TEST_PROBE_OK": "1"}):
+            self.assertEqual(
+                modelctl_capabilities._version_string(bin_path),
+                "version: b6100 (test)")
+
+
 class TestBinaryFingerprint(unittest.TestCase):
     def test_same_content_same_fingerprint(self):
         with TemporaryDirectory() as d:
