@@ -53,7 +53,6 @@ Regenerable state under `~/.local/share/modelctl/`:
 | `defaults.json` | persisted `modelctl defaults` |
 | `hardware.json`, `gpu_map.json` | hardware settings and GPU inventory |
 | `backend_capabilities/` | cached capability probes |
-| `runtime.db` | reservations and runtime events |
 | `runtime.db` | plan runs, reservations, runtime events (benchmark/observation history) |
 | `web_jobs.db` | web console job queue/history |
 | `web_token` | console auth token (regenerated on first start) |
@@ -89,7 +88,7 @@ Update:
 ```bash
 git -C ~/workspace/moe-serving pull && git submodule update --init
 source llama.cpp/llama-sycl-env.sh && cmake --build llama.cpp/build-sycl -j --target llama-server
-ci/checks.sh          # pin/manifest/docs consistency + tests (--quick to skip the build check)
+ci/checks.sh          # pin/manifest consistency + tests (--quick to skip the build check)
 ```
 
 Rollback: check out the validated pair from the manifest, rebuild, and

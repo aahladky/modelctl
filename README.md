@@ -47,8 +47,7 @@ bootstrap, automation, diagnostics, and recovery.
   cache budget map before placing static experts, so the two never
   collide on those devices.
 
-Docs: [architecture](modelctl/docs/architecture.md) ·
-[operations](modelctl/docs/operations.md) ·
+Docs: [operations](modelctl/docs/operations.md) ·
 [runtime (MoE cache, hybrid, capability schema, testing)](modelctl/docs/runtime/).
 
 See [modelctl/README.md](modelctl/README.md) for modelctl itself
