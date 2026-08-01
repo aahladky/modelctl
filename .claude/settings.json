@@ -8,6 +8,7 @@
       "Bash(ctest:*)",
       "Bash(ccache:*)",
       "Bash(python3:*)",
+      "Bash(/home/aaron/workspace/moe-serving/modelctl/.venv/bin/python:*)",
       "Bash(pip3:*)",
       "Bash(pytest:*)",
       "Bash(ls:*)",
