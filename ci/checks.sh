@@ -97,12 +97,15 @@ fi
 # --- 3. test suite ----------------------------------------------------
 # Covers the golden command/provenance and transaction rollback
 # jobs, which already live in the suite rather than as separate CI steps.
+# Parallel via pytest-xdist (unittest-parallel cannot pickle the TUI's
+# IsolatedAsyncioTestCase classes); serial fallback ~218s, parallel ~43s.
 section "test suite"
-if (cd "$REPO/modelctl" && "$VENV" -m unittest discover -s . -p "test_*.py" \
+TESTS_T0=$SECONDS
+if (cd "$REPO/modelctl" && "$VENV" -m pytest -n auto -q . \
         > /tmp/ci-tests.log 2>&1); then
-    pass "$(grep -oE '^Ran [0-9]+ tests' /tmp/ci-tests.log | tail -1)"
+    pass "$(grep -oE '[0-9]+ passed(, [0-9]+ skipped)?' /tmp/ci-tests.log | tail -1) in $((SECONDS - TESTS_T0))s wall"
 else
-    fail "tests -- $(grep -cE '^(FAIL|ERROR):' /tmp/ci-tests.log) failing, see /tmp/ci-tests.log"
+    fail "tests -- $(grep -oE '[0-9]+ (failed|error)[a-z]*' /tmp/ci-tests.log | tail -1 || echo 'failure'), see /tmp/ci-tests.log"
 fi
 
 # --- 4. CPU-only build and capability truthfulness --------------------
