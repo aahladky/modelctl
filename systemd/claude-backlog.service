@@ -12,6 +12,6 @@ Description=Claude Code nightly backlog session (moe-serving)
 [Service]
 Type=oneshot
 WorkingDirectory=%h/workspace/moe-serving
-ExecStart=/usr/bin/env claude -p "Follow the Autonomous work protocol in CLAUDE.md. First run any pending hardware benches for items awaiting them — capture raw artifacts and set bench-review; do NOT self-adjudicate performance results — then pick the top ready BACKLOG item and drive it to its gate." --permission-mode acceptEdits
+ExecStart=/usr/bin/env claude -p "Read CLAUDE.md and docs/plans/BACKLOG.md. Run any benchmarks the list says are pending (record raw numbers and machine load; don't judge the results), then pick one unclaimed item and work it. Follow the working rules." --permission-mode acceptEdits
 TimeoutStartSec=4h
 Nice=10
