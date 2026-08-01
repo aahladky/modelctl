@@ -1,5 +1,11 @@
 # Console overhaul brief
 
+North star: the project mission quoted at the top of /CLAUDE.md. The
+console is the primary interface through which that mission is
+delivered — "doesn't raise my blood pressure" is the design bar, and
+"Linux after 1 failed command" is the failure mode every error path
+must prevent (diagnosis + offered fix on screen, not a terminal).
+
 Input for BACKLOG P11a+. Owner taste is encoded here once so overhaul
 work does not require live owner involvement.
 

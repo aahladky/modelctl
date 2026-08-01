@@ -5,6 +5,21 @@ web console) and a llama.cpp fork with a SYCL MoE expert cache, running
 on 2x Intel Arc. One person owns this. Keep things simple and don't
 invent process.
 
+## The mission (Aaron's words, 2026-08-01)
+
+"It exists to automate what I hate most about local AI as much as
+possible — file management, downloads, launch configs, config files in
+general, Linux after 1 failed command, keyboards & CLIs, etc; while
+still allowing granular control from an interface that doesn't raise my
+blood pressure. And it should do this using my existing hardware to the
+fullest extent reasonably possible."
+
+In practice: the web console is the primary interface — the CLI exists
+for bootstrap and agents, not for Aaron. A failure should end in a
+diagnosis and an offered fix on screen, never in a terminal archaeology
+session. And "reasonably possible" means performance work serves this
+mission; it is not the mission.
+
 ## Things that prevent expensive repeat mistakes
 
 - Your training predates most relevant MoE-offloading work. Before
