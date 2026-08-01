@@ -54,7 +54,7 @@ Regenerable state under `~/.local/share/modelctl/`:
 | `hardware.json`, `gpu_map.json` | hardware settings and GPU inventory |
 | `backend_capabilities/` | cached capability probes |
 | `runtime.db` | reservations and runtime events |
-| `stats.db` | benchmark/observation history |
+| `runtime.db` | plan runs, reservations, runtime events (benchmark/observation history) |
 | `web_jobs.db` | web console job queue/history |
 | `web_token` | console auth token (regenerated on first start) |
 

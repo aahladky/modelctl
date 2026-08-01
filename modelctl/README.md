@@ -73,6 +73,22 @@ FastAPI + HTMX on `:9293` (`modelctl web` foreground, or the installed
   at `~/.local/share/modelctl/web_jobs.db`); profile and config
   mutations serialize on a single-worker lane because profiles and the
   llama-swap config are plain files.
+- **Launch plans (`/profiles/<name>/plans`)**: candidate plans with
+  evidence, select/disable/test/tune actions.
+- **History (`/profiles/<name>/history`)**: past plan runs with
+  bottleneck classification.
+- **Hardware (`/hardware`)**: per-device reserves/roles/bandwidth,
+  storage calibration.
+- **Settings (`/settings`)**: persisted defaults, diagnostics, support
+  bundle download.
+- **Routing (`/runtime/routing`)**: the managed llama-swap routing
+  matrix with preview, apply, rollback.
+- A JSON API mirrors most of this under `/api/*`, and job progress
+  streams over SSE at `/events/jobs/<id>`.
+
+Beyond the console: `modelctl ovms-add`/`ovms-convert` manage OpenVINO
+Model Server profiles (a second backend), `modelctl test --evals` runs
+lm-eval suites, and `modelctl doctor [--bundle]` produces diagnostics.
 
 Auth: one shared token (Bearer header or login cookie; tokens in URLs
 are rejected), stored at `~/.local/share/modelctl/web_token`.
@@ -154,7 +170,9 @@ intended pattern is at most one large (15GB+) model loaded at a time.
 | `MODELCTL_HOME` | State dir (profiles, defaults) — default `~/.local/share/modelctl` |
 | `MODELCTL_MODELS_DIR` | Where pulled GGUFs land — default `~/models` |
 | `MODELCTL_LLAMA_SERVER` | Path to the `llama-server` binary |
-| `MODELCTL_ROUTER_PRESET`, `MODELCTL_ROUTER_SERVICE`, `MODELCTL_ROUTER_BASE_URL`, `MODELCTL_ROUTER_PORT` | Router-mode preset path / systemd unit / API base |
+| `MODELCTL_LLAMA_SWAP_CONFIG`, `MODELCTL_LLAMA_SWAP_SERVICE`, `MODELCTL_LLAMA_SWAP_BASE_URL`, `MODELCTL_LLAMA_SWAP_DIR` | Router config path / systemd unit / API base / install dir (the port comes from the base URL) |
+| `MODELCTL_OVMS_*` | OpenVINO Model Server backend knobs (`ovms-add`/`ovms-convert`) |
+| `MODELCTL_PROBE_TIMEOUT`, `MODELCTL_WEB_SECURE_COOKIE`, `MODELCTL_BENCH_SH`, `MODELCTL_SPEED_PY` | Probe timeout / cookie policy / benchmark script overrides |
 | `MODELCTL_DEFAULT_*` | Defaults for new profiles (device, ctx, split, KV quant, flash-attn, TTL, MTP, primary GPU, VRAM limit) |
 | `MODELCTL_GPU_EXCLUDE` | Regex to exclude devices from placement inventory (e.g. iGPUs that misreport shared RAM as VRAM) |
 | `MODELCTL_HERMES_CONFIG` | Path to sync an external agent config's custom-provider list |

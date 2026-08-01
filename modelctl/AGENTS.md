@@ -79,13 +79,19 @@ where they live (`docs/runtime/`).
 |---|---|
 | `modelctl` (no ext) | Shell launcher — resolves `.venv` and runs `modelctl.py` |
 | `modelctl.py` | Main CLI: profile lifecycle, placement, router management |
+| `modelctl_acceptance.py` | Release acceptance checks |
 | `modelctl_backends.py` | Backend adapters (managed runtime beyond llama.cpp) |
+| `modelctl_baseline.py` | Baseline capture/compare for measurements |
 | `modelctl_benchmark.py` | Benchmark mode definitions and safety |
 | `modelctl_capabilities.py` | Backend capability probe/cache (`--modelctl-capabilities`) |
+| `modelctl_diagnostics.py` | `doctor` checks and support bundle |
 | `modelctl_errors.py` | Structured validation messages and failure classes |
+| `modelctl_evidence.py` | Plan evidence/decision-trace assembly for the plans pages |
+| `modelctl_fsutil.py` | Atomic writes and the cross-process state lock |
 | `modelctl_hardware.py` | Hardware settings, snapshots, and fingerprinting |
 | `modelctl_launch.py` | Canonical resolved-backend and launch-command types |
 | `modelctl_matrix.py` | Managed llama-swap routing matrix |
+| `modelctl_paths.py` | State-dir resolution (`MODELCTL_HOME`) |
 | `modelctl_plans.py` | Launch-plan generation and resource claims |
 | `modelctl_profiles.py` | Profile schema, migration, and validation |
 | `modelctl_runtime.py` | Runtime database: reservations and runtime events |
@@ -114,7 +120,7 @@ All have defaults. Override via env or `modelctl defaults` (persisted JSON):
 - `MODELCTL_HOME` — state dir (default `~/.local/share/modelctl`)
 - `MODELCTL_MODELS_DIR` — pulled GGUFs (default `~/models`)
 - `MODELCTL_LLAMA_SERVER` — path to llama-server binary
-- `MODELCTL_ROUTER_*` — router preset/service/URL/port
+- `MODELCTL_LLAMA_SWAP_{CONFIG,SERVICE,BASE_URL,DIR}` — router config/service/URL/dir
 - `MODELCTL_DEFAULT_*` — profile defaults (device, ctx, KV quant, flash-attn, TTL, etc.)
 - `MODELCTL_GPU_EXCLUDE` — regex to exclude devices (e.g. iGPUs)
 - `MODELCTL_WEB_TOKEN`, `MODELCTL_WEB_BIND` — web console config

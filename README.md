@@ -38,7 +38,8 @@ bootstrap, automation, diagnostics, and recovery.
   `llama-server --modelctl-capabilities` and only enables MoE-cache
   features when the fork reports them.
 - The fork adds a per-GPU MoE expert weight cache
-  (`--moe-cache-bytes`, uniform budget applied per device), Prometheus
+  (`--moe-cache-bytes`, a uniform per-device budget or a `DEV=N,DEV=N`
+  per-device map), Prometheus
   `moe_cache_*` metrics, and a `/cache/reset` endpoint; modelctl's web
   console (`/runtime`) scrapes the metrics and proxies the reset.
 - Cache-aware tier planning (`modelctl place --tiers`) reserves the
