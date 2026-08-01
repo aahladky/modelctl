@@ -21,8 +21,12 @@ Two live leaks this exists to stop (both observed on 2026-07-31):
 
 The bootstrap redirects MODELCTL_HOME to a throwaway directory for the
 whole test process and empties the binary/env-script discovery globs.
-The TestCase below is a tripwire that fails the suite loudly if either
-redirect ever stops holding.
+It also removes the two remaining machine couplings measured on
+2026-07-31: setup banners GET the live llama-swap service on page
+renders (redirected to an unroutable port), and GPU discovery shells
+out to the real xpu-smi (shimmed to answer like a box with no Intel
+GPUs). The TestCase below is a tripwire that fails the suite loudly if
+any of these redirects ever stops holding.
 
 Single-file runs (``python -m unittest test_modelctl_web``) do not
 import this module; each test file still owns its local isolation. This
@@ -54,6 +58,23 @@ if not os.environ.get("MODELCTL_HOME"):
     os.environ["MODELCTL_HOME"] = _home
 # The legacy alias would override the redirect for modules that honor it.
 os.environ.pop("MODELCTL_STATE_DIR", None)
+
+# Setup banners GET <base>/models on page renders; point them at the
+# discard port (nothing listens there, connect fails instantly) instead
+# of the production llama-swap service. Must precede the modelctl and
+# modelctl_web.app imports, which both freeze this at import time.
+os.environ.setdefault("MODELCTL_LLAMA_SWAP_BASE_URL", "http://127.0.0.1:9/v1/")
+
+# GPU discovery shells out to xpu-smi (modelctl_vram.xpu_devices,
+# modelctl_hardware._pci_address). A shim that fails like the tool is
+# absent makes every machine answer "no Intel GPUs" -- code degrades
+# open to the CPU-only paths by design -- instead of the suite's
+# hardware answers depending on the box it runs on.
+_shim_dir = Path(os.environ["MODELCTL_HOME"]) / "shims"
+_shim_dir.mkdir(parents=True, exist_ok=True)
+(_shim_dir / "xpu-smi").write_text("#!/bin/sh\nexit 1\n")
+(_shim_dir / "xpu-smi").chmod(0o755)
+os.environ["PATH"] = f"{_shim_dir}{os.pathsep}" + os.environ.get("PATH", "")
 
 import modelctl  # noqa: E402  -- must import after the env redirect
 import modelctl_paths  # noqa: E402
@@ -90,6 +111,28 @@ class TestSuiteHermeticity(unittest.TestCase):
 
     def test_no_real_env_script_is_discoverable(self):
         self.assertEqual(modelctl.find_env_script_candidates(), [])
+
+    def test_llama_swap_url_is_unroutable(self):
+        # Setup banners (_check_llama_swap) GET <base>/models on page
+        # renders; without this redirect every web-page test polls the
+        # production llama-swap service at 127.0.0.1:9292.
+        base = os.environ.get("MODELCTL_LLAMA_SWAP_BASE_URL", "")
+        self.assertTrue(base.startswith("http://127.0.0.1:9/"),
+                        "suite would GET the live llama-swap service")
+        self.assertEqual(modelctl.LLAMA_SWAP_BASE_URL, base)
+        import modelctl_web.app as web_app
+        self.assertEqual(web_app.LLAMA_SWAP_BASE, base)
+
+    def test_xpu_smi_is_stubbed_out(self):
+        # get_gpu_inventory / capture_hardware_snapshot shell out to
+        # xpu-smi; the suite must see this machine's shim, not the real
+        # tool, so hardware answers don't depend on the box.
+        which = shutil.which("xpu-smi")
+        self.assertIsNotNone(which, "xpu-smi shim missing from PATH")
+        self.assertTrue(which.startswith(os.environ["MODELCTL_HOME"]),
+                        f"GPU discovery would query the real machine via {which}")
+        import modelctl_vram
+        self.assertEqual(modelctl_vram.xpu_devices(timeout=5), [])
 
 
 if __name__ == "__main__":
