@@ -1,0 +1,13 @@
+# Fires the nightly backlog session inside the B70 bench window.
+# Persistent=false on purpose: a missed night must NOT run at 9am and
+# contend with live serving.
+
+[Unit]
+Description=Nightly timer for Claude Code backlog session (moe-serving)
+
+[Timer]
+OnCalendar=*-*-* 02:30
+Persistent=false
+
+[Install]
+WantedBy=timers.target

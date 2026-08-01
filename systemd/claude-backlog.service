@@ -1,0 +1,17 @@
+# Nightly autonomous backlog session (user unit).
+# Review, then: cp systemd/claude-backlog.* ~/.config/systemd/user/
+#               systemctl --user daemon-reload
+#               systemctl --user enable --now claude-backlog.timer
+# Notes: verify `which claude`; tune permission flags to taste —
+# bash allowlisting lives in .claude/settings.json. Sessions inherit the
+# guardrails in CLAUDE.md (worktrees only, no live services, no master).
+
+[Unit]
+Description=Claude Code nightly backlog session (moe-serving)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/workspace/moe-serving
+ExecStart=/usr/bin/env claude -p "Follow the Autonomous work protocol in CLAUDE.md. The bench window is open. Pick the top ready BACKLOG item and drive it to its gate." --permission-mode acceptEdits
+TimeoutStartSec=4h
+Nice=10
