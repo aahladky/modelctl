@@ -83,6 +83,12 @@ class ResourceClaim:
     # VRAM, though it used to be computed as if it did.
     expected_resident_bytes: int = 0
 
+    # "gguf" when the claim was computed from the parsed tensor layout
+    # (exact per-device math), "estimate" when it fell back to whole-model
+    # heuristics. Plan-time admission only trusts exact claims: degrading
+    # a plan over an estimate would act on numbers known to be wrong.
+    layout_source: str = ""
+
     # breakdown is the same decomposition in nested dict form, for UI and
     # support bundles:
     # {"vram": {"SYCL0": {"static": N, "kv": N, "overhead": N, "cache": N}},
@@ -544,6 +550,7 @@ def _make_claim(profile, config, hardware, capabilities=None):
         staging_bytes=0,
         storage_device=storage_device,
         expected_resident_bytes=ram_resident,
+        layout_source="gguf" if layout else "estimate",
         breakdown={
             "vram": {d: {"static": static_map.get(d, 0),
                          "kv": kv_map.get(d, 0),
@@ -559,10 +566,234 @@ def _make_claim(profile, config, hardware, capabilities=None):
     )
 
 
+def _usable_vram_map(hardware):
+    """Per-device usable VRAM capacity: limit_pct of the card minus its
+    configured reserve. Capacity-based on purpose -- free bytes are
+    volatile and belong to launch-time feasibility, not plan admission."""
+    try:
+        frac = modelctl.load_defaults().get("vram_limit_pct", 90) / 100.0
+    except Exception:
+        frac = 0.90
+    import modelctl_hardware as _hw
+    return {g.device: max(0, int(g.total_bytes * frac) - g.reserve_bytes)
+            for g in _hw.enabled_gpus(hardware)}
+
+
+def _admission_overflow(claim, usable):
+    """Per-device oversubscription of a claim against usable capacity.
+
+    Demand is the canonical peak (vram_admission_bytes) with the
+    per-device compute allowance floored at the tier planner's 1.5 GiB
+    reserve: the claim's own overhead is 10% of resident weights, which
+    covers the reserve on big residents but not on small ones."""
+    overflow = {}
+    peak = claim.vram_admission_bytes()
+    for dev, need in peak.items():
+        if dev not in usable:
+            continue
+        floor_delta = max(0, modelctl_tiers.GPU_COMPUTE_RESERVE_BYTES
+                          - claim.vram_overhead_bytes.get(dev, 0))
+        over = need + floor_delta - usable[dev]
+        if over > 0:
+            overflow[dev] = over
+    return overflow
+
+
+def _shrink_cache_budgets(profile, claim, usable, capabilities):
+    """Degradation step 1: shrink the profile's cache budgets so the peak
+    fits. Returns (new_moe_cache or None, {dev: chosen_bytes})."""
+    mc = profile.get("moe_cache", {})
+    declared = {d: b for d, b in mc.get("gpu", {}).get("budgets_bytes", {})
+                .items() if b > 0}
+    if not declared or mc.get("mode", "off") == "off":
+        return None, {}
+    per_device = bool((capabilities or {}).get("features", {})
+                      .get("moe_cache_per_device_budgets"))
+    # Room left for cache on each device the runtime would allocate on
+    # (claim.vram_cache_bytes holds the collapse-aware reservation map).
+    room = {}
+    for dev in claim.vram_cache_bytes:
+        static = claim.vram_bytes.get(dev, 0)
+        floor_delta = max(0, modelctl_tiers.GPU_COMPUTE_RESERVE_BYTES
+                          - claim.vram_overhead_bytes.get(dev, 0))
+        room[dev] = max(0, usable.get(dev, 0) - static - floor_delta)
+    if per_device:
+        chosen = {d: min(b, room.get(d, b)) for d, b in declared.items()}
+    else:
+        uniform = max(declared.values())
+        allowed = min(room.values()) if room else 0
+        got = min(uniform, allowed)
+        chosen = {d: got for d in declared}
+    chosen = {d: int(b) for d, b in chosen.items() if b > 0}
+    new_mc = {**mc, "gpu": {**mc.get("gpu", {}), "budgets_bytes": chosen}}
+    return new_mc, chosen
+
+
+def _spill_pinned_expert_layers(extra, layout, overflow):
+    """Degradation step 2: move statically pinned routed-expert layers to
+    CPU until each device's overflow is covered.
+
+    Rewrites only the routed (_exps) -ot rules; pin rules (shexp, leading
+    dense) and every other flag stay verbatim. Returns (new_extra,
+    {dev: [moved layers]}); a no-op returns (extra, {})."""
+    if not layout or not layout.get("is_moe"):
+        return extra, {}
+    rules = _parse_ot_rules(extra)
+    if not rules:
+        return extra, {}
+    raw_toks = (extra or "").split()
+    try:
+        ot_idx = raw_toks.index("-ot")
+    except ValueError:
+        return extra, {}
+    if ot_idx + 1 >= len(raw_toks):
+        return extra, {}
+
+    layers_bytes = layout["expert_bytes_per_layer"]
+    placement = {}
+    for layer in layers_bytes:
+        probe = f"blk.{layer}.ffn_gate_exps.weight"
+        for rx, tgt in rules:
+            if rx.search(probe):
+                placement[layer] = tgt
+                break
+    moved = {}
+    for dev, over in sorted(overflow.items()):
+        mine = sorted((l for l, t in placement.items() if t == dev),
+                      reverse=True)
+        freed = 0
+        take = []
+        for layer in mine:
+            if freed >= over:
+                break
+            take.append(layer)
+            freed += layers_bytes[layer]
+        for layer in take:
+            placement[layer] = "CPU"
+        if take:
+            moved[dev] = sorted(take)
+    if not moved:
+        return extra, {}
+
+    # Rebuild the -ot value: keep non-routed parts (pins) verbatim in
+    # their original raw (double-backslash) form, regenerate the routed
+    # rules from the new placement, CPU catch-all last (first-match-wins).
+    raw_parts = []
+    for part in raw_toks[ot_idx + 1].split(","):
+        pattern, _, target = part.rpartition("=")
+        if pattern and target and "_exps" in pattern and "_shexp" not in pattern:
+            continue  # routed rule: regenerated below
+        raw_parts.append(part)
+    gpu_layers = {}
+    for layer, tgt in placement.items():
+        if tgt != "CPU":
+            gpu_layers.setdefault(tgt, []).append(layer)
+    for dev in sorted(gpu_layers):
+        rx = modelctl_tiers.layers_regex(sorted(gpu_layers[dev]))
+        raw_parts.append(f"blk\\\\.{rx}\\\\.ffn_.*_exps={dev}")
+    raw_parts.append("ffn_.*_exps=CPU")
+    raw_toks[ot_idx + 1] = ",".join(raw_parts)
+    return " ".join(raw_toks), moved
+
+
 def _make_plan(profile, config, source, hardware, extra_warnings=(), decision=None,
                capabilities=None):
-    """Build a LaunchPlan from profile + config overrides."""
+    """Build a LaunchPlan from profile + config overrides.
+
+    Plan-time VRAM admission: when a hardware snapshot is available, the
+    claim is checked per device against usable capacity (limit_pct minus
+    reserves) BEFORE the plan is emitted. An oversubscribed plan is never
+    emitted as-is -- the cache budget shrinks toward 0, then statically
+    pinned expert layers spill to CPU -- and the plan carries both a
+    human-readable warning and a machine-readable record
+    (decision_data["admission"]) stating requested, assumed, and chosen.
+    A planner-emitted config must never be able to crash at launch for
+    VRAM admission reasons."""
     merged = {**profile.get("config", {}), **config}
+    claim = _make_claim(profile, merged, hardware, capabilities)
+
+    admission = None
+    adm_warnings = []
+    # Admission needs numbers it can trust and a plan whose VRAM claim
+    # means what it says: estimate-quality claims (no parsed GGUF layout)
+    # and hybrid plans (whose deliberately conservative claim charges
+    # CPU-miss weights to VRAM) are left to launch-time feasibility,
+    # which refuses rather than degrades.
+    if (hardware is not None and claim.layout_source == "gguf"
+            and not (decision or {}).get("hybrid")):
+        usable = _usable_vram_map(hardware)
+        overflow = _admission_overflow(claim, usable)
+        if overflow:
+            requested_cache = {d: int(b) for d, b in
+                               claim.vram_cache_bytes.items()}
+            requested_peak = {d: int(b) for d, b in
+                              claim.vram_admission_bytes().items()}
+            degradations = []
+            # Step 1: fall back to a smaller cache.
+            if any(requested_cache.values()):
+                new_mc, chosen = _shrink_cache_budgets(
+                    profile, claim, usable, capabilities)
+                if new_mc is not None:
+                    profile = {**profile, "moe_cache": new_mc}
+                    claim = _make_claim(profile, merged, hardware,
+                                        capabilities)
+                    for dev in sorted(overflow):
+                        req = requested_cache.get(dev, 0)
+                        got = claim.vram_cache_bytes.get(dev, 0)
+                        if got < req:
+                            degradations.append({
+                                "action": "shrink_cache", "device": dev,
+                                "requested_bytes": req,
+                                "chosen_bytes": int(got)})
+                            adm_warnings.append(
+                                modelctl_tiers._cache_fallback_warning(
+                                    dev, req, usable.get(dev, 0), got))
+                    overflow = _admission_overflow(claim, usable)
+            # Step 2: spill statically pinned expert layers to CPU.
+            if overflow:
+                layout = None
+                model_path = profile.get("model_path", "")
+                if model_path and os.path.exists(model_path):
+                    try:
+                        layout = modelctl_vram.gguf_model_layout(model_path)
+                    except Exception:
+                        layout = None
+                new_extra, moved = _spill_pinned_expert_layers(
+                    merged.get("extra", ""), layout, overflow)
+                if moved:
+                    merged = {**merged, "extra": new_extra}
+                    claim = _make_claim(profile, merged, hardware,
+                                        capabilities)
+                    for dev, layers in sorted(moved.items()):
+                        degradations.append({
+                            "action": "spill_experts", "device": dev,
+                            "layers": layers})
+                        adm_warnings.append(
+                            f"statically pinned expert layers "
+                            f"{layers} exceed the free VRAM measured on "
+                            f"{dev} -- they spill to CPU for this plan")
+                    overflow = _admission_overflow(claim, usable)
+            if overflow:
+                adm_warnings.append(
+                    "plan oversubscribes "
+                    + ", ".join(sorted(overflow))
+                    + " even after degradation -- it is expected to fail "
+                    "VRAM admission at launch")
+            admission = {
+                "fits": not overflow,
+                "requested": {"per_device_peak_bytes": requested_peak,
+                              "cache_budgets_bytes": requested_cache},
+                "assumed": {"usable_bytes": {d: int(b)
+                                             for d, b in usable.items()}},
+                "chosen": {"per_device_peak_bytes":
+                           {d: int(b) for d, b in
+                            claim.vram_admission_bytes().items()},
+                           "cache_budgets_bytes":
+                           {d: int(b) for d, b in
+                            claim.vram_cache_bytes.items()}},
+                "degradations": degradations,
+            }
+
     args = modelctl.build_server_args({**profile, "config": merged},
                                       capabilities=capabilities)
     env = {k: v for e in profile.get("env", []) for k, v in [e.split("=", 1)]} if profile.get("env") else {}
@@ -606,7 +837,10 @@ def _make_plan(profile, config, source, hardware, extra_warnings=(), decision=No
     }
     pid = _plan_id(normalized)
     label = _plan_label(merged, source, gpu_names)
-    claim = _make_claim(profile, merged, hardware, capabilities)
+
+    decision_data = dict(decision or {})
+    if admission is not None:
+        decision_data["admission"] = admission
 
     return LaunchPlan(
         id=pid,
@@ -624,8 +858,8 @@ def _make_plan(profile, config, source, hardware, extra_warnings=(), decision=No
                    "mmap": claim.mmap_bytes,
                    "context": claim.expected_context},
         source=source,
-        warnings=tuple(extra_warnings),
-        decision_data=decision or {},
+        warnings=tuple(extra_warnings) + tuple(adm_warnings),
+        decision_data=decision_data,
         config=dict(merged),
     )
 
@@ -765,15 +999,19 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
     add(_make_plan(profile, {}, "current-profile", hardware,
                    capabilities=caps_for_args))
 
-    # B. Tier planner output
+    # B. Tier planner output. Inputs resolve stored-first: a profile that
+    # has planned before replans from its recorded inputs (planning RAM
+    # among them), so this candidate cannot drift with instantaneous free
+    # memory while the profile is unchanged.
     try:
-        d = modelctl.load_defaults()
-        inventory = modelctl.get_gpu_inventory()
-        primary = modelctl.resolve_primary_gpu(inventory, d)
+        inputs, _source = modelctl.resolve_planning_inputs(profile)
         tier = modelctl_tiers.plan_tiers(
-            profile, inventory, d["vram_limit_pct"], primary,
+            profile, inputs["inventory"], inputs["vram_limit_pct"],
+            inputs["primary"],
+            ram_available=inputs["ram_available_bytes"],
             cache_request=profile.get("moe_cache"),
-            capabilities=caps_for_args)
+            capabilities=inputs.get("capabilities") or caps_for_args,
+            hw_settings=inputs.get("hw_settings"))
         if tier and tier.get("config"):
             tc = dict(tier["config"])
             tc["_tier"] = tier.get("tier", "?")

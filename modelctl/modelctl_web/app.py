@@ -60,22 +60,6 @@ def load_or_create_token():
     return token
 
 
-def _caps_for(profile):
-    """Backend capabilities for a profile's binary, or None.
-
-    The tier planner needs them to know whether this backend honours a
-    per-device cache budget map (schema 3+) or collapses it to one
-    uniform figure -- reserving the wrong one is how the runtime cache
-    collides with statically placed experts.
-    """
-    try:
-        import modelctl_capabilities
-        binary = profile.get("binary") or modelctl.LLAMA_SERVER_BIN
-        return modelctl_capabilities.probe_backend(binary)
-    except Exception:
-        return None
-
-
 def _safe_back(target):
     """An internal path to return to, or "/".
 
@@ -504,31 +488,29 @@ def create_app(token=None, store=None, runner=None, collector=None,
     def _plan_for(name):
         import modelctl_tiers
         p = modelctl.load_profile(name)
-        inventory = modelctl.get_gpu_inventory()
-        d = modelctl.load_defaults()
-        primary = modelctl.resolve_primary_gpu(inventory, d)
-        # cache_request keeps the preview identical to what submit_tier_apply
-        # will actually compute and apply.
-        plan = modelctl_tiers.plan_tiers(p, inventory, d["vram_limit_pct"], primary,
-                                         cache_request=p.get("moe_cache"),
-                                         capabilities=_caps_for(p))
-        return p, plan
+        # Stored-first inputs and the same plan path submit_tier_apply
+        # uses, so the preview is exactly what apply would compute.
+        plan, inputs, source = modelctl.plan_tiers_for_profile(p)
+        gate = (modelctl_tiers.tier_change_gate(p, plan)
+                if plan is not None else None)
+        return p, plan, inputs, source, gate
 
     @app.get("/profiles/{name}/tiers", response_class=HTMLResponse)
     def tiers_one(request: Request, name: str):
-        p, plan = _plan_for(name)
+        p, plan, inputs, source, gate = _plan_for(name)
         return templates.TemplateResponse(request=request, name="tiers.html", context=ctx(
-            request, p=p, plan=plan, current=p.get("config", {})))
+            request, p=p, plan=plan, current=p.get("config", {}),
+            inputs=inputs, inputs_source=source, gate=gate))
 
     @app.post("/profiles/{name}/tiers/apply")
-    def tiers_apply(name: str):
-        job_id = mutate.submit_tier_apply(runner, name)
+    def tiers_apply(name: str, accept_tier_change: bool = Form(False)):
+        job_id = mutate.submit_tier_apply(runner, name,
+                                          accept_tier_change=accept_tier_change)
         return RedirectResponse(f"/jobs/{job_id}?back=/profiles/{name}/tiers",
                                 status_code=303)
 
     @app.get("/tiers", response_class=HTMLResponse)
     def tiers_all(request: Request):
-        import modelctl_tiers
         inventory = modelctl.get_gpu_inventory()
         d = modelctl.load_defaults()
         primary = modelctl.resolve_primary_gpu(inventory, d)
@@ -536,10 +518,10 @@ def create_app(token=None, store=None, runner=None, collector=None,
         for p in profiles():
             if not p.get("model_path"):
                 continue
-            plan = modelctl_tiers.plan_tiers(p, inventory, d["vram_limit_pct"], primary,
-                                             cache_request=p.get("moe_cache"),
-                                             capabilities=_caps_for(p))
-            plans.append({"name": p["name"], "plan": plan})
+            plan, _inputs, source = modelctl.plan_tiers_for_profile(
+                p, inventory=inventory, defaults=d, primary=primary)
+            plans.append({"name": p["name"], "plan": plan,
+                          "inputs_source": source})
         return templates.TemplateResponse(request=request, name="tiers_all.html", context=ctx(
             request, plans=plans))
 
@@ -1731,12 +1713,20 @@ def create_app(token=None, store=None, runner=None, collector=None,
 
     @app.get("/api/tiers/{name}")
     def api_tiers(name: str):
-        _p, plan = _plan_for(name)
-        return plan
+        # plan carries "warnings" and the machine-readable "admission"
+        # record (requested / assumed / chosen, per-device math); the
+        # extras ride alongside so API consumers see the same gate and
+        # input provenance the HTML page shows.
+        _p, plan, inputs, source, gate = _plan_for(name)
+        if plan is None:
+            return {"plan": None}
+        return {**plan, "planning_inputs": inputs,
+                "planning_inputs_source": source, "gate": gate}
 
     @app.post("/api/tiers/{name}/apply")
-    def api_tiers_apply(name: str):
-        return {"job": mutate.submit_tier_apply(runner, name)}
+    def api_tiers_apply(name: str, accept_tier_change: bool = False):
+        return {"job": mutate.submit_tier_apply(
+            runner, name, accept_tier_change=accept_tier_change)}
 
     @app.post("/api/pull/{repo_id:path}")
     def api_pull(repo_id: str, quant: str = ""):

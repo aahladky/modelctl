@@ -452,18 +452,38 @@ class TestCacheRequest(unittest.TestCase):
         self.assertEqual(plan["analysis"]["cache_budgets_gib"],
                          {"SYCL0": 6.0, "SYCL1": 6.0})
 
-    def test_oversize_budget_disables_cache_loudly(self):
+    def test_oversize_budget_shrinks_cache_loudly(self):
         # B580 usable is ~10.7 GiB; 20 GiB can't be reserved there, and the
-        # fork has no per-device budgets -- so the whole cache is disabled.
+        # fork has no per-device budgets -- so the uniform budget SHRINKS
+        # to what the smallest device can give (never emitted as-is, never
+        # disabled outright: the fallback-to-a-smaller-cache contract).
         req = self._req({"SYCL0": 20 * GIB})
         plan = self._plan(req)
-        self.assertIsNone(plan["cache_budgets"])
-        self.assertIsNone(plan["analysis"]["cache_budgets_gib"])
-        self.assertTrue(any("disabled" in w for w in plan["warnings"]))
-        # ...and the placement is exactly the no-cache placement
-        no_cache = self._plan()
-        self.assertEqual(plan["tier"], no_cache["tier"])
-        self.assertEqual(plan["config"], no_cache["config"])
+        smallest_usable = int(B580["total_bytes"] * 0.9)
+        self.assertEqual(plan["cache_budgets"],
+                         {"SYCL0": smallest_usable, "SYCL1": smallest_usable})
+        self.assertTrue(any("fall back to a smaller cache" in w
+                            for w in plan["warnings"]))
+        # Machine-readable degradation record: requested vs chosen.
+        degr = plan["admission"]["degradations"]
+        self.assertTrue(any(d["action"] == "shrink_cache"
+                            and d["requested_bytes"] == 20 * GIB
+                            and d["chosen_bytes"] == smallest_usable
+                            for d in degr))
+        # The degraded plan actually admits on every device it uses.
+        self.assertTrue(plan["admission"]["fits"])
+
+    def test_admission_report_present_and_fits(self):
+        plan = self._plan(self._req({"SYCL0": 8 * GIB}))
+        adm = plan["admission"]
+        self.assertTrue(adm["fits"])
+        for dev, row in adm["devices"].items():
+            self.assertLessEqual(row["demand_bytes"], row["usable_bytes"], dev)
+            self.assertEqual(row["demand_bytes"],
+                             row["weights_bytes"] + row["kv_bytes"]
+                             + row["overhead_bytes"]
+                             + row["pinned_expert_bytes"] + row["cache_bytes"]
+                             + row["compute_reserve_bytes"], dev)
 
     def test_layout_has_cache_rows(self):
         plan = self._plan(self._req({"SYCL0": 8 * GIB}))

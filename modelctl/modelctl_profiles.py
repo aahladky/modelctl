@@ -34,6 +34,13 @@ from modelctl_errors import ValidationMessage
 #            allow_untested, minimum_context, maximum_cpu_bytes,
 #            maximum_storage_tier, disabled_plan_ids, health_timeout}
 #   moe_cache: {mode, gpu, ram, storage, prefill, decode, prefetch}
+#   planning (optional): {inputs: {version, ram_available_bytes,
+#            vram_limit_pct, primary, inventory, hw_settings,
+#            capabilities}, recorded_at}
+#            -- the planner's recorded machine inputs (modelctl_tiers.
+#            make_planning_inputs): defaulted from the machine on first
+#            plan, reused on replan so plans cannot drift with
+#            instantaneous free memory. Absent on legacy profiles.
 #   profile_version: 2
 
 # The schema normalize_profile() writes. The integration manifest records

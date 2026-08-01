@@ -1821,7 +1821,11 @@ class TestTierApplyCacheWriteback(WebTestBase):
              mock.patch.object(modelctl, "save_profile") as save, \
              mock.patch.object(modelctl, "generate_artifacts"), \
              mock.patch.object(modelctl, "sync_all_backends"):
-            resp = self.client.post("/api/tiers/m1/apply", headers=self.auth)
+            # These plans change split/tier structurally, which the replan
+            # gate refuses by default -- acceptance is explicit.
+            resp = self.client.post(
+                "/api/tiers/m1/apply?accept_tier_change=true",
+                headers=self.auth)
             job = self.wait_job(resp.json()["job"])
         self.assertEqual(job["status"], "done")
         return save.call_args[0][0]

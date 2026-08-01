@@ -17,6 +17,41 @@
 {% if plan.warnings %}
 <div class="warn card">{% for w in plan.warnings %}<p>WARNING: {{ w }}</p>{% endfor %}</div>
 {% endif %}
+{% if plan.admission %}
+<h2>admission</h2>
+<p>planning inputs: {{ inputs_source }}
+   (RAM {{ (inputs.ram_available_bytes / 1073741824) | round(1) }} GiB,
+   limit {{ inputs.vram_limit_pct }}%)
+   — {% if plan.admission.fits %}fits every device{% else %}does <strong>not</strong> fit{% endif %}</p>
+<table>
+  <thead><tr><th>device</th><th>usable</th><th>weights</th><th>KV</th>
+    <th>overhead</th><th>pinned experts</th><th>cache</th><th>reserve</th>
+    <th>demand</th><th>fits</th></tr></thead>
+  <tbody>
+  {% for dev, row in plan.admission.devices.items() %}
+  <tr>
+    <td>{{ dev }}</td>
+    {% for f in ["usable_bytes", "weights_bytes", "kv_bytes", "overhead_bytes",
+                 "pinned_expert_bytes", "cache_bytes", "compute_reserve_bytes",
+                 "demand_bytes"] %}
+    <td>{{ (row[f] / 1073741824) | round(2) }}</td>
+    {% endfor %}
+    <td>{{ "yes" if row.fits else "NO" }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if plan.admission.degradations %}
+<div class="warn card">
+  {% for d in plan.admission.degradations %}
+  <p>degraded: {{ d.action }} on {{ d.device }}{% if d.requested_bytes is defined %}
+     — requested {{ (d.requested_bytes / 1073741824) | round(1) }} GiB,
+     chosen {{ (d.chosen_bytes / 1073741824) | round(1) }} GiB{% endif %}
+     {% if d.layers is defined %} — layers {{ d.layers }}{% endif %}</p>
+  {% endfor %}
+</div>
+{% endif %}
+{% endif %}
 <h2>config diff</h2>
 <table>
   <thead><tr><th>field</th><th>current</th><th>planned</th></tr></thead>
@@ -32,6 +67,16 @@
 </table>
 <form method="post" action="/profiles/{{ p.name }}/tiers/apply"
       onsubmit="return confirm('apply this plan to {{ p.name }}?')">
+  {% if gate and gate.requires_accept %}
+  <div class="warn card">
+    <p>this replan changes tier, split, or placement beyond pins:</p>
+    {% for c in gate.changes %}<p><code>{{ c }}</code></p>{% endfor %}
+    <label><input type="checkbox" name="accept_tier_change" value="true">
+      accept tier change</label>
+  </div>
+  {% else %}
+  <input type="hidden" name="accept_tier_change" value="false">
+  {% endif %}
   <button type="submit">apply plan</button>
 </form>
 {% endif %}

@@ -3231,15 +3231,73 @@ def _print_tier_plan(name, cfg, plan):
     return bool(changes)
 
 
+def resolve_planning_inputs(profile, refresh=False, inventory=None,
+                            defaults=None, primary=None):
+    """The planner inputs for one profile: the record stored in the
+    profile when it has one (stable replans), else live machine values.
+
+    Returns (inputs, source) with source "stored" or "live". Everything
+    plan_tiers reads from the machine flows through here -- planning RAM
+    first among them -- so replanning a profile whose inputs are recorded
+    cannot drift with instantaneous free memory."""
+    import modelctl_tiers
+    stored = modelctl_tiers.stored_planning_inputs(profile)
+    if stored and not refresh:
+        return stored, "stored"
+    if inventory is None:
+        inventory = get_gpu_inventory()
+    if defaults is None:
+        defaults = load_defaults()
+    if primary is None:
+        primary = resolve_primary_gpu(inventory, defaults)
+    try:
+        import modelctl_hardware
+        hw_settings = modelctl_hardware.load_settings()
+    except Exception:
+        hw_settings = {}
+    try:
+        import modelctl_capabilities
+        caps = modelctl_capabilities.probe_backend(
+            profile.get("binary") or LLAMA_SERVER_BIN)
+    except Exception:
+        caps = None
+    return modelctl_tiers.make_planning_inputs(
+        inventory, defaults["vram_limit_pct"], primary,
+        modelctl_vram.system_ram_available(),
+        hw_settings=hw_settings, capabilities=caps), "live"
+
+
+def plan_tiers_for_profile(profile, refresh_inputs=False, inventory=None,
+                           defaults=None, primary=None):
+    """Tier plan for one profile from its resolved (stored-first) inputs.
+
+    Returns (plan_or_None, inputs, source)."""
+    import modelctl_tiers
+    inputs, source = resolve_planning_inputs(
+        profile, refresh=refresh_inputs, inventory=inventory,
+        defaults=defaults, primary=primary)
+    plan = modelctl_tiers.plan_tiers(
+        profile, inputs["inventory"], inputs["vram_limit_pct"],
+        inputs["primary"],
+        ram_available=inputs["ram_available_bytes"],
+        cache_request=profile.get("moe_cache"),
+        capabilities=inputs.get("capabilities"),
+        hw_settings=inputs.get("hw_settings"))
+    return plan, inputs, source
+
+
 def cmd_place_tiers(args, inventory, defaults, primary, names):
     """Tier-aware variant of cmd_place: plan each profile across the memory
-    tiers (GPU1 / +GPU2 / +RAM / +SSD streaming) with modelctl_tiers."""
+    tiers (GPU1 / +GPU2 / +RAM / +SSD streaming) with modelctl_tiers.
+
+    Planner inputs are stable: the first plan records the machine values
+    (planning RAM among them) into the profile, and replans reuse the
+    record unless --refresh-inputs is passed. A replan whose diff goes
+    beyond P5 pins needs --accept-tier-change; without it the plan is
+    shown and the profile stays untouched."""
     import modelctl_tiers
-    ram_available = modelctl_vram.system_ram_available()
-    print(f"RAM available for planning: "
-          f"{_format_size(ram_available)} "
-          f"(budget {_format_size(max(0, ram_available - modelctl_tiers.RAM_RESERVE_BYTES))} "
-          f"after reserve)\n")
+    refresh = getattr(args, "refresh_inputs", False)
+    accept = getattr(args, "accept_tier_change", False)
 
     changed = False
     for name in names:
@@ -3247,26 +3305,40 @@ def cmd_place_tiers(args, inventory, defaults, primary, names):
         if not profile.get("model_path"):
             print(f"{name}: skipped (no local GGUF model_path)\n")
             continue
-        # Capabilities decide how the cache budget map is reserved:
-        # schema 3+ honours it per device, older backends collapse it to
-        # one uniform figure.
-        try:
-            import modelctl_capabilities
-            caps = modelctl_capabilities.probe_backend(
-                profile.get("binary") or LLAMA_SERVER_BIN)
-        except Exception:
-            caps = None
-        plan = modelctl_tiers.plan_tiers(
-            profile, inventory, defaults["vram_limit_pct"], primary,
-            ram_available=ram_available,
-            cache_request=profile.get("moe_cache"),
-            capabilities=caps)
+        plan, inputs, source = plan_tiers_for_profile(
+            profile, refresh_inputs=refresh, inventory=inventory,
+            defaults=defaults, primary=primary)
+        print(f"{name}: planning inputs {source}"
+              f" (RAM {_format_size(inputs['ram_available_bytes'])},"
+              f" limit {inputs['vram_limit_pct']}%)")
         if plan is None:
             print(f"{name}: couldn't analyze model layout "
                   f"({profile.get('model_path')})\n")
             continue
         differs = _print_tier_plan(name, profile.get("config", {}), plan)
+        gate = modelctl_tiers.tier_change_gate(profile, plan)
+        if args.apply and differs and gate["requires_accept"] and not accept:
+            print("  NOT APPLIED: this replan changes tier, split, or "
+                  "placement beyond pins:")
+            for c in gate["changes"]:
+                print(f"    {c}")
+            print("  re-run with --accept-tier-change to apply it; the "
+                  "profile is untouched.")
+            print()
+            continue
+        if args.apply and not differs:
+            # Even a no-op apply freezes the inputs: the first plan is
+            # what pins them, whether or not the config moved.
+            if modelctl_tiers.record_planning_inputs(
+                    profile, inputs,
+                    recorded_at=time.strftime("%Y-%m-%dT%H:%M:%S")):
+                save_profile(profile)
+                print(f"  -> planning inputs recorded ({source})")
         if args.apply and differs:
+            if modelctl_tiers.record_planning_inputs(
+                    profile, inputs,
+                    recorded_at=time.strftime("%Y-%m-%dT%H:%M:%S")):
+                print(f"  -> planning inputs recorded ({source})")
             modelctl_tiers.apply_plan_cache_budgets(
                 profile, plan, log=lambda m: print(f"  -> {m}"))
             cfg = profile.get("config", {})
@@ -4510,6 +4582,13 @@ def build_arg_parser():
     p_place.add_argument("--tiers", action="store_true",
                           help="plan across memory tiers (GPU / +GPU2 / +RAM / +SSD streaming) "
                                "with expert-granular MoE offload instead of the simple VRAM-fit rule")
+    p_place.add_argument("--refresh-inputs", action="store_true",
+                          help="re-read the planner inputs (planning RAM, inventory, limits, "
+                               "capabilities) from the live machine instead of the record "
+                               "stored in the profile, and re-record them on --apply")
+    p_place.add_argument("--accept-tier-change", action="store_true",
+                          help="allow --apply to change tier, split, or placement beyond P5 "
+                               "pins; without it such a replan is shown but not applied")
     p_place.add_argument("--apply", action="store_true",
                           help="rewrite profile placement to the recommendation and re-sync")
     p_place.add_argument("--remap", action="store_true",

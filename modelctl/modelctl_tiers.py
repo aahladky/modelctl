@@ -271,8 +271,179 @@ def _gib(n):
     return n / (1 << 30)
 
 
+# --- stable planning inputs ------------------------------------------------
+# Everything plan_tiers reads from the live machine, captured as one
+# explicit record: defaulted from the machine on a profile's first plan,
+# stored in the profile, and reused on replan. Without this, replanning
+# reads instantaneous free RAM and can demote a profile a tier and rewrite
+# its split though nothing about the profile changed.
+
+PLANNING_INPUTS_VERSION = 1
+
+
+def stored_planning_inputs(profile):
+    """The planner inputs recorded in a profile, or None (legacy profile
+    that has never planned with recorded inputs)."""
+    inputs = (profile.get("planning") or {}).get("inputs")
+    return inputs if isinstance(inputs, dict) and inputs else None
+
+
+def make_planning_inputs(inventory, limit_pct, primary, ram_available_bytes,
+                         hw_settings=None, capabilities=None):
+    """Canonicalize live machine values into the recorded-input schema.
+
+    Only what plan_tiers actually reads is recorded; anything else would
+    be dead weight that still forces a diff when it drifts."""
+    return {
+        "version": PLANNING_INPUTS_VERSION,
+        "ram_available_bytes": int(ram_available_bytes or 0),
+        "vram_limit_pct": limit_pct,
+        "primary": primary,
+        "inventory": [{"device": d["device"], "name": d.get("name", ""),
+                       "total_bytes": int(d.get("total_bytes", 0) or 0)}
+                      for d in inventory],
+        "hw_settings": {"devices": dict((hw_settings or {}).get("devices", {}))},
+        "capabilities": {"features": {
+            "moe_cache_per_device_budgets": bool(
+                ((capabilities or {}).get("features") or {})
+                .get("moe_cache_per_device_budgets"))}},
+    }
+
+
+def record_planning_inputs(profile, inputs, recorded_at=None):
+    """Write the resolved inputs into the profile (in place). Returns True
+    when the profile changed."""
+    planning = profile.setdefault("planning", {})
+    if planning.get("inputs") == inputs:
+        return False
+    planning["inputs"] = inputs
+    if recorded_at:
+        planning["recorded_at"] = recorded_at
+    return True
+
+
+# --- replan diff classification --------------------------------------------
+
+def _ot_parts(extra):
+    """-ot parts of an extra string as [(raw_pattern, target)], in flag
+    order, WITHOUT shlex de-escaping (raw profile text, comparable across
+    plans)."""
+    toks = (extra or "").split()
+    parts = []
+    for i, tok in enumerate(toks):
+        if tok == "-ot" and i + 1 < len(toks):
+            for part in toks[i + 1].split(","):
+                pattern, _, target = part.rpartition("=")
+                if pattern and target:
+                    parts.append((pattern, target))
+    return parts
+
+
+def _is_pin_rule(pattern):
+    """Pin rules place shared experts (_shexp) or leading dense layers
+    (whole-layer ffn) on a GPU; routed-expert (_exps) rules are placement
+    structure. P5 pins may be added by a replan without changing where any
+    routed expert or attention byte lives."""
+    return "_shexp" in pattern or "_exps" not in pattern
+
+
+def _placement_view(extra):
+    """Structural placement content of an extra string, pins separated."""
+    parts = _ot_parts(extra)
+    toks = shlex.split(extra or "")
+    view = {"pins": [p for p in parts if _is_pin_rule(p[0])],
+            "routed": [p for p in parts if not _is_pin_rule(p[0])],
+            "ngl": None, "no_mmap": "--no-mmap" in toks,
+            "device_list": "", "fit": "", "other": []}
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        if tok == "-ngl" and i + 1 < len(toks):
+            view["ngl"] = toks[i + 1]
+            i += 2
+        elif tok == "--device" and i + 1 < len(toks):
+            view["device_list"] = toks[i + 1]
+            i += 2
+        elif tok == "--fit" and i + 1 < len(toks):
+            view["fit"] = toks[i + 1]
+            i += 2
+        elif tok in ("--no-mmap", "-ot"):
+            i += 2 if tok == "-ot" else 1
+        else:
+            view["other"].append(tok)
+            i += 1
+    return view
+
+
+def classify_config_diff(old_cfg, new_cfg):
+    """Classify a replan's config diff: "none", "pins", or "structural".
+
+    "pins" means only P5 pin rules (shexp / leading-dense -ot overrides)
+    differ -- tier, split, device, routed-expert placement, -ngl, mmap
+    mode, and every non-placement flag are unchanged. Anything beyond that
+    is "structural" and (in the apply paths) requires an explicit
+    --accept-tier-change."""
+    changes = []
+    structural = False
+    for key in ("device", "split_mode", "tensor_split"):
+        old, new = old_cfg.get(key, "") or "", new_cfg.get(key, "") or ""
+        if old != new:
+            structural = True
+            changes.append(f"{key}: {old or '(none)'} -> {new or '(none)'}")
+    old_v = _placement_view(old_cfg.get("extra", ""))
+    new_v = _placement_view(new_cfg.get("extra", ""))
+    for key in ("routed", "ngl", "no_mmap", "device_list", "fit", "other"):
+        if old_v[key] != new_v[key]:
+            structural = True
+            changes.append(f"extra {key}: {old_v[key]} -> {new_v[key]}")
+    pins_changed = old_v["pins"] != new_v["pins"]
+    if pins_changed:
+        changes.append(f"extra pins: {old_v['pins']} -> {new_v['pins']}")
+    if structural:
+        kind = "structural"
+    elif pins_changed:
+        kind = "pins"
+    else:
+        kind = "none"
+    return {"kind": kind, "changes": changes}
+
+
+def _has_placement(cfg):
+    """Does this config carry any placement content at all? A profile with
+    none is receiving its initial placement, not a placement change."""
+    if cfg.get("device") or cfg.get("tensor_split") or cfg.get("split_mode"):
+        return True
+    placement, _ = split_extra_flags(cfg.get("extra", ""))
+    return bool(placement)
+
+
+def tier_change_gate(profile, plan):
+    """Decide whether applying `plan` to `profile` needs an explicit
+    --accept-tier-change.
+
+    Returns {"kind", "changes", "requires_accept"}. A no-op or pins-only
+    diff never needs the flag; neither does a profile with no existing
+    placement (first plan). Everything else -- tier, split, or placement
+    beyond pins, including an effective cache-budget change -- does."""
+    diff = classify_config_diff(profile.get("config", {}), plan["config"])
+    mc = profile.get("moe_cache", {})
+    if mc.get("mode", "off") != "off":
+        requested = {d: b for d, b in mc.get("gpu", {})
+                     .get("budgets_bytes", {}).items() if b > 0}
+        effective = plan.get("cache_budgets") or {}
+        if effective != requested:
+            diff["changes"].append(
+                f"moe_cache budgets: {requested} -> {effective}")
+            diff["kind"] = "structural"
+    requires = (diff["kind"] == "structural"
+                and _has_placement(profile.get("config", {})))
+    return {"kind": diff["kind"], "changes": diff["changes"],
+            "requires_accept": requires}
+
+
 def plan_tiers(profile, inventory, limit_pct, primary, ram_available=None,
-               layout=None, cache_request=None, capabilities=None):
+               layout=None, cache_request=None, capabilities=None,
+               hw_settings=None):
     """Compute a tiered placement for one profile.
 
     profile     -- modelctl profile dict (config carries ctx/cache types/extra)
@@ -286,17 +457,32 @@ def plan_tiers(profile, inventory, limit_pct, primary, ram_available=None,
                     per-device dynamic cache space before assigning static
                     expert layers -- preventing the cache from overwriting
                     or being overwritten by statically placed experts.
+    hw_settings -- parsed hardware settings ({"devices": {dev: {enabled,
+                    reserve_bytes}}}); None reads the live settings file.
+                    Passed explicitly so a stored planning-inputs record
+                    fully determines the plan.
 
     Returns None when the model can't be analyzed; otherwise:
       {tier, config: {device, split_mode, tensor_split, extra},
        layout: [(label, gib, description)], warnings: [...],
        analysis: {weights_gib, kv_gib, is_moe, n_layers, ram_budget_gib,
                   cache_budgets_gib: {...} or None},
-       cache_budgets: {dev: bytes} or None}
+       cache_budgets: {dev: bytes} or None,
+       admission: {fits, devices: {...}, requested, assumed, chosen,
+                   degradations: [...]}}
     cache_budgets is the effective UNIFORM per-GPU reserve the planner
     actually accounted for (None when the cache is off or didn't fit);
     apply paths should write it back to the profile so the server
     allocates exactly what the planner reserved.
+
+    Admission contract: the emitted config is verified per device --
+    resident weights + KV at the configured ctx + cache budget + pinned
+    expert bytes + the compute reserve against usable capacity -- and an
+    oversubscribed plan is never returned as-is: the cache budget shrinks
+    toward 0 first, then further expert layers spill to CPU (the replan
+    under the smaller cache does the spilling), with every step recorded
+    machine-readably in plan["admission"]["degradations"] and echoed in
+    plan["warnings"].
     """
     cfg = profile.get("config", {})
     model_path = profile.get("model_path")
@@ -333,154 +519,385 @@ def plan_tiers(profile, inventory, limit_pct, primary, ram_available=None,
     # Hardware policy: disabled devices must not receive any placement, and
     # configured reserves shrink the usable budget -- the tier planner must
     # live in the same hardware reality as the worker and matrix.
-    try:
-        import modelctl_hardware
-        hw_settings = modelctl_hardware.load_settings()
-    except Exception:
-        hw_settings = {}
-    dev_cfg = hw_settings.get("devices", {})
+    if hw_settings is None:
+        try:
+            import modelctl_hardware
+            hw_settings = modelctl_hardware.load_settings()
+        except Exception:
+            hw_settings = {}
+    dev_cfg = (hw_settings or {}).get("devices", {})
     devs = [d for d in devs if dev_cfg.get(d["device"], {}).get("enabled", True)]
     if not devs:
         return None
     if primary not in [d["device"] for d in devs]:
         primary = devs[0]["device"]
-    usable = {d["device"]: d["total_bytes"] * frac
-                    - dev_cfg.get(d["device"], {}).get("reserve_bytes", 0)
-              for d in devs}
+    usable_raw = {d["device"]: d["total_bytes"] * frac
+                        - dev_cfg.get(d["device"], {}).get("reserve_bytes", 0)
+                  for d in devs}
 
     weights = layout["weight_bytes"]
     overhead = modelctl_vram.compute_overhead_bytes(weights)
     total = weights + kv + overhead
-    warnings = []
+    base_warnings = []
     _, other_flags = split_extra_flags(cfg.get("extra", ""))
     other = " ".join(other_flags)
 
-    # Reserve the dynamic cache BEFORE assigning static expert layers, or
-    # the runtime cache collides with statically placed experts (OOM).
-    #
-    # Two runtime contracts, and the plan must match whichever one this
-    # backend implements:
-    #   schema 3+ (per_device_budgets): --moe-cache-bytes takes a device
-    #     map. Each named device is reserved its own budget; unnamed
-    #     devices get no cache, and none is reserved for them.
-    #   older: ONE global budget is applied to every device that creates
-    #     a cache. Per-device requests collapse to their max, reserved on
-    #     every participating device. If that uniform figure doesn't fit
-    #     on even one of them, the cache is disabled for the whole plan --
-    #     a half-reserved cache would diverge from what the server
-    #     actually allocates.
-    cache_budgets = {}
-    if cache_request and cache_request.get("mode", "off") != "off":
-        requested = {d: b for d, b in cache_request.get("gpu", {})
-                     .get("budgets_bytes", {}).items() if b > 0}
-        per_device = bool((capabilities or {}).get("features", {})
-                          .get("moe_cache_per_device_budgets"))
-        if requested and per_device:
-            unknown = sorted(d for d in requested if d not in usable)
-            if unknown:
-                warnings.append(
-                    f"cache budget names {', '.join(unknown)}, which this "
-                    "plan does not use -- those budgets are ignored")
-            too_small = sorted(d for d, b in requested.items()
-                               if d in usable and b > usable[d])
-            if too_small:
-                warnings.append(
-                    f"cache budget exceeds usable VRAM on "
-                    f"{', '.join(too_small)} -- the cache is disabled for "
-                    "this plan")
-            else:
-                cache_budgets = {d: b for d, b in requested.items()
-                                 if d in usable}
-                for d, b in cache_budgets.items():
-                    usable[d] -= b
-        elif requested:
-            uniform = max(requested.values())
-            too_small = sorted(d for d, u in usable.items() if uniform > u)
-            if too_small:
-                warnings.append(
-                    f"cache budget {uniform / (1<<30):.1f} GiB exceeds usable "
-                    f"VRAM on {', '.join(too_small)} -- this backend applies "
-                    "one per-GPU budget to every device, so the cache is "
-                    "disabled for this plan")
-            else:
-                cache_budgets = {d: uniform for d in usable}
-                for d in usable:
-                    usable[d] -= uniform
-    if cache_budgets:
-        for dev, b in cache_budgets.items():
-            if b > usable[dev]:
-                warnings.append(
-                    f"cache reserve {b / (1<<30):.1f} GiB on {dev} leaves "
-                    f"only {usable[dev] / (1<<30):.1f} GiB for static experts "
-                    "-- this may force more experts to CPU than the non-cache plan")
-
-    analysis = {"weights_gib": _gib(weights), "kv_gib": _gib(kv),
-                "is_moe": layout["is_moe"], "n_layers": layout["block_count"],
-                "ram_budget_gib": _gib(ram_budget),
-                "cache_budgets_gib": ({d: _gib(b) for d, b in cache_budgets.items()}
-                                      if cache_budgets else None)}
     if layout.get("unknown_type_tensors"):
-        warnings.append(
+        base_warnings.append(
             f"{layout['unknown_type_tensors']} tensors use quant types this "
             "planner doesn't know -- layout math undercounts; check the plan.")
 
-    def result(tier, config, layout_rows):
-        return {"tier": tier, "config": config, "layout": layout_rows,
-                "warnings": warnings, "analysis": analysis,
-                "cache_budgets": dict(cache_budgets) if cache_budgets else None}
+    # Reserve the dynamic cache BEFORE assigning static expert layers, or
+    # the runtime cache collides with statically placed experts (OOM).
+    # A budget that doesn't fit is SHRUNK toward 0 (never emitted as-is,
+    # never silently honored): the degradation order is cache first, then
+    # expert spill -- see _reserve_cache_budgets.
+    requested_budgets = {}
+    if cache_request and cache_request.get("mode", "off") != "off":
+        requested_budgets = {d: b for d, b in cache_request.get("gpu", {})
+                             .get("budgets_bytes", {}).items() if b > 0}
+    per_device_caps = bool((capabilities or {}).get("features", {})
+                           .get("moe_cache_per_device_budgets"))
+    degradations = []
+    cache_warnings = []
+    cache_budgets = _reserve_cache_budgets(
+        requested_budgets, per_device_caps, usable_raw, layout, kv, devs,
+        cache_warnings, degradations)
 
-    # --- tier 1: primary GPU alone --------------------------------------
-    if total <= usable[primary]:
-        return result(1, {"device": primary, "split_mode": "",
-                          "tensor_split": "", "extra": other},
-                      [(f"{primary} (whole model)", _gib(total),
-                        "weights + KV + overhead")])
+    def plan_once(cache_now):
+        usable = {d: max(0, usable_raw[d] - cache_now.get(d, 0))
+                  for d in usable_raw}
+        warnings = list(base_warnings) + list(cache_warnings)
+        analysis = {"weights_gib": _gib(weights), "kv_gib": _gib(kv),
+                    "is_moe": layout["is_moe"],
+                    "n_layers": layout["block_count"],
+                    "ram_budget_gib": _gib(ram_budget),
+                    "cache_budgets_gib": ({d: _gib(b)
+                                           for d, b in cache_now.items()}
+                                          if cache_now else None)}
 
-    # --- tier 2: all GPUs ------------------------------------------------
-    combined = sum(usable.values())
-    if len(devs) > 1 and total <= combined:
-        # Ratio from USABLE bytes, not raw capacity: llama.cpp distributes
-        # the model by these weights, and a device carrying a reserve or
-        # the uniform cache reservation must receive proportionally less.
-        # A raw-capacity ratio put static bytes into the reserved space --
-        # aggregate admission passed, the small card OOMed at load.
-        ts = modelctl_vram.tensor_split_ratio(
-            [usable[d["device"]] for d in devs])
-        # The emitted ratio is GiB-rounded and GCD-reduced; recheck what
-        # each device actually receives under the quantized weights
-        # before admitting, and spill instead when quantization overflows
-        # someone's budget.
-        weights = [int(w) for w in ts.split(",")]
-        wsum = sum(weights) or 1
-        per_device_fits = all(
-            total * w / wsum <= usable[d["device"]]
-            for w, d in zip(weights, devs))
-        if per_device_fits:
-            # Explicit --device list: without one, llama.cpp maps
-            # tensor_split positions to its own enumeration order, while
-            # this ratio is in devs order (primary first) -- a non-SYCL0
-            # primary would receive the wrong share at runtime.
-            dev_list = ",".join(d["device"] for d in devs)
-            extra2 = f"--device {dev_list}" + (f" {other}" if other else "")
-            return result(2, {"device": "", "split_mode": "layer",
-                              "tensor_split": ts, "extra": extra2},
-                          [("all GPUs", _gib(total),
-                            f"layer split {ts} by usable VRAM")])
+        def result(tier, config, layout_rows):
+            return {"tier": tier, "config": config, "layout": layout_rows,
+                    "warnings": warnings, "analysis": analysis,
+                    "cache_budgets": dict(cache_now) if cache_now else None}
 
-    # --- tiers 3/4: spill to CPU (RAM), maybe SSD streaming --------------
-    tier = 3 if total <= combined + ram_budget else 4
-    if tier == 4:
-        warnings.append(
-            "model exceeds GPU+RAM: the CPU-resident portion streams from "
-            "SSD via mmap -- expect low single-digit tok/s on cold cache.")
+        # --- tier 1: primary GPU alone ----------------------------------
+        if total <= usable[primary]:
+            return result(1, {"device": primary, "split_mode": "",
+                              "tensor_split": "", "extra": other},
+                          [(f"{primary} (whole model)", _gib(total),
+                            "weights + KV + overhead")])
 
-    if layout["is_moe"]:
-        return _plan_moe_spill(
+        # --- tier 2: all GPUs --------------------------------------------
+        combined = sum(usable.values())
+        if len(devs) > 1 and total <= combined:
+            # Ratio from USABLE bytes, not raw capacity: llama.cpp
+            # distributes the model by these weights, and a device carrying
+            # a reserve or the uniform cache reservation must receive
+            # proportionally less. A raw-capacity ratio put static bytes
+            # into the reserved space -- aggregate admission passed, the
+            # small card OOMed at load.
+            ts = modelctl_vram.tensor_split_ratio(
+                [usable[d["device"]] for d in devs])
+            # The emitted ratio is GiB-rounded and GCD-reduced; recheck
+            # what each device actually receives under the quantized
+            # weights before admitting, and spill instead when quantization
+            # overflows someone's budget.
+            ts_weights = [int(w) for w in ts.split(",")]
+            wsum = sum(ts_weights) or 1
+            per_device_fits = all(
+                total * w / wsum <= usable[d["device"]]
+                for w, d in zip(ts_weights, devs))
+            if per_device_fits:
+                # Explicit --device list: without one, llama.cpp maps
+                # tensor_split positions to its own enumeration order,
+                # while this ratio is in devs order (primary first) -- a
+                # non-SYCL0 primary would receive the wrong share at
+                # runtime.
+                dev_list = ",".join(d["device"] for d in devs)
+                extra2 = f"--device {dev_list}" + (f" {other}" if other else "")
+                return result(2, {"device": "", "split_mode": "layer",
+                                  "tensor_split": ts, "extra": extra2},
+                              [("all GPUs", _gib(total),
+                                f"layer split {ts} by usable VRAM")])
+
+        # --- tiers 3/4: spill to CPU (RAM), maybe SSD streaming ----------
+        tier = 3 if total <= combined + ram_budget else 4
+        if tier == 4:
+            warnings.append(
+                "model exceeds GPU+RAM: the CPU-resident portion streams "
+                "from SSD via mmap -- expect low single-digit tok/s on "
+                "cold cache.")
+
+        if layout["is_moe"]:
+            return _plan_moe_spill(
+                tier, layout, devs, usable, primary, kv, ram_budget, other,
+                warnings, analysis, result, cache_now)
+        return _plan_dense_spill(
             tier, layout, devs, usable, primary, kv, ram_budget, other,
-            warnings, analysis, result, cache_budgets)
-    return _plan_dense_spill(
-        tier, layout, devs, usable, primary, kv, ram_budget, other,
-        warnings, analysis, result)
+            warnings, analysis, result)
+
+    # Admission-and-degradation loop: verify the EMITTED config per device
+    # and shrink the cache until it fits (the replan under a smaller cache
+    # spills further expert layers on its own). Bounded: each pass either
+    # fits or strictly shrinks the cache, and a zero cache ends the loop.
+    plan = report = None
+    for _ in range(4):
+        plan = plan_once(cache_budgets)
+        report = _admission_report(plan, layout, devs, usable_raw, kv,
+                                   cache_budgets)
+        if report["fits"] or not any(cache_budgets.values()):
+            break
+        overflow = {d: r["demand_bytes"] - r["usable_bytes"]
+                    for d, r in report["devices"].items() if not r["fits"]}
+        if per_device_caps:
+            new_budgets = {}
+            for d, b in cache_budgets.items():
+                got = max(0, b - overflow.get(d, 0))
+                if got != b:
+                    degradations.append({
+                        "action": "shrink_cache", "device": d,
+                        "requested_bytes": int(b), "chosen_bytes": int(got),
+                        "reason": "emitted plan oversubscribed the device"})
+                    cache_warnings.append(_cache_fallback_warning(
+                        d, b, usable_raw.get(d, 0), got))
+                if got:
+                    new_budgets[d] = got
+        else:
+            uniform = max(cache_budgets.values())
+            got = max(0, uniform - max(overflow.values()))
+            degradations.append({
+                "action": "shrink_cache", "device": "*",
+                "requested_bytes": int(uniform), "chosen_bytes": int(got),
+                "reason": "emitted plan oversubscribed a device; the "
+                          "backend applies one per-GPU budget to every "
+                          "device"})
+            cache_warnings.append(_cache_fallback_warning(
+                "every device", uniform, min(usable_raw.values()), got))
+            new_budgets = {d: got for d in cache_budgets} if got else {}
+        cache_budgets = new_budgets
+
+    if not report["fits"]:
+        bad = sorted(d for d, r in report["devices"].items() if not r["fits"])
+        plan["warnings"].append(
+            f"plan oversubscribes {', '.join(bad)} even with the cache "
+            "disabled and every spillable expert on CPU -- the fixed set "
+            "(attention/KV/overhead) does not fit; shrink ctx or the KV "
+            "quant. This plan is expected to fail VRAM admission.")
+
+    plan["admission"] = {
+        "fits": report["fits"],
+        "devices": report["devices"],
+        "requested": {
+            "cache_budgets_bytes": {d: int(b)
+                                    for d, b in requested_budgets.items()},
+            "ctx": ctx,
+        },
+        "assumed": {
+            "vram_limit_pct": limit_pct,
+            "ram_available_bytes": int(ram_available),
+            "capacity_bytes": {d["device"]: int(d["total_bytes"])
+                               for d in devs},
+            "reserve_bytes": {d["device"]: int(dev_cfg.get(d["device"], {})
+                                               .get("reserve_bytes", 0))
+                              for d in devs},
+        },
+        "chosen": {
+            "tier": plan["tier"],
+            "cache_budgets_bytes": {d: int(b)
+                                    for d, b in cache_budgets.items()},
+        },
+        "degradations": degradations,
+    }
+    return plan
+
+
+def _cache_fallback_warning(where, requested, usable, chosen):
+    """The approved contract copy: requested, measured/assumed, fallback."""
+    req = f"{requested / (1 << 30):.1f} GiB"
+    have = f"{usable / (1 << 30):.1f} GiB"
+    if chosen > 0:
+        return (f"requested expert cache of {req} on {where} exceeds the "
+                f"free VRAM measured ({have} usable) -- launch will fall "
+                f"back to a smaller cache ({chosen / (1 << 30):.1f} GiB)")
+    return (f"requested expert cache of {req} on {where} exceeds the free "
+            f"VRAM measured ({have} usable) -- the cache is disabled for "
+            "this plan")
+
+
+def _reserve_cache_budgets(requested, per_device_caps, usable, layout, kv,
+                           devs, warnings, degradations):
+    """Per-device cache reservation with shrink-to-fit semantics.
+
+    Two runtime contracts, and the reservation must match whichever one
+    the backend implements:
+      schema 3+ (per_device_budgets): --moe-cache-bytes takes a device
+        map. Each named device is reserved its own budget; unnamed
+        devices get no cache, and none is reserved for them.
+      older: ONE global budget is applied to every device that creates a
+        cache, so per-device requests collapse to their max, reserved on
+        every participating device.
+
+    A budget that exceeds what the device can give is never honored as-is
+    and never silently dropped: it shrinks to the device's usable bytes
+    here (the coarse cap), and the post-plan admission loop in plan_tiers
+    shrinks it further if the emitted config still oversubscribes.
+    Shrinking beats disabling: the plan keeps as much cache as admission
+    allows, which is the exact fallback contract the console copy
+    promises."""
+    if not requested:
+        return {}
+    known = {d: b for d, b in requested.items() if d in usable}
+    if per_device_caps:
+        unknown = sorted(set(requested) - set(known))
+        if unknown:
+            warnings.append(
+                f"cache budget names {', '.join(unknown)}, which this "
+                "plan does not use -- those budgets are ignored")
+        chosen = {}
+        for d, b in sorted(known.items()):
+            cap = max(0, int(usable[d]))
+            got = min(b, cap)
+            if got < b:
+                degradations.append({
+                    "action": "shrink_cache", "device": d,
+                    "requested_bytes": int(b), "chosen_bytes": int(got),
+                    "reason": "requested budget exceeds the usable VRAM "
+                              "assumed for this device"})
+                warnings.append(_cache_fallback_warning(d, b, usable[d], got))
+            if got > 0:
+                chosen[d] = got
+        return chosen
+
+    uniform = max(requested.values())
+    cap = min(max(0, int(usable[d])) for d in usable)
+    got = min(uniform, cap)
+    if got < uniform:
+        degradations.append({
+            "action": "shrink_cache", "device": "*",
+            "requested_bytes": int(uniform), "chosen_bytes": int(got),
+            "reason": "this backend applies one per-GPU budget to every "
+                      "device, and the requested figure exceeds what the "
+                      "smallest device can give"})
+        warnings.append(_cache_fallback_warning(
+            "every device", uniform, min(usable.values()), got))
+    return {d: got for d in usable} if got > 0 else {}
+
+
+def _admission_report(plan, layout, devs, usable, kv, cache_budgets):
+    """Per-device admission math for an EMITTED tier-plan config.
+
+    Recomputed from the config itself (tensor split ratio, -ot rules,
+    -ngl) rather than from planner intermediates, so the report can only
+    describe what llama.cpp will actually allocate: the fixed set
+    distributed by the tensor-split ratio, statically pinned experts by
+    first-match -ot rules, the cache budget, and (spill tiers) the
+    per-card compute reserve. Values are bytes; `fits` is per device and
+    overall."""
+    config = plan["config"]
+    tier = plan["tier"]
+    by_dev = {d["device"]: d for d in devs}
+    toks = shlex.split(config.get("extra", "") or "")
+
+    device_list = None
+    ngl = None
+    for i, tok in enumerate(toks):
+        if tok == "--device" and i + 1 < len(toks):
+            device_list = toks[i + 1].split(",")
+        elif tok == "-ngl" and i + 1 < len(toks):
+            try:
+                ngl = int(toks[i + 1])
+            except ValueError:
+                pass
+    if config.get("device"):
+        order = [config["device"]]
+    elif device_list:
+        order = device_list
+    else:
+        order = [d["device"] for d in devs]
+
+    split = config.get("tensor_split", "")
+    if split and "," in split:
+        ratio = [float(x) for x in split.split(",")]
+    else:
+        ratio = [1.0]
+    rsum = sum(ratio) or 1.0
+    shares = {dev: (ratio[i] / rsum if i < len(ratio) else 0.0)
+              for i, dev in enumerate(order)}
+
+    rules = []
+    for i, tok in enumerate(toks):
+        if tok == "-ot" and i + 1 < len(toks):
+            for part in toks[i + 1].split(","):
+                pattern, _, target = part.rpartition("=")
+                if not pattern or not target:
+                    continue
+                try:
+                    rules.append((re.compile(pattern), target))
+                except re.error:
+                    continue
+
+    expert_pins = {}
+    cpu_expert_bytes = 0
+    spill = tier >= 3
+    if layout.get("is_moe") and spill:
+        for layer, nbytes in layout["expert_bytes_per_layer"].items():
+            probe = f"blk.{layer}.ffn_gate_exps.weight"
+            target = order[0]
+            for rx, tgt in rules:
+                if rx.search(probe):
+                    target = tgt
+                    break
+            if target == "CPU":
+                cpu_expert_bytes += nbytes
+            else:
+                expert_pins[target] = expert_pins.get(target, 0) + nbytes
+
+    if not spill:
+        # Whole model GPU-resident: everything (experts included) follows
+        # the split ratio; overhead over all weights already covers the
+        # compute buffers, so no separate reserve line.
+        gpu_weights = layout["weight_bytes"]
+        overhead = modelctl_vram.compute_overhead_bytes(gpu_weights)
+        reserve = 0
+    elif layout.get("is_moe"):
+        gpu_weights = layout["non_expert_bytes"]
+        overhead = modelctl_vram.compute_overhead_bytes(gpu_weights + kv)
+        reserve = GPU_COMPUTE_RESERVE_BYTES
+    else:
+        block_count = layout.get("block_count") or 1
+        per_layer = (layout["weight_bytes"] - layout["other_bytes"]) / block_count
+        gpu_weights = layout["other_bytes"] + (ngl or 0) * per_layer
+        overhead = modelctl_vram.compute_overhead_bytes(layout["weight_bytes"])
+        reserve = GPU_COMPUTE_RESERVE_BYTES
+
+    devices = {}
+    fits = True
+    for dev in order:
+        share = shares.get(dev, 0.0)
+        w = int(gpu_weights * share)
+        k = int(kv * share)
+        ov = int(overhead * share)
+        pinned = int(expert_pins.get(dev, 0))
+        cache = int(cache_budgets.get(dev, 0))
+        demand = w + k + ov + pinned + cache + reserve
+        u = int(usable.get(dev, 0))
+        ok = demand <= u
+        fits = fits and ok
+        devices[dev] = {
+            "capacity_bytes": int(by_dev.get(dev, {}).get("total_bytes", 0)),
+            "usable_bytes": u,
+            "weights_bytes": w,
+            "kv_bytes": k,
+            "overhead_bytes": ov,
+            "pinned_expert_bytes": pinned,
+            "cache_bytes": cache,
+            "compute_reserve_bytes": int(reserve),
+            "demand_bytes": int(demand),
+            "fits": ok,
+        }
+    return {"fits": fits, "devices": devices,
+            "cpu_expert_bytes": int(cpu_expert_bytes)}
 
 
 def apply_plan_cache_budgets(profile, plan, log=print):
@@ -545,20 +962,36 @@ def _plan_moe_spill(tier, layout, devs, usable, primary, kv, ram_budget,
     fixed = non_expert + kv
     gpu_overhead = modelctl_vram.compute_overhead_bytes(fixed)
     fixed_total = fixed + gpu_overhead
-    cap_sum = sum(d["total_bytes"] for d in devs)
-    budgets = {}
-    for d in devs:
-        share = fixed_total * d["total_bytes"] / cap_sum
-        budgets[d["device"]] = max(
-            0, usable[d["device"]] - share - GPU_COMPUTE_RESERVE_BYTES)
     if fixed_total > sum(usable.values()):
         warnings.append(
             "attention/KV alone exceeds the combined GPU budget -- consider "
             "a smaller ctx or KV quant; this plan will likely OOM.")
 
-    ordered = sorted(devs, key=lambda d: -gpu_bandwidth_gbs(d["name"]))
-    assignment, cpu_layers = _expert_assignment(layers_bytes, ordered, budgets)
-    used_devs = [d["device"] for d in devs if d["device"] in assignment]
+    # Distribute the fixed set only across the devices that actually end
+    # up in the emitted --device list. A device whose expert budget comes
+    # out empty is dropped from the plan entirely, and the fixed bytes it
+    # would have carried land on the remaining cards -- so their expert
+    # budgets must be recomputed against the larger share. Skipping this
+    # re-distribution is how a single-device plan got experts budgeted as
+    # if another card were still absorbing 27% of the KV/attention set:
+    # aggregate math passed, the emitting device oversubscribed at load.
+    active = list(devs)
+    while True:
+        cap_sum = sum(d["total_bytes"] for d in active)
+        budgets = {}
+        for d in active:
+            share = fixed_total * d["total_bytes"] / cap_sum
+            budgets[d["device"]] = max(
+                0, usable[d["device"]] - share - GPU_COMPUTE_RESERVE_BYTES)
+        ordered = sorted(active, key=lambda d: -gpu_bandwidth_gbs(d["name"]))
+        assignment, cpu_layers = _expert_assignment(layers_bytes, ordered,
+                                                    budgets)
+        used = [d for d in active if d["device"] in assignment]
+        if not used or len(used) == len(active):
+            break
+        active = used
+
+    used_devs = [d["device"] for d in active if d["device"] in assignment]
     if not used_devs:
         used_devs = [primary]
         warnings.append("no expert layers fit any GPU budget -- all routed "
@@ -659,7 +1092,11 @@ def _plan_dense_spill(tier, layout, devs, usable, primary, kv, ram_budget,
     layer_total = weights - other_bytes
     per_layer = layer_total / block_count if block_count else layer_total
 
-    gpu_budget = sum(usable.values())
+    # Per-card compute reserve comes off the top, matching the admission
+    # math: overhead covers buffers scaled to the weights, the reserve
+    # covers the allocator slack that admission charges per device.
+    gpu_budget = (sum(usable.values())
+                  - len(devs) * GPU_COMPUTE_RESERVE_BYTES)
     fixed = other_bytes + kv + modelctl_vram.compute_overhead_bytes(weights)
     n_gpu = int(max(0, min(block_count,
                            math.floor((gpu_budget - fixed) / per_layer))))

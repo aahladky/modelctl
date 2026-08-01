@@ -9,22 +9,6 @@ import time
 import modelctl
 
 
-def _caps_for(profile):
-    """Backend capabilities for a profile's binary, or None.
-
-    The tier planner needs them to know whether this backend honours a
-    per-device cache budget map (schema 3+) or collapses it to one
-    uniform figure -- reserving the wrong one is how the runtime cache
-    collides with statically placed experts.
-    """
-    try:
-        import modelctl_capabilities
-        binary = profile.get("binary") or modelctl.LLAMA_SERVER_BIN
-        return modelctl_capabilities.probe_backend(binary)
-    except Exception:
-        return None
-
-
 def submit_edit(runner, name, updates):
     """Apply config/profile field updates, regenerate, sync."""
     from modelctl_services import profile_service
@@ -39,20 +23,40 @@ def submit_edit(runner, name, updates):
                          lane="mutation")
 
 
-def submit_tier_apply(runner, name):
-    """Compute the tier plan for one profile and apply it."""
+def submit_tier_apply(runner, name, accept_tier_change=False):
+    """Compute the tier plan for one profile and apply it.
+
+    Planner inputs resolve stored-first (recorded on first apply); a
+    replan that changes tier, split, or placement beyond P5 pins is NOT
+    applied unless accept_tier_change is set -- the job reports the diff
+    and leaves the profile untouched."""
+    import time
+
     import modelctl_tiers
 
     def fn(ctx):
         profile = modelctl.load_profile(name)
-        inventory = modelctl.get_gpu_inventory()
-        d = modelctl.load_defaults()
-        primary = modelctl.resolve_primary_gpu(inventory, d)
-        plan = modelctl_tiers.plan_tiers(profile, inventory, d["vram_limit_pct"], primary,
-                                          cache_request=profile.get("moe_cache"),
-                                          capabilities=_caps_for(profile))
+        plan, inputs, source = modelctl.plan_tiers_for_profile(profile)
         if plan is None:
             raise RuntimeError(f"couldn't analyze model layout for '{name}'")
+        ctx.log(f"planning inputs: {source}")
+        for w in plan["warnings"]:
+            ctx.log(f"WARNING: {w}")
+        gate = modelctl_tiers.tier_change_gate(profile, plan)
+        if gate["requires_accept"] and not accept_tier_change:
+            ctx.log("NOT APPLIED: this replan changes tier, split, or "
+                    "placement beyond pins:")
+            for c in gate["changes"]:
+                ctx.log(f"  {c}")
+            ctx.log("re-apply with 'accept tier change' checked; the "
+                    "profile is untouched.")
+            return {"applied": False, "requires_accept_tier_change": True,
+                    "changes": gate["changes"], "tier": plan["tier"],
+                    "warnings": plan["warnings"]}
+        if modelctl_tiers.record_planning_inputs(
+                profile, inputs,
+                recorded_at=time.strftime("%Y-%m-%dT%H:%M:%S")):
+            ctx.log(f"planning inputs recorded ({source})")
         modelctl_tiers.apply_plan_cache_budgets(profile, plan, log=ctx.log)
         cfg = profile.get("config", {})
         cfg.update(plan["config"])
@@ -67,12 +71,13 @@ def submit_tier_apply(runner, name):
         modelctl.sync_all_backends(restart_router=True, restart_openarc=True)
         for label, gib, desc in plan["layout"]:
             ctx.log(f"{label}: {gib:.1f} GiB  {desc}")
-        for w in plan["warnings"]:
-            ctx.log(f"WARNING: {w}")
-        return {"tier": plan["tier"], "config": plan["config"],
-                "warnings": plan["warnings"]}
+        return {"applied": True, "tier": plan["tier"],
+                "config": plan["config"], "warnings": plan["warnings"],
+                "admission": plan.get("admission")}
     return runner.submit("tier-apply", f"tier apply {name}", fn,
-                         payload={"name": name}, lane="mutation")
+                         payload={"name": name,
+                                  "accept_tier_change": accept_tier_change},
+                         lane="mutation")
 
 
 def submit_pull(runner, repo_id, quant_label=None, want_mtp=True):

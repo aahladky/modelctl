@@ -100,13 +100,24 @@ class TestTierReservation(unittest.TestCase):
                          "uniform backend allocates the same budget on every "
                          "device that creates a cache")
 
-    def test_budget_too_big_for_its_own_device_disables_the_cache(self):
-        # 20 GiB named on the 12 GiB card.
+    def test_budget_too_big_for_its_own_device_shrinks_to_fit(self):
+        # 20 GiB named on the 12 GiB card: never honored as-is, never
+        # disabled outright -- it falls back to what the device can give,
+        # loudly, with a machine-readable degradation record.
         plan = self._plan(CAPS_PER_DEVICE,
                           budgets={"SYCL0": 4 * GIB, "SYCL1": 20 * GIB})
-        self.assertFalse(plan["cache_budgets"])
-        self.assertTrue(any("exceeds usable VRAM" in w
+        self.assertEqual(plan["cache_budgets"]["SYCL0"], 4 * GIB,
+                         "the budget that fit must be honored as written")
+        self.assertLess(plan["cache_budgets"]["SYCL1"],
+                        int(12 * GIB * 0.9) + 1)
+        self.assertLess(plan["cache_budgets"]["SYCL1"], 20 * GIB)
+        self.assertTrue(any("fall back to a smaller cache" in w
                             for w in plan["warnings"]))
+        self.assertTrue(any(d["action"] == "shrink_cache"
+                            and d["device"] == "SYCL1"
+                            and d["requested_bytes"] == 20 * GIB
+                            for d in plan["admission"]["degradations"]))
+        self.assertTrue(plan["admission"]["fits"])
 
     def test_unused_device_in_the_map_is_reported(self):
         plan = self._plan(CAPS_PER_DEVICE,
