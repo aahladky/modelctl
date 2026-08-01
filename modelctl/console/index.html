@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>modelctl</title>
+<script>
+/* Theme, before first paint: an explicit choice (localStorage "mc-theme")
+   is stamped as html[data-theme] so the stylesheet's tokens are already
+   right when the first frame renders -- no flash. Default (no stamp)
+   follows prefers-color-scheme via the media query in tokens.css. */
+(function () {
+  var saved = null;
+  try { saved = localStorage.getItem("mc-theme"); } catch (e) {}
+  if (saved === "light" || saved === "dark") {
+    document.documentElement.dataset.theme = saved;
+  }
+})();
+</script>
+<script type="module" src="/src/main.tsx"></script>
+</head>
+<body>
+<div id="app"></div>
+</body>
+</html>

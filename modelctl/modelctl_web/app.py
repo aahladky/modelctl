@@ -15,8 +15,9 @@ from urllib.parse import quote
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import (HTMLResponse, JSONResponse, PlainTextResponse,
-                               RedirectResponse, Response, StreamingResponse)
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               PlainTextResponse, RedirectResponse, Response,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -24,12 +25,13 @@ import modelctl
 import modelctl_errors
 import modelctl_vram
 
-from . import mutate
+from . import mutate, telemetry
 from .jobs import JobRunner, JobStore, STATE_DIR
 
 TOKEN_PATH = STATE_DIR / "web_token"
 COOKIE_NAME = "modelctl_web_token"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
+CONSOLE_DIST = Path(__file__).parent.parent / "console" / "dist"
 
 from .swap import LlamaSwapClient, ModelctlSwapError
 
@@ -100,10 +102,12 @@ def _fetch_json(url, timeout=2):
 _scrape_moe_cache_metrics = modelctl.scrape_moe_cache_metrics
 
 
-def create_app(token=None, store=None, runner=None):
+def create_app(token=None, store=None, runner=None, collector=None,
+               tick_interval=2.0, tick_max_seconds=3600):
     token = token or load_or_create_token()
     store = store or JobStore()
     runner = runner or JobRunner(store)
+    collector = collector or telemetry.TelemetryCollector(store=store)
     templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
     templates.env.filters["fmt_size"] = modelctl._format_size
     templates.env.filters["fromjson"] = json.loads
@@ -1764,6 +1768,73 @@ def create_app(token=None, store=None, runner=None):
         if not job:
             return JSONResponse({"error": "not found"}, status_code=404)
         return job
+
+    # ---- v2 console (SPA) ------------------------------------------------
+    # The Vite/Preact build under modelctl/console/dist, committed so the
+    # running system never needs node. One SSE stream feeds operate and
+    # jobs; the typed JSON endpoints are the same shapes, on demand.
+
+    @app.get("/api/v2/events")
+    async def api_v2_events():
+        return StreamingResponse(
+            telemetry.sse_stream(collector, interval=tick_interval,
+                                 max_seconds=tick_max_seconds),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.get("/api/v2/models")
+    def api_v2_models():
+        try:
+            runtime = collector._runtime()
+        except Exception:
+            runtime = {}
+        return collector._model_rows(runtime)
+
+    @app.get("/api/v2/jobs")
+    def api_v2_jobs():
+        return collector.job_rows()
+
+    @app.post("/api/v2/jobs/{job_id}/cancel")
+    def api_v2_job_cancel(job_id: str):
+        # Typed cancel for the SPA's optimistic UI: the answer says whether
+        # the cancel actually took, so the client can either keep its
+        # optimistic state or loudly un-happen it. Never a redirect.
+        job = store.get(job_id)
+        if not job:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if job["status"] not in ("queued", "running"):
+            return {"id": job_id, "status": job["status"], "cancelled": False,
+                    "reason": f"job already {job['status']}"}
+        if not job.get("cancellable", 1):
+            return {"id": job_id, "status": job["status"], "cancelled": False,
+                    "reason": "this job is not cancellable"}
+        runner.cancel(job_id)
+        job = store.get(job_id)
+        cancelled = job["status"] == "cancelled"
+        return {"id": job_id, "status": job["status"], "cancelled": cancelled,
+                "reason": None if cancelled else
+                f"server kept it {job['status']}"}
+
+    @app.get("/v2")
+    def v2_root_redirect():
+        return RedirectResponse("/v2/", status_code=307)
+
+    @app.get("/v2/{path:path}")
+    def v2_spa(path: str):
+        # Static file when it exists, index.html for every route the SPA
+        # owns (history-mode router). resolve() + prefix check keeps ../
+        # traversal inside dist.
+        if not CONSOLE_DIST.exists():
+            return PlainTextResponse(
+                "console build missing (modelctl/console/dist)", status_code=503)
+        candidate = (CONSOLE_DIST / path).resolve() if path else CONSOLE_DIST
+        try:
+            inside = candidate.is_relative_to(CONSOLE_DIST.resolve())
+        except AttributeError:
+            inside = str(candidate).startswith(str(CONSOLE_DIST.resolve()))
+        if path and inside and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(CONSOLE_DIST / "index.html")
 
     return app
 

@@ -108,6 +108,24 @@ else
     fail "tests -- $(grep -oE '[0-9]+ (failed|error)[a-z]*' /tmp/ci-tests.log | tail -1 || echo 'failure'), see /tmp/ci-tests.log"
 fi
 
+# --- 3b. console offline build ----------------------------------------
+# The /v2 console's toolchain is frozen and self-contained (node_modules
+# vendored in-tree, lockfile committed): a clean clone must build with
+# zero network. Building to a temp dir catches toolchain rot the week it
+# happens without touching the committed dist/ (no byte-comparison by
+# design -- content hashes move with every source edit).
+section "console offline build"
+CONSOLE="$REPO/modelctl/console"
+CONSOLE_OUT="${MODELCTL_CI_CONSOLE_DIR:-/tmp/ci-console-dist}"
+if ! command -v node >/dev/null; then
+    fail "node not found (the console toolchain needs only node itself)"
+elif (cd "$CONSOLE" && npm run --offline build -- --outDir "$CONSOLE_OUT" \
+        --emptyOutDir > /tmp/ci-console.log 2>&1); then
+    pass "console builds offline from the vendored tree"
+else
+    fail "console build -- see /tmp/ci-console.log"
+fi
+
 # --- 4. CPU-only build and capability truthfulness --------------------
 # One non-negotiable: "CPU-only capability truthfulness must
 # be enforced on every push". A CPU-only build claiming a SYCL feature
