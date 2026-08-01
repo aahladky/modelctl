@@ -13,6 +13,10 @@ MoE models get expert-granular placement (the highest-value split: routed
 experts are ~90%+ of weight bytes and run cold), dense models get a computed
 -ngl. GPU-resident expert layers are assigned greedily, fastest-bandwidth
 tier first -- optimal for the linear decode-time cost sum(bytes/bandwidth).
+Shared experts (_shexp, active every token) and leading dense layers
+(GLM/DeepSeek pattern) are pinned to a GPU by explicit -ot rules -- only
+routed experts ever flow to the CPU/offload tiers (P5 hard rule, landscape
+doc RQ7).
 
 Hard-won llama.cpp quirks this module encodes (each cost a debugging session):
   * -ot overrides are FIRST-match-wins -> specific layer ranges before the
@@ -563,7 +567,31 @@ def _plan_moe_spill(tier, layout, devs, usable, primary, kv, ram_budget,
     # -ot parts: specific layer ranges FIRST (first-match-wins), CPU last.
     # Backslashes are doubled so shlex.split in build_server_args passes a
     # literal '\.' through to llama-server.
+    #
+    # Hard rule (P5, landscape RQ7): shared experts run every token and
+    # leading dense layers (GLM/DeepSeek pattern, e.g. blk.0-2) never
+    # route, so both get explicit GPU pins ahead of every other rule --
+    # only routed experts (_exps) may flow to the CPU/offload tiers.
+    # Their bytes already sit in the fixed set the budget math spreads
+    # across cards; the pins concentrate a small slice of it (a few
+    # hundred MB on real models) on named devices, absorbed by the
+    # per-card compute reserve.
     ot_parts = []
+    dense_leading = list(range(min(layers_bytes)))
+    if dense_leading:
+        ot_parts.append(
+            f"blk\\\\.{layers_regex(dense_leading)}\\\\.ffn_.*={primary}")
+    if layout.get("has_shexp"):
+        # The shared-expert output sums with the routed-expert output, so
+        # each layer's shexp lives with that layer's experts (the FFN
+        # input activation is already shipped there); layers whose
+        # experts spill to CPU keep their shexp on the primary GPU.
+        for dev in used_devs:
+            ls = sorted(assignment.get(dev, []))
+            if ls:
+                ot_parts.append(
+                    f"blk\\\\.{layers_regex(ls)}\\\\.ffn_.*_shexp={dev}")
+        ot_parts.append(f"ffn_.*_shexp={primary}")
     for dev in used_devs:
         ls = sorted(assignment.get(dev, []))
         if ls:
