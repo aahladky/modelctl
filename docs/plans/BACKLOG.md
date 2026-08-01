@@ -13,7 +13,7 @@ item's sources.
 ---
 
 ## P1 — madvise WILLNEED/DONTNEED per-expert SSD-tier management
-Status: ready
+Status: gated (bench window)
 Autonomy: auto-merge to staging on gate
 Spec: after each decode step on the mmap/SSD tier, POSIX_MADV_WILLNEED
 the byte ranges of the experts just used; on tier eviction,
@@ -26,6 +26,18 @@ Gate: test-moe-cache + modelctl suite green; ornith-397b batch bench
 (three-condition protocol, bench window) shows >= +10% over the 0.37
 tok/s static baseline, else findings doc.
 Log:
+- 2026-08-01 (daytime session): implemented, fork commit f4d390349 on
+  agent/P1. Advise bridge lives in llama-mmap.cpp (registry of live
+  mapped fragments; DONTNEED added there per spec), cache batches miss
+  ranges (WILLNEED) and evicted origins (DONTNEED) per step, flushed
+  via a new scheduler step-end hook. Opt-in GGML_MOE_CACHE_MMAP_ADVISE=1;
+  capability moe_cache_mmap_advise. Suite legs GREEN: test-moe-cache
+  (+7 advise cases), new test-mmap-advise (/proc RSS oracle,
+  anon-memory safety), test-moe-hybrid — all pass on SYCL, CPU-only,
+  and ASan/UBSan builds; CPU-only probe truthfully false; modelctl
+  suite Ran 1104, OK (11 skipped). Remaining: ornith-397b batch bench
+  (bench window) -> evidence/2026-08-01-p1-madvise-ssd-tier.md for the
+  bench plan. No staging merge until then.
 
 ## P2 — routing-trace dump flag in the fork
 Status: ready
