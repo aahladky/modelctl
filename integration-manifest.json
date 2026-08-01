@@ -1,11 +1,11 @@
 {
-  "generated_at": "2026-08-01T05:20:00-04:00",
-  "validated_modelctl_commit": "3df7a60",
-  "validated_llama_commit": "54da29dc87e9bce3e08f90065ca74773f2452932",
+  "generated_at": "2026-08-01T14:45:00-04:00",
+  "validated_modelctl_commit": "dfcebc8",
+  "validated_llama_commit": "f4d390349ff7be5a36f6945b1cb136bd82e857ca",
   "upstream_base": "9b2a08881",
-  "validation_report": "docs/upstream-sync/2026-08-01-promotion-report.md",
-  "modelctl_commit": "3df7a60",
-  "llama_cpp_commit": "54da29dc87e9bce3e08f90065ca74773f2452932",
+  "validation_report": "modelctl/docs/evidence/2026-08-01-p1-madvise-bench.md",
+  "modelctl_commit": "dfcebc8",
+  "llama_cpp_commit": "f4d390349ff7be5a36f6945b1cb136bd82e857ca",
   "llama_cpp_upstream_base": "9b2a08881",
   "llama_cpp_pre_sync_tag": "moe-cache-pre-upstream-2026-07-30",
   "llama_cpp_pre_sync_commit": "e7af6cf1996cb3d850963213b043d876ffe959ea",
@@ -18,13 +18,14 @@
     "moe_cache_reset",
     "moe_offload_threshold_control",
     "moe_hybrid_cpu_miss",
-    "moe_cache_per_device_budgets"
+    "moe_cache_per_device_budgets",
+    "moe_cache_mmap_advise"
   ],
   "unsupported_runtime_features": [
     "moe_cache_prefetch"
   ],
   "release_channel": "experimental",
-  "acceptance_report": "docs/upstream-sync/2026-08-01-promotion-report.md",
+  "acceptance_report": "modelctl/docs/evidence/2026-08-01-p1-madvise-bench.md",
   "field_notes": "validated_* names the last modelctl+llama.cpp pair that passed hardware acceptance together -- the rollback target. The legacy modelctl_commit/llama_cpp_commit/llama_cpp_upstream_base/acceptance_report keys are the same values under their old ambiguous names, kept for ci/checks.sh and older readers.",
-  "notes": "Audit fix-pass pair. modelctl: web console acquisition chain, cancel semantics, error visibility, probe env cache, service-layer write locks, docs. llama.cpp: still-learning MoE caches now visible in stats (+moe_cache_learning gauge), 16-line delta. Verified on this hardware: full modelctl suite, test-moe-cache, live console walk, laguna-s2.1 14.2 tok/s, ornith-397b 0.37 tok/s static (cache/hybrid engages correctly at 50.5% hits but loses to static pinning at this working-set ratio; rolled back), learning gauge observed live. NOT re-run: acceptance throughput matrix, ASan/UBSan, run_kquant.sh -- see the report's 'Not covered'."
+  "notes": "P1 mmap-tier madvise pair: bench on ornith-397b (C1 0.353 / C2 0.255 / C3 0.260 tok/s, C2==C3 token-identical, advise counters live), laguna anchor 13.71 tok/s (first run 13.48 flagged, 5.07% off), full ci/checks.sh green except the pin mismatch this update resolves."
 }

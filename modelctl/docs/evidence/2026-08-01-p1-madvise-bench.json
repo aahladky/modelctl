@@ -1,0 +1,5593 @@
+{
+ "bench": "P1 madvise (GGML_MOE_CACHE_MMAP_ADVISE) on ornith-397b",
+ "date": "2026-08-01",
+ "fork_commit": "f4d390349ff7be5a36f6945b1cb136bd82e857ca",
+ "modelctl_commit": "dfcebc8ba941f646de1927f69ca06d03f41389f8",
+ "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin/llama-server",
+ "binary_rebuilt": "build-sycl rebuilt incrementally from f4d390349 at 2026-08-01 ~12:45 EDT before any condition (previous build was 54da29dc8, predating the P1 commit); capability probe after rebuild: moe_cache_mmap_advise=true, schema 3",
+ "protocol": {
+  "doc": "modelctl/docs/runtime/moe-cache-testing.md",
+  "prompt": "Explain, in plain terms, how a mixture-of-experts transformer decides which experts to activate for a given token, and why expert reuse across consecutive tokens matters for serving performance on machines whose expert weights stream from disk.",
+  "sampling": "temperature 0 (greedy), seed 42, cache_prompt false",
+  "warmup_tokens": 32,
+  "decode_tokens": 128,
+  "per_condition": "fresh llama-server per condition on port 18131; health polled at 1 Hz from launch; warmup generation; for cache conditions engagement verified (llamacpp:moe_cache_learning==0 AND misses_total>0) then POST /cache/reset so measured-run counters are clean; measured 128-token generation; metrics scraped before teardown; SIGTERM process group; VRAM release verified",
+  "nvme_measurement": "no iostat binary on host; read MB/s computed from /sys/block/nvme1n1/stat sector deltas (512 B sectors), 5 s samples during the measured generation plus whole-window average"
+ },
+ "starting_state": {
+  "recorded_at": "2026-08-01T12:49:54-0400",
+  "llama_swap_resident_models": "none (all unloaded per modelctl router status)",
+  "evictions_needed": "none",
+  "gpus": [
+   {
+    "device": "SYCL0",
+    "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+    "total_bytes": 34242297856,
+    "free_bytes": 31718375424
+   },
+   {
+    "device": "SYCL1",
+    "name": "Intel(R) Arc(TM) B580 Graphics",
+    "total_bytes": 12809404416,
+    "free_bytes": 12767461376
+   }
+  ],
+  "loadavg": "0.88 2.76 2.18 2/2840 2925126",
+  "meminfo": {
+   "MemTotal_kB": 32593528,
+   "MemFree_kB": 8070240,
+   "MemAvailable_kB": 23129864,
+   "Cached_kB": 15447364,
+   "SwapCached_kB": 773052,
+   "Dirty_kB": 1416
+  },
+  "nvme_device": "nvme1n1 (WD_BLACK SN850X 1000GB, /home on /dev/nvme1n1p1)",
+  "ornith_shards": [
+   "/home/aaron/models/unsloth/Ornith-1.0-397B-GGUF/UD-IQ4_NL/Ornith-1.0-397B-UD-IQ4_NL-00001-of-00005.gguf",
+   "/home/aaron/models/unsloth/Ornith-1.0-397B-GGUF/UD-IQ4_NL/Ornith-1.0-397B-UD-IQ4_NL-00002-of-00005.gguf",
+   "/home/aaron/models/unsloth/Ornith-1.0-397B-GGUF/UD-IQ4_NL/Ornith-1.0-397B-UD-IQ4_NL-00003-of-00005.gguf",
+   "/home/aaron/models/unsloth/Ornith-1.0-397B-GGUF/UD-IQ4_NL/Ornith-1.0-397B-UD-IQ4_NL-00004-of-00005.gguf",
+   "/home/aaron/models/unsloth/Ornith-1.0-397B-GGUF/UD-IQ4_NL/Ornith-1.0-397B-UD-IQ4_NL-00005-of-00005.gguf"
+  ],
+  "ornith_page_cache_residency": {
+   "resident_bytes": 6491679808,
+   "total_bytes": 196062656864,
+   "fraction": 0.0331
+  },
+  "disk_stat": {
+   "read_ios": 293183626,
+   "read_sectors": 14027790912,
+   "read_ticks_ms": 84464248,
+   "ts": 1785602998.2019665
+  },
+  "uptime": "12:49:58 up 1 day, 23:44,  1 user,  load average: 0.88, 2.76, 2.18"
+ },
+ "concurrent_load_note": "three orphaned tiny-moe llama-server test fixtures (build-sycl-int, ports 18209/18211/18213) were running throughout, holding ~2.3 GB on SYCL0; left untouched and recorded as concurrent load. llama-swap had zero resident models the whole time; no evictions performed.",
+ "conditions": {
+  "C1": {
+   "condition": "C1",
+   "spec": {
+    "cache": false,
+    "hybrid": null,
+    "advise": false
+   },
+   "port": 18131,
+   "profile": "ornith-397b",
+   "prompt": "Explain, in plain terms, how a mixture-of-experts transformer decides which experts to activate for a given token, and why expert reuse across consecutive tokens matters for serving performance on machines whose expert weights stream from disk.",
+   "seed": 42,
+   "warmup_tokens": 32,
+   "decode_tokens": 128,
+   "started_at": "2026-08-01T12:50:09-0400",
+   "argv": [
+    "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin/llama-server",
+    "--model",
+    "/home/aaron/models/unsloth/Ornith-1.0-397B-GGUF/UD-IQ4_NL/Ornith-1.0-397B-UD-IQ4_NL-00001-of-00005.gguf",
+    "--flash-attn",
+    "auto",
+    "--jinja",
+    "--parallel",
+    "1",
+    "-ngl",
+    "999",
+    "-c",
+    "4096",
+    "--split-mode",
+    "layer",
+    "--tensor-split",
+    "8,3",
+    "--cache-type-k",
+    "q8_0",
+    "--cache-type-v",
+    "q4_0",
+    "--fit",
+    "off",
+    "--device",
+    "SYCL0,SYCL1",
+    "-ot",
+    "blk\\.[0-5]\\.ffn_.*_exps=SYCL0,blk\\.[6-7]\\.ffn_.*_exps=SYCL1,ffn_.*_exps=CPU",
+    "--no-warmup",
+    "--ubatch-size",
+    "128",
+    "--port",
+    "18131",
+    "--metrics"
+   ],
+   "env_overrides": {},
+   "env_ld_library_path": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin:/opt/intel/oneapi/redist/lib:/opt/intel/oneapi/umf/1.0/lib",
+   "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin/llama-server",
+   "binary_fingerprint": "7e56dd8185d9794f",
+   "pre": {
+    "loadavg": "0.91 2.70 2.16 1/2834 2926405",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 8182336,
+     "MemAvailable_kB": 23258300,
+     "Cached_kB": 15463708,
+     "SwapCached_kB": 773068,
+     "Dirty_kB": 1956
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 31682723840
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 12767461376
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 6491679808,
+     "total_bytes": 196062656864,
+     "fraction": 0.0331
+    },
+    "disk": {
+     "read_ios": 293183626,
+     "read_sectors": 14027790912,
+     "read_ticks_ms": 84464248,
+     "ts": 1785603012.9706721
+    }
+   },
+   "server_pid": 2927412,
+   "load_seconds": 117.6,
+   "log_moe_cache_initialized": false,
+   "warmup": {
+    "wall_s": 141.0,
+    "timings": {
+     "cache_n": 0,
+     "prompt_n": 44,
+     "prompt_ms": 59166.32,
+     "prompt_per_token_ms": 1344.689090909091,
+     "prompt_per_second": 0.743666329087224,
+     "predicted_n": 32,
+     "predicted_ms": 81789.18400000001,
+     "predicted_per_token_ms": 2555.9120000000003,
+     "predicted_per_second": 0.3912497769876271
+    },
+    "tokens": [
+     271,
+     248068,
+     198,
+     8160,
+     579,
+     264,
+     7047,
+     1817,
+     421,
+     11177,
+     310,
+     279,
+     15673,
+     25,
+     271,
+     16,
+     13,
+     220,
+     2972,
+     1847,
+     7355,
+     279,
+     5952,
+     64700,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     25562,
+     64700,
+     380
+    ],
+    "content": "\n\n<think>\nHere's a thinking process that leads to the explanation:\n\n1.  **Deconstruct the Request:**\n    *   **Topic:** M"
+   },
+   "metrics_after_warmup": {},
+   "metrics_after_warmup_raw": [],
+   "measure_pre": {
+    "loadavg": "10.09 5.33 3.28 8/2928 2930295",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 264772,
+     "MemAvailable_kB": 25189596,
+     "Cached_kB": 25114076,
+     "SwapCached_kB": 186168,
+     "Dirty_kB": 484
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 3095396352
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 3096444928
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 23608119296,
+     "total_bytes": 196062656864,
+     "fraction": 0.1204
+    },
+    "disk": {
+     "read_ios": 309923072,
+     "read_sectors": 14754929952,
+     "read_ticks_ms": 89071150,
+     "ts": 1785603274.7913802
+    }
+   },
+   "measure_post": {
+    "loadavg": "12.72 9.95 6.10 8/2918 2934843",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 451120,
+     "MemAvailable_kB": 25231980,
+     "Cached_kB": 24983700,
+     "SwapCached_kB": 153332,
+     "Dirty_kB": 132
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 3019898880
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 3096444928
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 23400685568,
+     "total_bytes": 196062656864,
+     "fraction": 0.1194
+    },
+    "disk": {
+     "read_ios": 372150037,
+     "read_sectors": 16257115632,
+     "read_ticks_ms": 105278856,
+     "ts": 1785603698.1480772
+    }
+   },
+   "measured": {
+    "wall_s": 420.18,
+    "timings": {
+     "cache_n": 0,
+     "prompt_n": 44,
+     "prompt_ms": 57706.286,
+     "prompt_per_token_ms": 1311.5065,
+     "prompt_per_second": 0.7624819244128794,
+     "predicted_n": 128,
+     "predicted_ms": 362455.38800000004,
+     "predicted_per_token_ms": 2831.6827187500003,
+     "predicted_per_second": 0.35314690921355535
+    },
+    "tokens": [
+     271,
+     248068,
+     198,
+     8160,
+     579,
+     264,
+     7047,
+     1817,
+     421,
+     11177,
+     310,
+     279,
+     15673,
+     25,
+     271,
+     16,
+     13,
+     220,
+     2972,
+     1847,
+     7355,
+     279,
+     5952,
+     64700,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     25562,
+     64700,
+     380,
+     12370,
+     8404,
+     12,
+     83167,
+     318,
+     24797,
+     36,
+     8,
+     77754,
+     13,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     5218,
+     15380,
+     220,
+     16,
+     64700,
+     2500,
+     1503,
+     424,
+     9973,
+     864,
+     11312,
+     310,
+     19660,
+     364,
+     264,
+     2574,
+     3817,
+     30,
+     318,
+     26117,
+     3665,
+     553,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     5218,
+     15380,
+     220,
+     17,
+     64700,
+     8169,
+     1503,
+     6009,
+     25147,
+     3808,
+     23173,
+     10885,
+     4766,
+     364,
+     13092,
+     4906,
+     30,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     45930,
+     42794,
+     64700,
+     561,
+     2193,
+     369,
+     12282,
+     1332,
+     6009,
+     13914,
+     4129,
+     494,
+     12977,
+     318,
+     316,
+     2460,
+     286,
+     6973,
+     20243,
+     1354,
+     22629,
+     28000,
+     8390,
+     11,
+     974,
+     10313,
+     24481,
+     553,
+     271,
+     17,
+     13,
+     220
+    ],
+    "content": "\n\n<think>\nHere's a thinking process that leads to the explanation:\n\n1.  **Deconstruct the Request:**\n    *   **Topic:** Mixture-of-Experts (MoE) Transformers.\n    *   **Core Question 1:** How does it decide which experts to activate for a given token? (Plain terms).\n    *   **Core Question 2:** Why does expert reuse across consecutive tokens matter for serving performance?\n    *   **Specific Constraint:** The context is machines where expert weights stream from disk (implying limited SRAM/HBM capacity, offloading scenarios).\n\n2. ",
+    "stop_type": "limit",
+    "disk_samples": [
+     {
+      "t": 1785603279.8,
+      "read_MBps": 1305.5,
+      "loadavg": "10.00 5.47 3.35 8/2931 2931342"
+     },
+     {
+      "t": 1785603284.8,
+      "read_MBps": 1425.2,
+      "loadavg": "9.36 5.41 3.34 7/2927 2931378"
+     },
+     {
+      "t": 1785603289.8,
+      "read_MBps": 1409.7,
+      "loadavg": "8.69 5.34 3.33 5/2927 2931426"
+     },
+     {
+      "t": 1785603294.8,
+      "read_MBps": 1348.9,
+      "loadavg": "8.08 5.27 3.31 2/2929 2931483"
+     },
+     {
+      "t": 1785603299.8,
+      "read_MBps": 1391.9,
+      "loadavg": "7.51 5.20 3.30 2/2929 2931518"
+     },
+     {
+      "t": 1785603304.8,
+      "read_MBps": 1245.7,
+      "loadavg": "7.63 5.26 3.33 2/2925 2931553"
+     },
+     {
+      "t": 1785603309.8,
+      "read_MBps": 1268.4,
+      "loadavg": "7.82 5.34 3.37 2/2927 2931591"
+     },
+     {
+      "t": 1785603314.8,
+      "read_MBps": 1359.2,
+      "loadavg": "7.35 5.28 3.36 7/2920 2931629"
+     },
+     {
+      "t": 1785603319.8,
+      "read_MBps": 1377.4,
+      "loadavg": "7.00 5.24 3.36 8/2920 2931678"
+     },
+     {
+      "t": 1785603324.8,
+      "read_MBps": 1729.6,
+      "loadavg": "7.08 5.29 3.38 1/2922 2931738"
+     },
+     {
+      "t": 1785603329.8,
+      "read_MBps": 1959.3,
+      "loadavg": "7.32 5.37 3.42 9/2921 2931774"
+     },
+     {
+      "t": 1785603334.8,
+      "read_MBps": 1942.3,
+      "loadavg": "7.45 5.43 3.45 12/2912 2931806"
+     },
+     {
+      "t": 1785603339.8,
+      "read_MBps": 1879.0,
+      "loadavg": "7.42 5.46 3.47 3/2914 2931845"
+     },
+     {
+      "t": 1785603344.8,
+      "read_MBps": 1891.7,
+      "loadavg": "8.02 5.61 3.53 1/2915 2931882"
+     },
+     {
+      "t": 1785603349.8,
+      "read_MBps": 1888.8,
+      "loadavg": "8.34 5.72 3.58 3/2915 2931932"
+     },
+     {
+      "t": 1785603354.8,
+      "read_MBps": 1853.1,
+      "loadavg": "8.23 5.74 3.59 10/2912 2931965"
+     },
+     {
+      "t": 1785603359.8,
+      "read_MBps": 1851.0,
+      "loadavg": "8.70 5.88 3.65 9/2918 2932029"
+     },
+     {
+      "t": 1785603364.8,
+      "read_MBps": 1899.5,
+      "loadavg": "9.04 6.00 3.70 9/2917 2932061"
+     },
+     {
+      "t": 1785603369.8,
+      "read_MBps": 1898.3,
+      "loadavg": "9.12 6.06 3.73 12/2917 2932099"
+     },
+     {
+      "t": 1785603374.8,
+      "read_MBps": 1895.4,
+      "loadavg": "9.19 6.13 3.77 4/2918 2932134"
+     },
+     {
+      "t": 1785603379.8,
+      "read_MBps": 1876.8,
+      "loadavg": "9.25 6.19 3.80 5/2916 2932183"
+     },
+     {
+      "t": 1785603384.8,
+      "read_MBps": 1912.3,
+      "loadavg": "9.07 6.21 3.82 7/2917 2932222"
+     },
+     {
+      "t": 1785603389.8,
+      "read_MBps": 1883.8,
+      "loadavg": "9.15 6.27 3.85 11/2920 2932279"
+     },
+     {
+      "t": 1785603394.8,
+      "read_MBps": 1865.1,
+      "loadavg": "9.38 6.37 3.90 13/2921 2932316"
+     },
+     {
+      "t": 1785603399.8,
+      "read_MBps": 1924.3,
+      "loadavg": "9.35 6.41 3.92 13/2922 2932353"
+     },
+     {
+      "t": 1785603404.8,
+      "read_MBps": 1879.1,
+      "loadavg": "9.80 6.55 3.98 10/2922 2932389"
+     },
+     {
+      "t": 1785603409.8,
+      "read_MBps": 1915.3,
+      "loadavg": "9.73 6.59 4.01 9/2921 2932437"
+     },
+     {
+      "t": 1785603414.8,
+      "read_MBps": 1866.2,
+      "loadavg": "9.60 6.62 4.03 1/2927 2932514"
+     },
+     {
+      "t": 1785603419.8,
+      "read_MBps": 1876.0,
+      "loadavg": "9.87 6.72 4.08 10/2920 2932572"
+     },
+     {
+      "t": 1785603424.8,
+      "read_MBps": 1915.3,
+      "loadavg": "9.72 6.75 4.10 9/2918 2932604"
+     },
+     {
+      "t": 1785603429.8,
+      "read_MBps": 1924.6,
+      "loadavg": "9.66 6.78 4.13 3/2913 2932643"
+     },
+     {
+      "t": 1785603434.8,
+      "read_MBps": 1873.9,
+      "loadavg": "9.85 6.87 4.17 2/2914 2932679"
+     },
+     {
+      "t": 1785603439.8,
+      "read_MBps": 1887.0,
+      "loadavg": "9.70 6.89 4.19 10/2913 2932732"
+     },
+     {
+      "t": 1785603444.8,
+      "read_MBps": 1920.0,
+      "loadavg": "9.80 6.96 4.23 11/2913 2932770"
+     },
+     {
+      "t": 1785603449.8,
+      "read_MBps": 1849.7,
+      "loadavg": "9.74 6.99 4.26 16/2917 2932830"
+     },
+     {
+      "t": 1785603454.8,
+      "read_MBps": 1912.7,
+      "loadavg": "9.60 7.01 4.28 10/2916 2932863"
+     },
+     {
+      "t": 1785603459.8,
+      "read_MBps": 1912.7,
+      "loadavg": "9.55 7.04 4.30 1/2916 2932900"
+     },
+     {
+      "t": 1785603464.8,
+      "read_MBps": 1916.5,
+      "loadavg": "9.59 7.09 4.33 3/2916 2932935"
+     },
+     {
+      "t": 1785603469.8,
+      "read_MBps": 1887.4,
+      "loadavg": "9.54 7.12 4.36 2/2914 2932985"
+     },
+     {
+      "t": 1785603474.8,
+      "read_MBps": 1866.8,
+      "loadavg": "10.30 7.32 4.44 12/2913 2933018"
+     },
+     {
+      "t": 1785603479.8,
+      "read_MBps": 1877.0,
+      "loadavg": "10.19 7.35 4.46 2/2916 2933075"
+     },
+     {
+      "t": 1785603484.8,
+      "read_MBps": 1911.6,
+      "loadavg": "10.74 7.51 4.53 5/2915 2933109"
+     },
+     {
+      "t": 1785603489.8,
+      "read_MBps": 1889.8,
+      "loadavg": "10.84 7.58 4.57 9/2915 2933144"
+     },
+     {
+      "t": 1785603494.8,
+      "read_MBps": 1891.2,
+      "loadavg": "11.01 7.67 4.61 7/2915 2933180"
+     },
+     {
+      "t": 1785603499.8,
+      "read_MBps": 1901.3,
+      "loadavg": "10.93 7.71 4.64 11/2909 2933229"
+     },
+     {
+      "t": 1785603504.8,
+      "read_MBps": 1898.9,
+      "loadavg": "10.86 7.75 4.67 12/2908 2933264"
+     },
+     {
+      "t": 1785603509.8,
+      "read_MBps": 1897.3,
+      "loadavg": "10.71 7.77 4.70 4/2912 2933325"
+     },
+     {
+      "t": 1785603514.8,
+      "read_MBps": 1891.8,
+      "loadavg": "10.81 7.84 4.74 2/2914 2933360"
+     },
+     {
+      "t": 1785603519.8,
+      "read_MBps": 1936.3,
+      "loadavg": "10.91 7.91 4.77 10/2913 2933397"
+     },
+     {
+      "t": 1785603524.8,
+      "read_MBps": 1929.6,
+      "loadavg": "11.24 8.03 4.83 5/2912 2933431"
+     },
+     {
+      "t": 1785603529.8,
+      "read_MBps": 1936.9,
+      "loadavg": "11.14 8.06 4.86 9/2907 2933481"
+     },
+     {
+      "t": 1785603534.8,
+      "read_MBps": 1880.6,
+      "loadavg": "11.13 8.11 4.89 10/2909 2933517"
+     },
+     {
+      "t": 1785603539.8,
+      "read_MBps": 1898.7,
+      "loadavg": "11.52 8.24 4.95 12/2915 2933578"
+     },
+     {
+      "t": 1785603544.8,
+      "read_MBps": 1922.9,
+      "loadavg": "11.39 8.27 4.98 10/2913 2933611"
+     },
+     {
+      "t": 1785603549.8,
+      "read_MBps": 1962.3,
+      "loadavg": "11.20 8.28 5.00 10/2914 2933648"
+     },
+     {
+      "t": 1785603554.8,
+      "read_MBps": 1435.2,
+      "loadavg": "11.35 8.36 5.04 1/2914 2933684"
+     },
+     {
+      "t": 1785603559.8,
+      "read_MBps": 1886.6,
+      "loadavg": "11.24 8.39 5.07 3/2912 2933733"
+     },
+     {
+      "t": 1785603564.8,
+      "read_MBps": 1925.5,
+      "loadavg": "11.14 8.42 5.10 10/2909 2933770"
+     },
+     {
+      "t": 1785603569.8,
+      "read_MBps": 1864.5,
+      "loadavg": "11.29 8.49 5.14 4/2913 2933826"
+     },
+     {
+      "t": 1785603574.8,
+      "read_MBps": 1890.0,
+      "loadavg": "11.27 8.54 5.17 11/2912 2933863"
+     },
+     {
+      "t": 1785603579.8,
+      "read_MBps": 1878.6,
+      "loadavg": "11.16 8.56 5.20 9/2915 2933901"
+     },
+     {
+      "t": 1785603584.8,
+      "read_MBps": 1885.2,
+      "loadavg": "11.87 8.75 5.28 6/2915 2933935"
+     },
+     {
+      "t": 1785603589.8,
+      "read_MBps": 1848.1,
+      "loadavg": "11.72 8.77 5.30 14/2918 2933975"
+     },
+     {
+      "t": 1785603594.8,
+      "read_MBps": 1876.0,
+      "loadavg": "11.50 8.77 5.32 11/2916 2934010"
+     },
+     {
+      "t": 1785603599.8,
+      "read_MBps": 1937.2,
+      "loadavg": "11.78 8.88 5.37 5/2916 2934048"
+     },
+     {
+      "t": 1785603604.8,
+      "read_MBps": 1878.4,
+      "loadavg": "12.04 8.98 5.43 12/2921 2934108"
+     },
+     {
+      "t": 1785603609.8,
+      "read_MBps": 1894.9,
+      "loadavg": "12.04 9.03 5.46 11/2920 2934141"
+     },
+     {
+      "t": 1785603614.8,
+      "read_MBps": 1898.7,
+      "loadavg": "11.95 9.06 5.49 2/2921 2934181"
+     },
+     {
+      "t": 1785603619.8,
+      "read_MBps": 1899.9,
+      "loadavg": "11.96 9.11 5.53 10/2921 2934214"
+     },
+     {
+      "t": 1785603624.8,
+      "read_MBps": 1932.8,
+      "loadavg": "11.80 9.13 5.55 4/2916 2934253"
+     },
+     {
+      "t": 1785603629.8,
+      "read_MBps": 1912.2,
+      "loadavg": "11.98 9.21 5.60 10/2914 2934285"
+     },
+     {
+      "t": 1785603634.8,
+      "read_MBps": 1885.6,
+      "loadavg": "12.14 9.29 5.64 10/2918 2934344"
+     },
+     {
+      "t": 1785603639.8,
+      "read_MBps": 1890.5,
+      "loadavg": "12.37 9.38 5.69 11/2918 2934378"
+     },
+     {
+      "t": 1785603644.8,
+      "read_MBps": 1886.5,
+      "loadavg": "12.26 9.41 5.72 1/2921 2934418"
+     },
+     {
+      "t": 1785603649.8,
+      "read_MBps": 1908.6,
+      "loadavg": "12.32 9.47 5.76 7/2923 2934454"
+     },
+     {
+      "t": 1785603654.8,
+      "read_MBps": 1865.1,
+      "loadavg": "12.29 9.51 5.79 2/2920 2934491"
+     },
+     {
+      "t": 1785603659.8,
+      "read_MBps": 1902.5,
+      "loadavg": "12.35 9.57 5.83 9/2920 2934531"
+     },
+     {
+      "t": 1785603664.8,
+      "read_MBps": 1872.4,
+      "loadavg": "12.32 9.61 5.87 1/2917 2934599"
+     },
+     {
+      "t": 1785603669.8,
+      "read_MBps": 1878.1,
+      "loadavg": "12.54 9.70 5.92 1/2919 2934635"
+     },
+     {
+      "t": 1785603674.8,
+      "read_MBps": 1913.2,
+      "loadavg": "12.57 9.76 5.95 13/2921 2934674"
+     },
+     {
+      "t": 1785603679.8,
+      "read_MBps": 1879.7,
+      "loadavg": "12.37 9.76 5.98 2/2923 2934709"
+     },
+     {
+      "t": 1785603684.8,
+      "read_MBps": 1916.2,
+      "loadavg": "12.10 9.75 5.99 10/2919 2934748"
+     },
+     {
+      "t": 1785603689.8,
+      "read_MBps": 1908.2,
+      "loadavg": "12.17 9.80 6.03 13/2920 2934782"
+     },
+     {
+      "t": 1785603694.8,
+      "read_MBps": 1887.8,
+      "loadavg": "12.72 9.95 6.10 14/2919 2934843"
+     }
+    ],
+    "nvme_read_bytes": 769119068160,
+    "nvme_read_MBps_avg": 1816.7
+   },
+   "metrics_after_measure": {},
+   "metrics_after_measure_raw": [],
+   "server_exit_code": 0,
+   "vram_released": true,
+   "post": {
+    "loadavg": "11.86 9.82 6.08 1/2869 2936859",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 1108468,
+     "MemAvailable_kB": 25808120,
+     "Cached_kB": 24895456,
+     "SwapCached_kB": 156108,
+     "Dirty_kB": 456
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 31640780800
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 12767461376
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 23400685568,
+     "total_bytes": 196062656864,
+     "fraction": 0.1194
+    }
+   },
+   "orphan_check": "none",
+   "finished_at": "2026-08-01T13:01:41-0400"
+  },
+  "C2-attempt1-oom-staticpins": {
+   "condition": "C2",
+   "spec": {
+    "cache": true,
+    "hybrid": "cpu",
+    "advise": false
+   },
+   "port": 18131,
+   "profile": "ornith-397b",
+   "prompt": "Explain, in plain terms, how a mixture-of-experts transformer decides which experts to activate for a given token, and why expert reuse across consecutive tokens matters for serving performance on machines whose expert weights stream from disk.",
+   "seed": 42,
+   "warmup_tokens": 32,
+   "decode_tokens": 128,
+   "started_at": "2026-08-01T13:02:14-0400",
+   "argv": [
+    "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin/llama-server",
+    "--model",
+    "/home/aaron/models/unsloth/Ornith-1.0-397B-GGUF/UD-IQ4_NL/Ornith-1.0-397B-UD-IQ4_NL-00001-of-00005.gguf",
+    "--flash-attn",
+    "auto",
+    "--jinja",
+    "--parallel",
+    "1",
+    "-ngl",
+    "999",
+    "-c",
+    "4096",
+    "--split-mode",
+    "layer",
+    "--tensor-split",
+    "8,3",
+    "--cache-type-k",
+    "q8_0",
+    "--cache-type-v",
+    "q4_0",
+    "--moe-cache-bytes",
+    "SYCL0=18253611008,SYCL1=5368709120",
+    "--moe-cache-policy",
+    "slru",
+    "--moe-cache-admission-misses",
+    "2",
+    "--moe-cache-prefill-admission",
+    "off",
+    "--moe-hybrid-mode",
+    "on",
+    "--metrics",
+    "--fit",
+    "off",
+    "--device",
+    "SYCL0,SYCL1",
+    "-ot",
+    "blk\\.[0-5]\\.ffn_.*_exps=SYCL0,blk\\.[6-7]\\.ffn_.*_exps=SYCL1,ffn_.*_exps=CPU",
+    "--no-warmup",
+    "--ubatch-size",
+    "128",
+    "--port",
+    "18131"
+   ],
+   "env_overrides": {
+    "GGML_OP_OFFLOAD_MOE_MIN_BATCH": "1"
+   },
+   "env_ld_library_path": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin:/opt/intel/oneapi/redist/lib:/opt/intel/oneapi/umf/1.0/lib",
+   "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin/llama-server",
+   "binary_fingerprint": "7e56dd8185d9794f",
+   "pre": {
+    "loadavg": "7.37 8.92 5.92 3/2869 2939376",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 1342324,
+     "MemAvailable_kB": 25236592,
+     "Cached_kB": 24094700,
+     "SwapCached_kB": 259920,
+     "Dirty_kB": 1484
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 31599886336
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 12767461376
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 21604482112,
+     "total_bytes": 196062656864,
+     "fraction": 0.1102
+    },
+    "disk": {
+     "read_ios": 372151228,
+     "read_sectors": 16257365480,
+     "read_ticks_ms": 105279667,
+     "ts": 1785603738.7864149
+    }
+   },
+   "server_pid": 2940380,
+   "load_seconds": 95.6,
+   "log_moe_cache_initialized": false,
+   "error": "Remote end closed connection without response",
+   "server_exit_code": -6,
+   "vram_released": true,
+   "post": {
+    "loadavg": "9.52 11.44 9.60 1/2929 2950002",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 18824468,
+     "MemAvailable_kB": 23101240,
+     "Cached_kB": 4514376,
+     "SwapCached_kB": 711424,
+     "Dirty_kB": 1932
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 33012318208
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 12767461376
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 8388608,
+     "total_bytes": 196062656864,
+     "fraction": 0.0
+    }
+   },
+   "orphan_check": "none",
+   "finished_at": "2026-08-01T13:20:09-0400"
+  },
+  "C2": {
+   "condition": "C2",
+   "spec": {
+    "cache": true,
+    "hybrid": "cpu",
+    "advise": false
+   },
+   "port": 18131,
+   "profile": "ornith-397b",
+   "prompt": "Explain, in plain terms, how a mixture-of-experts transformer decides which experts to activate for a given token, and why expert reuse across consecutive tokens matters for serving performance on machines whose expert weights stream from disk.",
+   "seed": 42,
+   "warmup_tokens": 32,
+   "decode_tokens": 128,
+   "started_at": "2026-08-01T13:22:12-0400",
+   "argv": [
+    "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin/llama-server",
+    "--model",
+    "/home/aaron/models/unsloth/Ornith-1.0-397B-GGUF/UD-IQ4_NL/Ornith-1.0-397B-UD-IQ4_NL-00001-of-00005.gguf",
+    "--flash-attn",
+    "auto",
+    "--jinja",
+    "--parallel",
+    "1",
+    "-ngl",
+    "999",
+    "-c",
+    "4096",
+    "--split-mode",
+    "layer",
+    "--tensor-split",
+    "8,3",
+    "--cache-type-k",
+    "q8_0",
+    "--cache-type-v",
+    "q4_0",
+    "--moe-cache-bytes",
+    "SYCL0=18253611008,SYCL1=5368709120",
+    "--moe-cache-policy",
+    "slru",
+    "--moe-cache-admission-misses",
+    "2",
+    "--moe-cache-prefill-admission",
+    "off",
+    "--moe-hybrid-mode",
+    "on",
+    "--metrics",
+    "--fit",
+    "off",
+    "--device",
+    "SYCL0,SYCL1",
+    "-ot",
+    "ffn_.*_exps=CPU",
+    "--no-warmup",
+    "--ubatch-size",
+    "128",
+    "--port",
+    "18131"
+   ],
+   "env_overrides": {
+    "GGML_OP_OFFLOAD_MOE_MIN_BATCH": "1"
+   },
+   "env_ld_library_path": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin:/opt/intel/oneapi/redist/lib:/opt/intel/oneapi/umf/1.0/lib",
+   "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin/llama-server",
+   "binary_fingerprint": "7e56dd8185d9794f",
+   "pre": {
+    "loadavg": "2.31 7.90 8.52 1/2859 2953613",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 19918480,
+     "MemAvailable_kB": 24489780,
+     "Cached_kB": 4706496,
+     "SwapCached_kB": 747892,
+     "Dirty_kB": 2248
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 32045531136
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 12767461376
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 31931456,
+     "total_bytes": 196062656864,
+     "fraction": 0.0002
+    },
+    "disk": {
+     "read_ios": 372445665,
+     "read_sectors": 16517993512,
+     "read_ticks_ms": 105434840,
+     "ts": 1785604935.975464
+    }
+   },
+   "server_pid": 2954631,
+   "load_seconds": 82.3,
+   "log_moe_cache_initialized": false,
+   "warmup": {
+    "wall_s": 193.3,
+    "timings": {
+     "cache_n": 0,
+     "prompt_n": 44,
+     "prompt_ms": 83552.616,
+     "prompt_per_token_ms": 1898.923090909091,
+     "prompt_per_second": 0.526614271419102,
+     "predicted_n": 32,
+     "predicted_ms": 109752.673,
+     "predicted_per_token_ms": 3429.77103125,
+     "predicted_per_second": 0.29156465282626876
+    },
+    "tokens": [
+     271,
+     248068,
+     198,
+     8160,
+     579,
+     264,
+     7047,
+     1817,
+     421,
+     11177,
+     310,
+     279,
+     15673,
+     25,
+     271,
+     16,
+     13,
+     220,
+     2972,
+     1847,
+     7355,
+     279,
+     5952,
+     64700,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     25562,
+     64700,
+     380
+    ],
+    "content": "\n\n<think>\nHere's a thinking process that leads to the explanation:\n\n1.  **Deconstruct the Request:**\n    *   **Topic:** M"
+   },
+   "metrics_after_warmup": {
+    "hits_total": {
+     "SYCL0": 32089.0
+    },
+    "misses_total": {
+     "SYCL0": 51979.0
+    },
+    "evictions_total": {
+     "SYCL0": 2281.0
+    },
+    "promotions_total": {
+     "SYCL0": 15821.0
+    },
+    "slots": {
+     "SYCL0": 3060.0
+    },
+    "slots_used": {
+     "SYCL0": 3060.0
+    },
+    "hit_ratio": {
+     "SYCL0": 0.381703
+    },
+    "h2d_bytes_total": {
+     "SYCL0": 31375949824.0
+    },
+    "served_projections_total": {
+     "SYCL0": 32089.0
+    },
+    "host_weight_copy_fallbacks_total": {
+     "SYCL0": 0.0
+    },
+    "advise_willneed_total": {
+     "SYCL0": 0.0
+    },
+    "advise_dontneed_total": {
+     "SYCL0": 0.0
+    },
+    "advise_dropped_total": {
+     "SYCL0": 0.0
+    },
+    "learning": {
+     "SYCL0": 0.0
+    }
+   },
+   "metrics_after_warmup_raw": [
+    "llamacpp:moe_cache_hits_total{device=\"SYCL0\"} 32089",
+    "llamacpp:moe_cache_misses_total{device=\"SYCL0\"} 51979",
+    "llamacpp:moe_cache_evictions_total{device=\"SYCL0\"} 2281",
+    "llamacpp:moe_cache_promotions_total{device=\"SYCL0\"} 15821",
+    "llamacpp:moe_cache_slots{device=\"SYCL0\"} 3060",
+    "llamacpp:moe_cache_slots_used{device=\"SYCL0\"} 3060",
+    "llamacpp:moe_cache_hit_ratio{device=\"SYCL0\"} 0.381703",
+    "llamacpp:moe_cache_h2d_bytes_total{device=\"SYCL0\"} 31375949824",
+    "llamacpp:moe_cache_served_projections_total{device=\"SYCL0\"} 32089",
+    "llamacpp:moe_cache_host_weight_copy_fallbacks_total{device=\"SYCL0\"} 0",
+    "llamacpp:moe_cache_advise_willneed_total{device=\"SYCL0\"} 0",
+    "llamacpp:moe_cache_advise_dontneed_total{device=\"SYCL0\"} 0",
+    "llamacpp:moe_cache_advise_dropped_total{device=\"SYCL0\"} 0",
+    "llamacpp:moe_cache_learning{device=\"SYCL0\"} 0"
+   ],
+   "cache_engaged": true,
+   "cache_reset_response": {
+    "reset_devices": 1
+   },
+   "metrics_after_reset": {
+    "hits_total": {
+     "SYCL0": 0.0
+    },
+    "misses_total": {
+     "SYCL0": 0.0
+    },
+    "evictions_total": {
+     "SYCL0": 0.0
+    },
+    "promotions_total": {
+     "SYCL0": 0.0
+    },
+    "slots": {
+     "SYCL0": 3060.0
+    },
+    "slots_used": {
+     "SYCL0": 0.0
+    },
+    "hit_ratio": {
+     "SYCL0": 0.0
+    },
+    "h2d_bytes_total": {
+     "SYCL0": 0.0
+    },
+    "served_projections_total": {
+     "SYCL0": 0.0
+    },
+    "host_weight_copy_fallbacks_total": {
+     "SYCL0": 0.0
+    },
+    "advise_willneed_total": {
+     "SYCL0": 0.0
+    },
+    "advise_dontneed_total": {
+     "SYCL0": 0.0
+    },
+    "advise_dropped_total": {
+     "SYCL0": 0.0
+    },
+    "learning": {
+     "SYCL0": 0.0
+    }
+   },
+   "measure_pre": {
+    "loadavg": "2.14 5.06 7.20 4/2897 2967964",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 533972,
+     "MemAvailable_kB": 25224760,
+     "Cached_kB": 24938944,
+     "SwapCached_kB": 339992,
+     "Dirty_kB": 408
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 3668967424
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 9210691584
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 23225704448,
+     "total_bytes": 196062656864,
+     "fraction": 0.1185
+    },
+    "disk": {
+     "read_ios": 373268436,
+     "read_sectors": 17230795728,
+     "read_ticks_ms": 105858499,
+     "ts": 1785605214.794767
+    }
+   },
+   "measure_post": {
+    "loadavg": "2.87 3.38 5.39 2/2881 3023786",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 404736,
+     "MemAvailable_kB": 25186208,
+     "Cached_kB": 24936828,
+     "SwapCached_kB": 334480,
+     "Dirty_kB": 176
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 3663724544
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 9210691584
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 23294353408,
+     "total_bytes": 196062656864,
+     "fraction": 0.1188
+    },
+    "disk": {
+     "read_ios": 375031602,
+     "read_sectors": 18694025400,
+     "read_ticks_ms": 106783920,
+     "ts": 1785605793.3149414
+    }
+   },
+   "measured": {
+    "wall_s": 575.33,
+    "timings": {
+     "cache_n": 0,
+     "prompt_n": 44,
+     "prompt_ms": 73881.52500000001,
+     "prompt_per_token_ms": 1679.1255681818184,
+     "prompt_per_second": 0.5955480751107939,
+     "predicted_n": 128,
+     "predicted_ms": 501436.026,
+     "predicted_per_token_ms": 3917.468953125,
+     "predicted_per_second": 0.25526686030333207
+    },
+    "tokens": [
+     271,
+     248068,
+     198,
+     8160,
+     579,
+     264,
+     7047,
+     1817,
+     421,
+     11177,
+     310,
+     279,
+     15673,
+     25,
+     271,
+     16,
+     13,
+     220,
+     2972,
+     1847,
+     7355,
+     279,
+     5952,
+     64700,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     25562,
+     64700,
+     380,
+     12370,
+     8404,
+     12,
+     83167,
+     318,
+     24797,
+     36,
+     8,
+     77754,
+     13,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     5218,
+     15380,
+     220,
+     16,
+     64700,
+     2500,
+     1503,
+     424,
+     9973,
+     864,
+     11312,
+     310,
+     19660,
+     364,
+     264,
+     2574,
+     3817,
+     30,
+     318,
+     26117,
+     3665,
+     553,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     5218,
+     15380,
+     220,
+     17,
+     64700,
+     8169,
+     1503,
+     6009,
+     25147,
+     3808,
+     23173,
+     10885,
+     4766,
+     364,
+     13092,
+     4906,
+     30,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     45930,
+     42794,
+     64700,
+     561,
+     2193,
+     369,
+     12282,
+     1332,
+     6009,
+     13914,
+     4129,
+     494,
+     12977,
+     318,
+     316,
+     2460,
+     286,
+     6973,
+     20243,
+     1354,
+     22629,
+     28000,
+     8390,
+     11,
+     974,
+     10313,
+     24481,
+     553,
+     198,
+     262,
+     348,
+     256
+    ],
+    "content": "\n\n<think>\nHere's a thinking process that leads to the explanation:\n\n1.  **Deconstruct the Request:**\n    *   **Topic:** Mixture-of-Experts (MoE) Transformers.\n    *   **Core Question 1:** How does it decide which experts to activate for a given token? (Plain terms).\n    *   **Core Question 2:** Why does expert reuse across consecutive tokens matter for serving performance?\n    *   **Specific Constraint:** The context is machines where expert weights stream from disk (implying limited SRAM/HBM capacity, offloading scenarios).\n    *  ",
+    "stop_type": "limit",
+    "disk_samples": [
+     {
+      "t": 1785605219.8,
+      "read_MBps": 1308.5,
+      "loadavg": "1.97 4.93 7.13 4/2901 2969009"
+     },
+     {
+      "t": 1785605224.8,
+      "read_MBps": 1382.4,
+      "loadavg": "2.13 4.91 7.12 1/2899 2969043"
+     },
+     {
+      "t": 1785605229.8,
+      "read_MBps": 1382.9,
+      "loadavg": "2.04 4.85 7.08 1/2897 2969075"
+     },
+     {
+      "t": 1785605234.8,
+      "read_MBps": 1329.0,
+      "loadavg": "2.04 4.80 7.06 3/2894 2969113"
+     },
+     {
+      "t": 1785605239.8,
+      "read_MBps": 1319.5,
+      "loadavg": "1.95 4.74 7.02 2/2897 2969181"
+     },
+     {
+      "t": 1785605244.8,
+      "read_MBps": 1340.4,
+      "loadavg": "2.04 4.71 7.00 2/2893 2969219"
+     },
+     {
+      "t": 1785605249.8,
+      "read_MBps": 1334.4,
+      "loadavg": "2.11 4.68 6.98 1/2893 2969252"
+     },
+     {
+      "t": 1785605254.8,
+      "read_MBps": 1346.6,
+      "loadavg": "2.35 4.68 6.97 3/2894 2969285"
+     },
+     {
+      "t": 1785605259.8,
+      "read_MBps": 1327.2,
+      "loadavg": "2.40 4.66 6.95 1/2892 2969319"
+     },
+     {
+      "t": 1785605264.8,
+      "read_MBps": 1338.1,
+      "loadavg": "2.93 4.73 6.96 9/2892 2969351"
+     },
+     {
+      "t": 1785605269.8,
+      "read_MBps": 1349.3,
+      "loadavg": "3.01 4.72 6.94 2/2894 2969421"
+     },
+     {
+      "t": 1785605274.8,
+      "read_MBps": 1428.4,
+      "loadavg": "2.93 4.67 6.91 1/2895 2969922"
+     },
+     {
+      "t": 1785605279.8,
+      "read_MBps": 1436.0,
+      "loadavg": "3.18 4.69 6.91 2/2889 2970569"
+     },
+     {
+      "t": 1785605284.8,
+      "read_MBps": 1428.0,
+      "loadavg": "3.32 4.70 6.90 2/2888 2971368"
+     },
+     {
+      "t": 1785605289.8,
+      "read_MBps": 1431.1,
+      "loadavg": "3.46 4.70 6.89 2/2886 2972037"
+     },
+     {
+      "t": 1785605294.8,
+      "read_MBps": 1398.1,
+      "loadavg": "3.98 4.79 6.91 1/2887 2972962"
+     },
+     {
+      "t": 1785605299.8,
+      "read_MBps": 1300.7,
+      "loadavg": "4.30 4.85 6.91 1/2889 2973894"
+     },
+     {
+      "t": 1785605304.8,
+      "read_MBps": 1249.1,
+      "loadavg": "4.60 4.90 6.92 7/2890 2974634"
+     },
+     {
+      "t": 1785605309.8,
+      "read_MBps": 1286.6,
+      "loadavg": "4.55 4.88 6.90 2/2889 2975422"
+     },
+     {
+      "t": 1785605314.8,
+      "read_MBps": 1295.3,
+      "loadavg": "4.59 4.89 6.89 2/2889 2976256"
+     },
+     {
+      "t": 1785605319.8,
+      "read_MBps": 1344.0,
+      "loadavg": "4.70 4.90 6.89 2/2888 2977049"
+     },
+     {
+      "t": 1785605324.8,
+      "read_MBps": 1271.8,
+      "loadavg": "4.81 4.92 6.88 11/2888 2977919"
+     },
+     {
+      "t": 1785605329.8,
+      "read_MBps": 1243.9,
+      "loadavg": "5.30 5.02 6.90 8/2896 2978592"
+     },
+     {
+      "t": 1785605334.8,
+      "read_MBps": 1273.4,
+      "loadavg": "5.28 5.02 6.89 2/2888 2979180"
+     },
+     {
+      "t": 1785605339.8,
+      "read_MBps": 1255.8,
+      "loadavg": "5.50 5.07 6.90 4/2888 2979796"
+     },
+     {
+      "t": 1785605344.8,
+      "read_MBps": 1266.9,
+      "loadavg": "5.46 5.07 6.89 2/2878 2980201"
+     },
+     {
+      "t": 1785605349.8,
+      "read_MBps": 1239.7,
+      "loadavg": "5.58 5.10 6.89 11/2876 2980579"
+     },
+     {
+      "t": 1785605354.8,
+      "read_MBps": 1284.7,
+      "loadavg": "5.77 5.15 6.90 1/2876 2981021"
+     },
+     {
+      "t": 1785605359.8,
+      "read_MBps": 1171.3,
+      "loadavg": "5.95 5.20 6.90 3/2879 2981553"
+     },
+     {
+      "t": 1785605364.8,
+      "read_MBps": 1297.2,
+      "loadavg": "6.12 5.25 6.91 2/2876 2982203"
+     },
+     {
+      "t": 1785605369.8,
+      "read_MBps": 1318.2,
+      "loadavg": "6.19 5.28 6.91 1/2875 2982743"
+     },
+     {
+      "t": 1785605374.8,
+      "read_MBps": 1284.7,
+      "loadavg": "6.33 5.32 6.92 2/2877 2983200"
+     },
+     {
+      "t": 1785605379.8,
+      "read_MBps": 1277.1,
+      "loadavg": "6.31 5.33 6.91 7/2877 2983609"
+     },
+     {
+      "t": 1785605384.8,
+      "read_MBps": 1287.8,
+      "loadavg": "6.04 5.29 6.89 4/2875 2983870"
+     },
+     {
+      "t": 1785605389.8,
+      "read_MBps": 1301.4,
+      "loadavg": "5.80 5.26 6.87 9/2875 2984293"
+     },
+     {
+      "t": 1785605394.8,
+      "read_MBps": 1285.0,
+      "loadavg": "5.57 5.22 6.85 6/2879 2984744"
+     },
+     {
+      "t": 1785605399.8,
+      "read_MBps": 1306.2,
+      "loadavg": "5.21 5.15 6.82 2/2873 2985116"
+     },
+     {
+      "t": 1785605404.8,
+      "read_MBps": 1314.4,
+      "loadavg": "4.95 5.10 6.79 4/2876 2985620"
+     },
+     {
+      "t": 1785605409.8,
+      "read_MBps": 1317.2,
+      "loadavg": "4.87 5.08 6.77 2/2872 2986210"
+     },
+     {
+      "t": 1785605414.8,
+      "read_MBps": 1264.5,
+      "loadavg": "4.56 5.01 6.74 2/2872 2986780"
+     },
+     {
+      "t": 1785605419.8,
+      "read_MBps": 1271.6,
+      "loadavg": "4.36 4.96 6.72 1/2875 2987391"
+     },
+     {
+      "t": 1785605424.8,
+      "read_MBps": 1287.5,
+      "loadavg": "4.17 4.91 6.69 9/2876 2987927"
+     },
+     {
+      "t": 1785605429.8,
+      "read_MBps": 1291.3,
+      "loadavg": "3.99 4.86 6.67 2/2875 2988377"
+     },
+     {
+      "t": 1785605434.8,
+      "read_MBps": 1245.2,
+      "loadavg": "3.91 4.83 6.65 2/2873 2988861"
+     },
+     {
+      "t": 1785605439.8,
+      "read_MBps": 1318.4,
+      "loadavg": "3.76 4.78 6.62 3/2876 2989527"
+     },
+     {
+      "t": 1785605444.8,
+      "read_MBps": 1318.8,
+      "loadavg": "3.62 4.74 6.60 3/2878 2989972"
+     },
+     {
+      "t": 1785605449.8,
+      "read_MBps": 1314.2,
+      "loadavg": "3.57 4.71 6.58 2/2882 2990455"
+     },
+     {
+      "t": 1785605454.8,
+      "read_MBps": 1315.5,
+      "loadavg": "3.44 4.66 6.55 5/2879 2990873"
+     },
+     {
+      "t": 1785605459.8,
+      "read_MBps": 1278.3,
+      "loadavg": "3.33 4.62 6.53 2/2878 2991260"
+     },
+     {
+      "t": 1785605464.8,
+      "read_MBps": 1296.2,
+      "loadavg": "3.14 4.56 6.50 2/2873 2991716"
+     },
+     {
+      "t": 1785605469.8,
+      "read_MBps": 1291.2,
+      "loadavg": "3.05 4.51 6.47 2/2872 2992264"
+     },
+     {
+      "t": 1785605474.8,
+      "read_MBps": 1254.8,
+      "loadavg": "2.81 4.44 6.44 2/2873 2992780"
+     },
+     {
+      "t": 1785605479.8,
+      "read_MBps": 1285.4,
+      "loadavg": "2.82 4.41 6.42 2/2876 2993261"
+     },
+     {
+      "t": 1785605484.8,
+      "read_MBps": 1274.0,
+      "loadavg": "2.68 4.36 6.39 2/2878 2993823"
+     },
+     {
+      "t": 1785605489.8,
+      "read_MBps": 1266.4,
+      "loadavg": "2.54 4.30 6.36 2/2878 2994392"
+     },
+     {
+      "t": 1785605494.8,
+      "read_MBps": 1299.6,
+      "loadavg": "2.58 4.28 6.34 2/2878 2994949"
+     },
+     {
+      "t": 1785605499.8,
+      "read_MBps": 1308.0,
+      "loadavg": "2.85 4.31 6.34 4/2874 2995612"
+     },
+     {
+      "t": 1785605504.8,
+      "read_MBps": 1278.0,
+      "loadavg": "3.10 4.34 6.34 2/2874 2996158"
+     },
+     {
+      "t": 1785605509.8,
+      "read_MBps": 1298.0,
+      "loadavg": "3.26 4.35 6.33 1/2878 2996608"
+     },
+     {
+      "t": 1785605514.8,
+      "read_MBps": 1309.2,
+      "loadavg": "3.48 4.38 6.33 2/2879 2997204"
+     },
+     {
+      "t": 1785605519.8,
+      "read_MBps": 1277.0,
+      "loadavg": "3.44 4.35 6.31 2/2878 2997733"
+     },
+     {
+      "t": 1785605524.8,
+      "read_MBps": 1287.9,
+      "loadavg": "3.32 4.31 6.29 2/2877 2998339"
+     },
+     {
+      "t": 1785605529.8,
+      "read_MBps": 1324.7,
+      "loadavg": "3.22 4.27 6.26 1/2874 2998820"
+     },
+     {
+      "t": 1785605534.8,
+      "read_MBps": 1296.8,
+      "loadavg": "3.04 4.22 6.24 3/2876 2999270"
+     },
+     {
+      "t": 1785605539.8,
+      "read_MBps": 1333.1,
+      "loadavg": "3.12 4.22 6.22 1/2879 2999827"
+     },
+     {
+      "t": 1785605544.8,
+      "read_MBps": 1345.2,
+      "loadavg": "3.35 4.25 6.22 3/2879 3000458"
+     },
+     {
+      "t": 1785605549.8,
+      "read_MBps": 1333.5,
+      "loadavg": "3.32 4.22 6.20 2/2878 3000915"
+     },
+     {
+      "t": 1785605554.8,
+      "read_MBps": 1303.5,
+      "loadavg": "3.13 4.17 6.18 2/2881 3001349"
+     },
+     {
+      "t": 1785605559.8,
+      "read_MBps": 1317.9,
+      "loadavg": "3.12 4.15 6.16 1/2879 3001678"
+     },
+     {
+      "t": 1785605564.8,
+      "read_MBps": 1314.0,
+      "loadavg": "3.11 4.13 6.14 2/2877 3002111"
+     },
+     {
+      "t": 1785605569.8,
+      "read_MBps": 1262.7,
+      "loadavg": "3.10 4.11 6.12 7/2879 3002535"
+     },
+     {
+      "t": 1785605574.8,
+      "read_MBps": 1283.8,
+      "loadavg": "3.09 4.09 6.11 2/2880 3003025"
+     },
+     {
+      "t": 1785605579.8,
+      "read_MBps": 1326.4,
+      "loadavg": "3.01 4.06 6.09 2/2881 3003364"
+     },
+     {
+      "t": 1785605584.8,
+      "read_MBps": 1325.0,
+      "loadavg": "2.93 4.02 6.06 3/2880 3003809"
+     },
+     {
+      "t": 1785605589.8,
+      "read_MBps": 1254.3,
+      "loadavg": "2.77 3.97 6.04 4/2877 3004105"
+     },
+     {
+      "t": 1785605594.8,
+      "read_MBps": 1299.0,
+      "loadavg": "2.63 3.92 6.01 1/2875 3004545"
+     },
+     {
+      "t": 1785605599.8,
+      "read_MBps": 1273.3,
+      "loadavg": "2.66 3.91 5.99 4/2876 3005029"
+     },
+     {
+      "t": 1785605604.8,
+      "read_MBps": 1280.2,
+      "loadavg": "3.01 3.96 6.00 2/2878 3005399"
+     },
+     {
+      "t": 1785605609.8,
+      "read_MBps": 1303.9,
+      "loadavg": "2.93 3.93 5.98 1/2877 3005876"
+     },
+     {
+      "t": 1785605614.8,
+      "read_MBps": 1293.8,
+      "loadavg": "2.85 3.90 5.95 8/2877 3006483"
+     },
+     {
+      "t": 1785605619.8,
+      "read_MBps": 1247.8,
+      "loadavg": "3.10 3.93 5.96 2/2877 3007065"
+     },
+     {
+      "t": 1785605624.8,
+      "read_MBps": 1265.9,
+      "loadavg": "3.34 3.97 5.96 2/2875 3007579"
+     },
+     {
+      "t": 1785605629.8,
+      "read_MBps": 1283.0,
+      "loadavg": "3.31 3.95 5.94 1/2873 3008027"
+     },
+     {
+      "t": 1785605634.8,
+      "read_MBps": 1275.2,
+      "loadavg": "3.20 3.92 5.92 2/2875 3008500"
+     },
+     {
+      "t": 1785605639.8,
+      "read_MBps": 1273.5,
+      "loadavg": "3.03 3.87 5.89 3/2876 3009062"
+     },
+     {
+      "t": 1785605644.8,
+      "read_MBps": 1302.5,
+      "loadavg": "3.02 3.85 5.88 11/2875 3009489"
+     },
+     {
+      "t": 1785605649.8,
+      "read_MBps": 1281.6,
+      "loadavg": "3.10 3.86 5.87 7/2875 3009928"
+     },
+     {
+      "t": 1785605654.8,
+      "read_MBps": 1298.9,
+      "loadavg": "2.93 3.81 5.84 3/2874 3010197"
+     },
+     {
+      "t": 1785605659.8,
+      "read_MBps": 1313.3,
+      "loadavg": "2.86 3.78 5.82 2/2872 3010587"
+     },
+     {
+      "t": 1785605664.8,
+      "read_MBps": 1240.8,
+      "loadavg": "2.79 3.75 5.80 8/2879 3011069"
+     },
+     {
+      "t": 1785605669.8,
+      "read_MBps": 1318.0,
+      "loadavg": "2.73 3.72 5.78 1/2877 3011570"
+     },
+     {
+      "t": 1785605674.8,
+      "read_MBps": 1279.5,
+      "loadavg": "2.59 3.67 5.75 1/2877 3012074"
+     },
+     {
+      "t": 1785605679.8,
+      "read_MBps": 1272.6,
+      "loadavg": "2.46 3.63 5.72 2/2876 3012555"
+     },
+     {
+      "t": 1785605684.8,
+      "read_MBps": 1112.7,
+      "loadavg": "2.34 3.58 5.70 5/2878 3012941"
+     },
+     {
+      "t": 1785605689.8,
+      "read_MBps": 1320.3,
+      "loadavg": "2.24 3.54 5.67 1/2876 3013524"
+     },
+     {
+      "t": 1785605694.9,
+      "read_MBps": 1315.2,
+      "loadavg": "2.14 3.50 5.65 5/2883 3014052"
+     },
+     {
+      "t": 1785605699.9,
+      "read_MBps": 1284.1,
+      "loadavg": "2.04 3.46 5.62 3/2881 3014519"
+     },
+     {
+      "t": 1785605704.9,
+      "read_MBps": 1284.0,
+      "loadavg": "1.96 3.42 5.60 1/2880 3014937"
+     },
+     {
+      "t": 1785605709.9,
+      "read_MBps": 1294.2,
+      "loadavg": "1.96 3.39 5.58 2/2879 3015395"
+     },
+     {
+      "t": 1785605714.9,
+      "read_MBps": 1295.1,
+      "loadavg": "1.89 3.35 5.55 2/2878 3015832"
+     },
+     {
+      "t": 1785605719.9,
+      "read_MBps": 1322.1,
+      "loadavg": "2.14 3.38 5.55 1/2881 3016391"
+     },
+     {
+      "t": 1785605724.9,
+      "read_MBps": 1320.3,
+      "loadavg": "2.53 3.44 5.56 1/2883 3016909"
+     },
+     {
+      "t": 1785605729.9,
+      "read_MBps": 1312.1,
+      "loadavg": "2.56 3.43 5.54 6/2881 3017402"
+     },
+     {
+      "t": 1785605734.9,
+      "read_MBps": 1271.0,
+      "loadavg": "2.68 3.44 5.54 5/2888 3017866"
+     },
+     {
+      "t": 1785605739.9,
+      "read_MBps": 1304.3,
+      "loadavg": "2.70 3.44 5.52 1/2885 3018366"
+     },
+     {
+      "t": 1785605744.9,
+      "read_MBps": 1287.6,
+      "loadavg": "2.89 3.46 5.52 2/2884 3018922"
+     },
+     {
+      "t": 1785605749.9,
+      "read_MBps": 1322.1,
+      "loadavg": "3.06 3.49 5.52 3/2885 3019630"
+     },
+     {
+      "t": 1785605754.9,
+      "read_MBps": 1272.1,
+      "loadavg": "2.97 3.46 5.50 4/2888 3020115"
+     },
+     {
+      "t": 1785605759.9,
+      "read_MBps": 1353.6,
+      "loadavg": "2.90 3.44 5.48 2/2883 3020704"
+     },
+     {
+      "t": 1785605764.9,
+      "read_MBps": 1296.3,
+      "loadavg": "2.82 3.41 5.46 2/2881 3021147"
+     },
+     {
+      "t": 1785605769.9,
+      "read_MBps": 1318.7,
+      "loadavg": "2.84 3.41 5.45 1/2881 3021592"
+     },
+     {
+      "t": 1785605774.9,
+      "read_MBps": 1353.4,
+      "loadavg": "2.93 3.42 5.44 1/2879 3022172"
+     },
+     {
+      "t": 1785605779.9,
+      "read_MBps": 1318.6,
+      "loadavg": "2.94 3.41 5.42 1/2879 3022813"
+     },
+     {
+      "t": 1785605784.9,
+      "read_MBps": 1320.8,
+      "loadavg": "2.94 3.40 5.41 1/2881 3023218"
+     },
+     {
+      "t": 1785605789.9,
+      "read_MBps": 1342.5,
+      "loadavg": "2.87 3.38 5.39 4/2882 3023741"
+     }
+    ],
+    "nvme_read_bytes": 749173592064,
+    "nvme_read_MBps_avg": 1295.0
+   },
+   "metrics_after_measure": {
+    "hits_total": {
+     "SYCL0": 114044.0
+    },
+    "misses_total": {
+     "SYCL0": 138009.0
+    },
+    "evictions_total": {
+     "SYCL0": 12468.0
+    },
+    "promotions_total": {
+     "SYCL0": 46013.0
+    },
+    "slots": {
+     "SYCL0": 3060.0
+    },
+    "slots_used": {
+     "SYCL0": 3060.0
+    },
+    "hit_ratio": {
+     "SYCL0": 0.45246
+    },
+    "h2d_bytes_total": {
+     "SYCL0": 91258355712.0
+    },
+    "served_projections_total": {
+     "SYCL0": 114044.0
+    },
+    "host_weight_copy_fallbacks_total": {
+     "SYCL0": 25281.0
+    },
+    "advise_willneed_total": {
+     "SYCL0": 0.0
+    },
+    "advise_dontneed_total": {
+     "SYCL0": 0.0
+    },
+    "advise_dropped_total": {
+     "SYCL0": 0.0
+    },
+    "learning": {
+     "SYCL0": 0.0
+    }
+   },
+   "metrics_after_measure_raw": [
+    "llamacpp:moe_cache_hits_total{device=\"SYCL0\"} 114044",
+    "llamacpp:moe_cache_misses_total{device=\"SYCL0\"} 138009",
+    "llamacpp:moe_cache_evictions_total{device=\"SYCL0\"} 12468",
+    "llamacpp:moe_cache_promotions_total{device=\"SYCL0\"} 46013",
+    "llamacpp:moe_cache_slots{device=\"SYCL0\"} 3060",
+    "llamacpp:moe_cache_slots_used{device=\"SYCL0\"} 3060",
+    "llamacpp:moe_cache_hit_ratio{device=\"SYCL0\"} 0.45246",
+    "llamacpp:moe_cache_h2d_bytes_total{device=\"SYCL0\"} 91258355712",
+    "llamacpp:moe_cache_served_projections_total{device=\"SYCL0\"} 114044",
+    "llamacpp:moe_cache_host_weight_copy_fallbacks_total{device=\"SYCL0\"} 25281",
+    "llamacpp:moe_cache_advise_willneed_total{device=\"SYCL0\"} 0",
+    "llamacpp:moe_cache_advise_dontneed_total{device=\"SYCL0\"} 0",
+    "llamacpp:moe_cache_advise_dropped_total{device=\"SYCL0\"} 0",
+    "llamacpp:moe_cache_learning{device=\"SYCL0\"} 0"
+   ],
+   "server_exit_code": 0,
+   "vram_released": true,
+   "post": {
+    "loadavg": "3.04 3.41 5.39 1/2834 3025798",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 1153160,
+     "MemAvailable_kB": 25743716,
+     "Cached_kB": 24743320,
+     "SwapCached_kB": 349052,
+     "Dirty_kB": 520
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 32109494272
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 12767461376
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 23294353408,
+     "total_bytes": 196062656864,
+     "fraction": 0.1188
+    }
+   },
+   "orphan_check": "none",
+   "finished_at": "2026-08-01T13:36:37-0400"
+  },
+  "C3": {
+   "condition": "C3",
+   "spec": {
+    "cache": true,
+    "hybrid": "cpu",
+    "advise": true
+   },
+   "port": 18131,
+   "profile": "ornith-397b",
+   "prompt": "Explain, in plain terms, how a mixture-of-experts transformer decides which experts to activate for a given token, and why expert reuse across consecutive tokens matters for serving performance on machines whose expert weights stream from disk.",
+   "seed": 42,
+   "warmup_tokens": 32,
+   "decode_tokens": 128,
+   "started_at": "2026-08-01T13:36:46-0400",
+   "argv": [
+    "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin/llama-server",
+    "--model",
+    "/home/aaron/models/unsloth/Ornith-1.0-397B-GGUF/UD-IQ4_NL/Ornith-1.0-397B-UD-IQ4_NL-00001-of-00005.gguf",
+    "--flash-attn",
+    "auto",
+    "--jinja",
+    "--parallel",
+    "1",
+    "-ngl",
+    "999",
+    "-c",
+    "4096",
+    "--split-mode",
+    "layer",
+    "--tensor-split",
+    "8,3",
+    "--cache-type-k",
+    "q8_0",
+    "--cache-type-v",
+    "q4_0",
+    "--moe-cache-bytes",
+    "SYCL0=18253611008,SYCL1=5368709120",
+    "--moe-cache-policy",
+    "slru",
+    "--moe-cache-admission-misses",
+    "2",
+    "--moe-cache-prefill-admission",
+    "off",
+    "--moe-hybrid-mode",
+    "on",
+    "--metrics",
+    "--fit",
+    "off",
+    "--device",
+    "SYCL0,SYCL1",
+    "-ot",
+    "ffn_.*_exps=CPU",
+    "--no-warmup",
+    "--ubatch-size",
+    "128",
+    "--port",
+    "18131"
+   ],
+   "env_overrides": {
+    "GGML_OP_OFFLOAD_MOE_MIN_BATCH": "1",
+    "GGML_MOE_CACHE_MMAP_ADVISE": "1"
+   },
+   "env_ld_library_path": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin:/opt/intel/oneapi/redist/lib:/opt/intel/oneapi/umf/1.0/lib",
+   "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin/llama-server",
+   "binary_fingerprint": "7e56dd8185d9794f",
+   "pre": {
+    "loadavg": "2.51 3.27 5.31 1/2838 3028076",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 1344616,
+     "MemAvailable_kB": 25577480,
+     "Cached_kB": 24379712,
+     "SwapCached_kB": 375480,
+     "Dirty_kB": 1376
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 32094814208
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 12767461376
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 22227086400,
+     "total_bytes": 196062656864,
+     "fraction": 0.1134
+    },
+    "disk": {
+     "read_ios": 375032576,
+     "read_sectors": 18694237752,
+     "read_ticks_ms": 106784504,
+     "ts": 1785605811.1558602
+    }
+   },
+   "server_pid": 3029084,
+   "load_seconds": 83.4,
+   "log_moe_cache_initialized": false,
+   "warmup": {
+    "wall_s": 191.8,
+    "timings": {
+     "cache_n": 0,
+     "prompt_n": 44,
+     "prompt_ms": 85797.40000000001,
+     "prompt_per_token_ms": 1949.9409090909094,
+     "prompt_per_second": 0.5128360533069766,
+     "predicted_n": 32,
+     "predicted_ms": 105940.801,
+     "predicted_per_token_ms": 3310.65003125,
+     "predicted_per_second": 0.3020554847418984
+    },
+    "tokens": [
+     271,
+     248068,
+     198,
+     8160,
+     579,
+     264,
+     7047,
+     1817,
+     421,
+     11177,
+     310,
+     279,
+     15673,
+     25,
+     271,
+     16,
+     13,
+     220,
+     2972,
+     1847,
+     7355,
+     279,
+     5952,
+     64700,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     25562,
+     64700,
+     380
+    ],
+    "content": "\n\n<think>\nHere's a thinking process that leads to the explanation:\n\n1.  **Deconstruct the Request:**\n    *   **Topic:** M"
+   },
+   "metrics_after_warmup": {
+    "hits_total": {
+     "SYCL0": 32095.0
+    },
+    "misses_total": {
+     "SYCL0": 51970.0
+    },
+    "evictions_total": {
+     "SYCL0": 2282.0
+    },
+    "promotions_total": {
+     "SYCL0": 15821.0
+    },
+    "slots": {
+     "SYCL0": 3060.0
+    },
+    "slots_used": {
+     "SYCL0": 3060.0
+    },
+    "hit_ratio": {
+     "SYCL0": 0.381788
+    },
+    "h2d_bytes_total": {
+     "SYCL0": 31374835712.0
+    },
+    "served_projections_total": {
+     "SYCL0": 32095.0
+    },
+    "host_weight_copy_fallbacks_total": {
+     "SYCL0": 0.0
+    },
+    "advise_willneed_total": {
+     "SYCL0": 29934.0
+    },
+    "advise_dontneed_total": {
+     "SYCL0": 6670.0
+    },
+    "advise_dropped_total": {
+     "SYCL0": 22413.0
+    },
+    "learning": {
+     "SYCL0": 0.0
+    }
+   },
+   "metrics_after_warmup_raw": [
+    "llamacpp:moe_cache_hits_total{device=\"SYCL0\"} 32095",
+    "llamacpp:moe_cache_misses_total{device=\"SYCL0\"} 51970",
+    "llamacpp:moe_cache_evictions_total{device=\"SYCL0\"} 2282",
+    "llamacpp:moe_cache_promotions_total{device=\"SYCL0\"} 15821",
+    "llamacpp:moe_cache_slots{device=\"SYCL0\"} 3060",
+    "llamacpp:moe_cache_slots_used{device=\"SYCL0\"} 3060",
+    "llamacpp:moe_cache_hit_ratio{device=\"SYCL0\"} 0.381788",
+    "llamacpp:moe_cache_h2d_bytes_total{device=\"SYCL0\"} 31374835712",
+    "llamacpp:moe_cache_served_projections_total{device=\"SYCL0\"} 32095",
+    "llamacpp:moe_cache_host_weight_copy_fallbacks_total{device=\"SYCL0\"} 0",
+    "llamacpp:moe_cache_advise_willneed_total{device=\"SYCL0\"} 29934",
+    "llamacpp:moe_cache_advise_dontneed_total{device=\"SYCL0\"} 6670",
+    "llamacpp:moe_cache_advise_dropped_total{device=\"SYCL0\"} 22413",
+    "llamacpp:moe_cache_learning{device=\"SYCL0\"} 0"
+   ],
+   "cache_engaged": true,
+   "cache_reset_response": {
+    "reset_devices": 1
+   },
+   "metrics_after_reset": {
+    "hits_total": {
+     "SYCL0": 0.0
+    },
+    "misses_total": {
+     "SYCL0": 0.0
+    },
+    "evictions_total": {
+     "SYCL0": 0.0
+    },
+    "promotions_total": {
+     "SYCL0": 0.0
+    },
+    "slots": {
+     "SYCL0": 3060.0
+    },
+    "slots_used": {
+     "SYCL0": 0.0
+    },
+    "hit_ratio": {
+     "SYCL0": 0.0
+    },
+    "h2d_bytes_total": {
+     "SYCL0": 0.0
+    },
+    "served_projections_total": {
+     "SYCL0": 0.0
+    },
+    "host_weight_copy_fallbacks_total": {
+     "SYCL0": 0.0
+    },
+    "advise_willneed_total": {
+     "SYCL0": 0.0
+    },
+    "advise_dontneed_total": {
+     "SYCL0": 0.0
+    },
+    "advise_dropped_total": {
+     "SYCL0": 0.0
+    },
+    "learning": {
+     "SYCL0": 0.0
+    }
+   },
+   "measure_pre": {
+    "loadavg": "2.20 3.21 4.81 1/2905 3042736",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 333012,
+     "MemAvailable_kB": 25064640,
+     "Cached_kB": 24876756,
+     "SwapCached_kB": 335936,
+     "Dirty_kB": 256
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 3658481664
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 9210691584
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 23582380032,
+     "total_bytes": 196062656864,
+     "fraction": 0.1203
+    },
+    "disk": {
+     "read_ios": 375890414,
+     "read_sectors": 19416312552,
+     "read_ticks_ms": 107225020,
+     "ts": 1785606089.52816
+    }
+   },
+   "measure_post": {
+    "loadavg": "2.78 2.91 3.89 1/2881 3098585",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 276500,
+     "MemAvailable_kB": 25255688,
+     "Cached_kB": 25189568,
+     "SwapCached_kB": 330428,
+     "Dirty_kB": 372
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 3650093056
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 9210691584
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 23640027136,
+     "total_bytes": 196062656864,
+     "fraction": 0.1206
+    },
+    "disk": {
+     "read_ios": 377724927,
+     "read_sectors": 20889336864,
+     "read_ticks_ms": 108177515,
+     "ts": 1785606660.6008246
+    }
+   },
+   "measured": {
+    "wall_s": 567.85,
+    "timings": {
+     "cache_n": 0,
+     "prompt_n": 44,
+     "prompt_ms": 75460.66,
+     "prompt_per_token_ms": 1715.015,
+     "prompt_per_second": 0.5830852791375002,
+     "predicted_n": 128,
+     "predicted_ms": 492372.384,
+     "predicted_per_token_ms": 3846.65925,
+     "predicted_per_second": 0.25996583918890137
+    },
+    "tokens": [
+     271,
+     248068,
+     198,
+     8160,
+     579,
+     264,
+     7047,
+     1817,
+     421,
+     11177,
+     310,
+     279,
+     15673,
+     25,
+     271,
+     16,
+     13,
+     220,
+     2972,
+     1847,
+     7355,
+     279,
+     5952,
+     64700,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     25562,
+     64700,
+     380,
+     12370,
+     8404,
+     12,
+     83167,
+     318,
+     24797,
+     36,
+     8,
+     77754,
+     13,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     5218,
+     15380,
+     220,
+     16,
+     64700,
+     2500,
+     1503,
+     424,
+     9973,
+     864,
+     11312,
+     310,
+     19660,
+     364,
+     264,
+     2574,
+     3817,
+     30,
+     318,
+     26117,
+     3665,
+     553,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     5218,
+     15380,
+     220,
+     17,
+     64700,
+     8169,
+     1503,
+     6009,
+     25147,
+     3808,
+     23173,
+     10885,
+     4766,
+     364,
+     13092,
+     4906,
+     30,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     45930,
+     42794,
+     64700,
+     561,
+     2193,
+     369,
+     12282,
+     1332,
+     6009,
+     13914,
+     4129,
+     494,
+     12977,
+     318,
+     316,
+     2460,
+     286,
+     6973,
+     20243,
+     1354,
+     22629,
+     28000,
+     8390,
+     11,
+     974,
+     10313,
+     24481,
+     553,
+     198,
+     262,
+     348,
+     256
+    ],
+    "content": "\n\n<think>\nHere's a thinking process that leads to the explanation:\n\n1.  **Deconstruct the Request:**\n    *   **Topic:** Mixture-of-Experts (MoE) Transformers.\n    *   **Core Question 1:** How does it decide which experts to activate for a given token? (Plain terms).\n    *   **Core Question 2:** Why does expert reuse across consecutive tokens matter for serving performance?\n    *   **Specific Constraint:** The context is machines where expert weights stream from disk (implying limited SRAM/HBM capacity, offloading scenarios).\n    *  ",
+    "stop_type": "limit",
+    "disk_samples": [
+     {
+      "t": 1785606094.5,
+      "read_MBps": 1346.0,
+      "loadavg": "2.33 3.20 4.79 2/2908 3043801"
+     },
+     {
+      "t": 1785606099.5,
+      "read_MBps": 1405.4,
+      "loadavg": "2.78 3.28 4.81 2/2906 3043835"
+     },
+     {
+      "t": 1785606104.5,
+      "read_MBps": 1411.4,
+      "loadavg": "2.72 3.26 4.79 2/2908 3043869"
+     },
+     {
+      "t": 1785606109.5,
+      "read_MBps": 1390.0,
+      "loadavg": "2.82 3.27 4.79 3/2906 3043907"
+     },
+     {
+      "t": 1785606114.5,
+      "read_MBps": 1351.8,
+      "loadavg": "2.76 3.25 4.77 4/2901 3043955"
+     },
+     {
+      "t": 1785606119.5,
+      "read_MBps": 1354.5,
+      "loadavg": "3.26 3.35 4.80 2/2894 3044011"
+     },
+     {
+      "t": 1785606124.5,
+      "read_MBps": 1375.8,
+      "loadavg": "3.16 3.32 4.78 2/2893 3044043"
+     },
+     {
+      "t": 1785606129.5,
+      "read_MBps": 1378.9,
+      "loadavg": "2.98 3.28 4.76 4/2894 3044078"
+     },
+     {
+      "t": 1785606134.5,
+      "read_MBps": 1350.6,
+      "loadavg": "2.90 3.26 4.75 6/2895 3044111"
+     },
+     {
+      "t": 1785606139.5,
+      "read_MBps": 1340.9,
+      "loadavg": "2.75 3.23 4.73 3/2893 3044147"
+     },
+     {
+      "t": 1785606144.5,
+      "read_MBps": 1473.4,
+      "loadavg": "2.69 3.20 4.71 4/2890 3044193"
+     },
+     {
+      "t": 1785606149.5,
+      "read_MBps": 1575.3,
+      "loadavg": "2.88 3.24 4.71 3/2896 3044656"
+     },
+     {
+      "t": 1785606154.5,
+      "read_MBps": 1473.8,
+      "loadavg": "2.81 3.21 4.70 6/2897 3045290"
+     },
+     {
+      "t": 1785606159.5,
+      "read_MBps": 1484.9,
+      "loadavg": "2.66 3.18 4.68 11/2900 3046117"
+     },
+     {
+      "t": 1785606164.5,
+      "read_MBps": 1583.6,
+      "loadavg": "2.77 3.19 4.68 6/2901 3046699"
+     },
+     {
+      "t": 1785606169.5,
+      "read_MBps": 1372.6,
+      "loadavg": "3.35 3.30 4.70 3/2902 3047642"
+     },
+     {
+      "t": 1785606174.5,
+      "read_MBps": 1312.3,
+      "loadavg": "3.88 3.42 4.73 5/2900 3048602"
+     },
+     {
+      "t": 1785606179.5,
+      "read_MBps": 1239.4,
+      "loadavg": "3.65 3.37 4.71 10/2899 3049353"
+     },
+     {
+      "t": 1785606184.5,
+      "read_MBps": 1337.8,
+      "loadavg": "3.44 3.34 4.69 7/2894 3050175"
+     },
+     {
+      "t": 1785606189.5,
+      "read_MBps": 1341.7,
+      "loadavg": "3.24 3.30 4.67 6/2894 3051031"
+     },
+     {
+      "t": 1785606194.5,
+      "read_MBps": 1378.8,
+      "loadavg": "3.14 3.27 4.66 6/2894 3051861"
+     },
+     {
+      "t": 1785606199.5,
+      "read_MBps": 1294.9,
+      "loadavg": "3.05 3.25 4.64 3/2892 3052737"
+     },
+     {
+      "t": 1785606204.5,
+      "read_MBps": 1160.7,
+      "loadavg": "2.97 3.23 4.63 2/2893 3053346"
+     },
+     {
+      "t": 1785606209.5,
+      "read_MBps": 1332.5,
+      "loadavg": "2.81 3.19 4.61 2/2898 3053991"
+     },
+     {
+      "t": 1785606214.5,
+      "read_MBps": 1265.8,
+      "loadavg": "2.98 3.22 4.61 1/2895 3054617"
+     },
+     {
+      "t": 1785606219.5,
+      "read_MBps": 1325.2,
+      "loadavg": "2.90 3.20 4.60 1/2894 3055056"
+     },
+     {
+      "t": 1785606224.5,
+      "read_MBps": 1268.9,
+      "loadavg": "2.83 3.18 4.58 1/2894 3055497"
+     },
+     {
+      "t": 1785606229.6,
+      "read_MBps": 1264.1,
+      "loadavg": "2.93 3.20 4.58 4/2892 3055894"
+     },
+     {
+      "t": 1785606234.6,
+      "read_MBps": 1269.1,
+      "loadavg": "2.85 3.18 4.57 3/2891 3056429"
+     },
+     {
+      "t": 1785606239.6,
+      "read_MBps": 1313.8,
+      "loadavg": "2.70 3.14 4.55 1/2895 3057068"
+     },
+     {
+      "t": 1785606244.6,
+      "read_MBps": 1343.1,
+      "loadavg": "2.57 3.11 4.53 2/2894 3057671"
+     },
+     {
+      "t": 1785606249.6,
+      "read_MBps": 1319.4,
+      "loadavg": "2.44 3.07 4.51 1/2894 3058164"
+     },
+     {
+      "t": 1785606254.6,
+      "read_MBps": 1290.0,
+      "loadavg": "2.33 3.04 4.49 7/2894 3058495"
+     },
+     {
+      "t": 1785606259.6,
+      "read_MBps": 1335.7,
+      "loadavg": "2.22 3.00 4.47 10/2892 3058811"
+     },
+     {
+      "t": 1785606264.6,
+      "read_MBps": 1287.0,
+      "loadavg": "2.12 2.97 4.45 2/2890 3059233"
+     },
+     {
+      "t": 1785606269.6,
+      "read_MBps": 1269.3,
+      "loadavg": "2.03 2.94 4.43 3/2891 3059643"
+     },
+     {
+      "t": 1785606274.6,
+      "read_MBps": 1316.3,
+      "loadavg": "2.11 2.94 4.42 1/2891 3060090"
+     },
+     {
+      "t": 1785606279.6,
+      "read_MBps": 1346.7,
+      "loadavg": "2.26 2.95 4.42 1/2891 3060613"
+     },
+     {
+      "t": 1785606284.6,
+      "read_MBps": 1332.9,
+      "loadavg": "2.16 2.92 4.40 1/2891 3061234"
+     },
+     {
+      "t": 1785606289.6,
+      "read_MBps": 1309.6,
+      "loadavg": "2.07 2.89 4.38 3/2887 3061787"
+     },
+     {
+      "t": 1785606294.6,
+      "read_MBps": 1321.2,
+      "loadavg": "1.98 2.86 4.37 2/2886 3062428"
+     },
+     {
+      "t": 1785606299.6,
+      "read_MBps": 1288.0,
+      "loadavg": "2.14 2.88 4.36 2/2886 3062904"
+     },
+     {
+      "t": 1785606304.6,
+      "read_MBps": 1348.1,
+      "loadavg": "2.13 2.86 4.35 7/2889 3063430"
+     },
+     {
+      "t": 1785606309.6,
+      "read_MBps": 1349.7,
+      "loadavg": "2.04 2.83 4.33 7/2888 3064094"
+     },
+     {
+      "t": 1785606314.6,
+      "read_MBps": 1317.7,
+      "loadavg": "2.04 2.82 4.32 2/2889 3064527"
+     },
+     {
+      "t": 1785606319.6,
+      "read_MBps": 1342.8,
+      "loadavg": "2.19 2.84 4.32 3/2887 3065046"
+     },
+     {
+      "t": 1785606324.6,
+      "read_MBps": 1307.0,
+      "loadavg": "2.18 2.82 4.31 3/2883 3065521"
+     },
+     {
+      "t": 1785606329.6,
+      "read_MBps": 1335.9,
+      "loadavg": "2.32 2.84 4.30 3/2884 3065943"
+     },
+     {
+      "t": 1785606334.6,
+      "read_MBps": 1279.2,
+      "loadavg": "2.22 2.81 4.29 2/2889 3066377"
+     },
+     {
+      "t": 1785606339.6,
+      "read_MBps": 1339.7,
+      "loadavg": "2.44 2.85 4.29 2/2889 3066964"
+     },
+     {
+      "t": 1785606344.6,
+      "read_MBps": 1314.7,
+      "loadavg": "2.49 2.85 4.28 2/2892 3067452"
+     },
+     {
+      "t": 1785606349.6,
+      "read_MBps": 1299.8,
+      "loadavg": "2.53 2.85 4.27 1/2889 3067900"
+     },
+     {
+      "t": 1785606354.6,
+      "read_MBps": 1342.1,
+      "loadavg": "2.49 2.84 4.26 4/2887 3068452"
+     },
+     {
+      "t": 1785606359.6,
+      "read_MBps": 1287.7,
+      "loadavg": "2.77 2.89 4.27 2/2885 3069078"
+     },
+     {
+      "t": 1785606364.6,
+      "read_MBps": 1323.5,
+      "loadavg": "2.63 2.86 4.25 1/2887 3069675"
+     },
+     {
+      "t": 1785606369.6,
+      "read_MBps": 1318.3,
+      "loadavg": "2.82 2.90 4.26 3/2888 3070220"
+     },
+     {
+      "t": 1785606374.6,
+      "read_MBps": 1326.4,
+      "loadavg": "2.67 2.87 4.24 3/2889 3070825"
+     },
+     {
+      "t": 1785606379.6,
+      "read_MBps": 1319.9,
+      "loadavg": "2.54 2.83 4.22 3/2890 3071342"
+     },
+     {
+      "t": 1785606384.6,
+      "read_MBps": 1332.0,
+      "loadavg": "2.49 2.82 4.21 1/2882 3071854"
+     },
+     {
+      "t": 1785606389.6,
+      "read_MBps": 1306.5,
+      "loadavg": "2.37 2.79 4.19 3/2881 3072419"
+     },
+     {
+      "t": 1785606394.6,
+      "read_MBps": 1295.8,
+      "loadavg": "2.82 2.88 4.21 1/2886 3073103"
+     },
+     {
+      "t": 1785606399.6,
+      "read_MBps": 1350.1,
+      "loadavg": "2.76 2.86 4.20 9/2887 3073594"
+     },
+     {
+      "t": 1785606404.6,
+      "read_MBps": 1348.2,
+      "loadavg": "2.70 2.85 4.19 3/2886 3074059"
+     },
+     {
+      "t": 1785606409.6,
+      "read_MBps": 1349.0,
+      "loadavg": "2.56 2.82 4.17 4/2889 3074514"
+     },
+     {
+      "t": 1785606414.6,
+      "read_MBps": 1352.4,
+      "loadavg": "2.44 2.79 4.15 2/2881 3075161"
+     },
+     {
+      "t": 1785606419.6,
+      "read_MBps": 1339.7,
+      "loadavg": "2.40 2.77 4.14 1/2883 3075641"
+     },
+     {
+      "t": 1785606424.6,
+      "read_MBps": 1311.9,
+      "loadavg": "2.69 2.83 4.15 1/2888 3076079"
+     },
+     {
+      "t": 1785606429.6,
+      "read_MBps": 1303.6,
+      "loadavg": "2.63 2.81 4.14 2/2886 3076421"
+     },
+     {
+      "t": 1785606434.6,
+      "read_MBps": 1355.0,
+      "loadavg": "2.82 2.85 4.15 5/2890 3076871"
+     },
+     {
+      "t": 1785606439.6,
+      "read_MBps": 1251.2,
+      "loadavg": "2.84 2.85 4.14 2/2888 3077291"
+     },
+     {
+      "t": 1785606444.6,
+      "read_MBps": 1316.5,
+      "loadavg": "2.77 2.84 4.13 3/2884 3077768"
+     },
+     {
+      "t": 1785606449.6,
+      "read_MBps": 1321.2,
+      "loadavg": "2.87 2.86 4.13 2/2885 3078118"
+     },
+     {
+      "t": 1785606454.6,
+      "read_MBps": 1323.7,
+      "loadavg": "2.96 2.88 4.13 10/2890 3078581"
+     },
+     {
+      "t": 1785606459.6,
+      "read_MBps": 1306.5,
+      "loadavg": "2.88 2.86 4.11 4/2890 3078885"
+     },
+     {
+      "t": 1785606464.6,
+      "read_MBps": 1314.5,
+      "loadavg": "2.73 2.83 4.10 1/2890 3079321"
+     },
+     {
+      "t": 1785606469.6,
+      "read_MBps": 1300.8,
+      "loadavg": "2.91 2.87 4.10 1/2891 3079816"
+     },
+     {
+      "t": 1785606474.6,
+      "read_MBps": 1312.8,
+      "loadavg": "3.00 2.89 4.10 2/2888 3080230"
+     },
+     {
+      "t": 1785606479.6,
+      "read_MBps": 1322.7,
+      "loadavg": "3.08 2.90 4.10 1/2877 3080706"
+     },
+     {
+      "t": 1785606484.6,
+      "read_MBps": 1302.5,
+      "loadavg": "2.99 2.89 4.09 2/2881 3081304"
+     },
+     {
+      "t": 1785606489.6,
+      "read_MBps": 1269.2,
+      "loadavg": "2.83 2.86 4.07 3/2885 3081911"
+     },
+     {
+      "t": 1785606494.6,
+      "read_MBps": 1315.2,
+      "loadavg": "3.01 2.89 4.08 1/2885 3082405"
+     },
+     {
+      "t": 1785606499.6,
+      "read_MBps": 1264.2,
+      "loadavg": "3.17 2.93 4.08 2/2886 3082844"
+     },
+     {
+      "t": 1785606504.6,
+      "read_MBps": 1249.9,
+      "loadavg": "3.15 2.93 4.08 1/2881 3083354"
+     },
+     {
+      "t": 1785606509.6,
+      "read_MBps": 1322.0,
+      "loadavg": "3.14 2.93 4.07 8/2886 3083960"
+     },
+     {
+      "t": 1785606514.6,
+      "read_MBps": 1324.2,
+      "loadavg": "3.13 2.93 4.07 4/2881 3084401"
+     },
+     {
+      "t": 1785606519.6,
+      "read_MBps": 1318.3,
+      "loadavg": "3.36 2.98 4.08 1/2882 3084786"
+     },
+     {
+      "t": 1785606524.6,
+      "read_MBps": 1323.1,
+      "loadavg": "3.25 2.97 4.06 4/2882 3085126"
+     },
+     {
+      "t": 1785606529.6,
+      "read_MBps": 1332.1,
+      "loadavg": "3.07 2.93 4.05 1/2883 3085568"
+     },
+     {
+      "t": 1785606534.6,
+      "read_MBps": 1315.0,
+      "loadavg": "2.98 2.92 4.04 2/2883 3086015"
+     },
+     {
+      "t": 1785606539.6,
+      "read_MBps": 1308.0,
+      "loadavg": "2.99 2.92 4.03 2/2882 3086533"
+     },
+     {
+      "t": 1785606544.6,
+      "read_MBps": 1310.7,
+      "loadavg": "2.91 2.90 4.02 2/2883 3087069"
+     },
+     {
+      "t": 1785606549.6,
+      "read_MBps": 1328.6,
+      "loadavg": "2.75 2.87 4.00 5/2885 3087613"
+     },
+     {
+      "t": 1785606554.6,
+      "read_MBps": 1319.7,
+      "loadavg": "3.09 2.94 4.02 5/2885 3088130"
+     },
+     {
+      "t": 1785606559.6,
+      "read_MBps": 1276.8,
+      "loadavg": "3.09 2.94 4.01 2/2885 3088531"
+     },
+     {
+      "t": 1785606564.6,
+      "read_MBps": 1287.5,
+      "loadavg": "3.64 3.06 4.05 1/2881 3089101"
+     },
+     {
+      "t": 1785606569.6,
+      "read_MBps": 1307.2,
+      "loadavg": "3.51 3.04 4.03 7/2882 3089556"
+     },
+     {
+      "t": 1785606574.6,
+      "read_MBps": 1302.8,
+      "loadavg": "3.47 3.04 4.03 2/2886 3090003"
+     },
+     {
+      "t": 1785606579.6,
+      "read_MBps": 1313.3,
+      "loadavg": "3.35 3.02 4.02 1/2886 3090401"
+     },
+     {
+      "t": 1785606584.6,
+      "read_MBps": 1362.7,
+      "loadavg": "3.24 3.01 4.01 5/2886 3090907"
+     },
+     {
+      "t": 1785606589.6,
+      "read_MBps": 1330.4,
+      "loadavg": "3.54 3.07 4.02 1/2886 3091471"
+     },
+     {
+      "t": 1785606594.6,
+      "read_MBps": 1352.8,
+      "loadavg": "3.34 3.04 4.01 4/2885 3092020"
+     },
+     {
+      "t": 1785606599.6,
+      "read_MBps": 1284.0,
+      "loadavg": "3.23 3.02 3.99 7/2884 3092397"
+     },
+     {
+      "t": 1785606604.6,
+      "read_MBps": 1320.4,
+      "loadavg": "3.21 3.02 3.99 4/2886 3092942"
+     },
+     {
+      "t": 1785606609.6,
+      "read_MBps": 1331.2,
+      "loadavg": "3.20 3.02 3.98 4/2886 3093520"
+     },
+     {
+      "t": 1785606614.6,
+      "read_MBps": 1297.1,
+      "loadavg": "3.26 3.04 3.98 1/2885 3094123"
+     },
+     {
+      "t": 1785606619.6,
+      "read_MBps": 1283.3,
+      "loadavg": "3.16 3.02 3.97 2/2886 3094720"
+     },
+     {
+      "t": 1785606624.6,
+      "read_MBps": 1318.5,
+      "loadavg": "2.99 2.98 3.96 5/2882 3095281"
+     },
+     {
+      "t": 1785606629.6,
+      "read_MBps": 1304.1,
+      "loadavg": "2.83 2.95 3.94 3/2881 3095637"
+     },
+     {
+      "t": 1785606634.6,
+      "read_MBps": 1309.9,
+      "loadavg": "2.68 2.92 3.93 9/2889 3096135"
+     },
+     {
+      "t": 1785606639.6,
+      "read_MBps": 1363.7,
+      "loadavg": "2.55 2.89 3.91 3/2884 3096748"
+     },
+     {
+      "t": 1785606644.6,
+      "read_MBps": 1341.7,
+      "loadavg": "2.50 2.87 3.90 13/2884 3097353"
+     },
+     {
+      "t": 1785606649.6,
+      "read_MBps": 1332.5,
+      "loadavg": "2.54 2.87 3.89 1/2885 3097888"
+     },
+     {
+      "t": 1785606654.6,
+      "read_MBps": 1351.2,
+      "loadavg": "2.50 2.86 3.88 2/2882 3098369"
+     }
+    ],
+    "nvme_read_bytes": 754188447744,
+    "nvme_read_MBps_avg": 1320.7
+   },
+   "metrics_after_measure": {
+    "hits_total": {
+     "SYCL0": 113802.0
+    },
+    "misses_total": {
+     "SYCL0": 138306.0
+    },
+    "evictions_total": {
+     "SYCL0": 12527.0
+    },
+    "promotions_total": {
+     "SYCL0": 46196.0
+    },
+    "slots": {
+     "SYCL0": 3060.0
+    },
+    "slots_used": {
+     "SYCL0": 3060.0
+    },
+    "hit_ratio": {
+     "SYCL0": 0.451402
+    },
+    "h2d_bytes_total": {
+     "SYCL0": 91624374272.0
+    },
+    "served_projections_total": {
+     "SYCL0": 113802.0
+    },
+    "host_weight_copy_fallbacks_total": {
+     "SYCL0": 25317.0
+    },
+    "advise_willneed_total": {
+     "SYCL0": 120085.0
+    },
+    "advise_dontneed_total": {
+     "SYCL0": 36584.0
+    },
+    "advise_dropped_total": {
+     "SYCL0": 22456.0
+    },
+    "learning": {
+     "SYCL0": 0.0
+    }
+   },
+   "metrics_after_measure_raw": [
+    "llamacpp:moe_cache_hits_total{device=\"SYCL0\"} 113802",
+    "llamacpp:moe_cache_misses_total{device=\"SYCL0\"} 138306",
+    "llamacpp:moe_cache_evictions_total{device=\"SYCL0\"} 12527",
+    "llamacpp:moe_cache_promotions_total{device=\"SYCL0\"} 46196",
+    "llamacpp:moe_cache_slots{device=\"SYCL0\"} 3060",
+    "llamacpp:moe_cache_slots_used{device=\"SYCL0\"} 3060",
+    "llamacpp:moe_cache_hit_ratio{device=\"SYCL0\"} 0.451402",
+    "llamacpp:moe_cache_h2d_bytes_total{device=\"SYCL0\"} 91624374272",
+    "llamacpp:moe_cache_served_projections_total{device=\"SYCL0\"} 113802",
+    "llamacpp:moe_cache_host_weight_copy_fallbacks_total{device=\"SYCL0\"} 25317",
+    "llamacpp:moe_cache_advise_willneed_total{device=\"SYCL0\"} 120085",
+    "llamacpp:moe_cache_advise_dontneed_total{device=\"SYCL0\"} 36584",
+    "llamacpp:moe_cache_advise_dropped_total{device=\"SYCL0\"} 22456",
+    "llamacpp:moe_cache_learning{device=\"SYCL0\"} 0"
+   ],
+   "server_exit_code": 0,
+   "vram_released": true,
+   "post": {
+    "loadavg": "2.78 2.91 3.89 1/2842 3100602",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 1502536,
+     "MemAvailable_kB": 26029172,
+     "Cached_kB": 24667156,
+     "SwapCached_kB": 335612,
+     "Dirty_kB": 352
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 32091668480
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 12767461376
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 23369814016,
+     "total_bytes": 196062656864,
+     "fraction": 0.1192
+    }
+   },
+   "orphan_check": "none",
+   "finished_at": "2026-08-01T13:51:04-0400"
+  },
+  "C4A": {
+   "condition": "C4A",
+   "spec": {
+    "cache": true,
+    "hybrid": null,
+    "advise": false
+   },
+   "port": 18131,
+   "profile": "ornith-397b",
+   "prompt": "Explain, in plain terms, how a mixture-of-experts transformer decides which experts to activate for a given token, and why expert reuse across consecutive tokens matters for serving performance on machines whose expert weights stream from disk.",
+   "seed": 42,
+   "warmup_tokens": 32,
+   "decode_tokens": 128,
+   "started_at": "2026-08-01T13:51:32-0400",
+   "argv": [
+    "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin/llama-server",
+    "--model",
+    "/home/aaron/models/unsloth/Ornith-1.0-397B-GGUF/UD-IQ4_NL/Ornith-1.0-397B-UD-IQ4_NL-00001-of-00005.gguf",
+    "--flash-attn",
+    "auto",
+    "--jinja",
+    "--parallel",
+    "1",
+    "-ngl",
+    "999",
+    "-c",
+    "4096",
+    "--split-mode",
+    "layer",
+    "--tensor-split",
+    "8,3",
+    "--cache-type-k",
+    "q8_0",
+    "--cache-type-v",
+    "q4_0",
+    "--moe-cache-bytes",
+    "SYCL0=18253611008,SYCL1=5368709120",
+    "--moe-cache-policy",
+    "slru",
+    "--moe-cache-admission-misses",
+    "2",
+    "--moe-cache-prefill-admission",
+    "off",
+    "--metrics",
+    "--fit",
+    "off",
+    "--device",
+    "SYCL0,SYCL1",
+    "-ot",
+    "ffn_.*_exps=CPU",
+    "--no-warmup",
+    "--ubatch-size",
+    "128",
+    "--port",
+    "18131"
+   ],
+   "env_overrides": {
+    "GGML_OP_OFFLOAD_MOE_MIN_BATCH": "1"
+   },
+   "env_ld_library_path": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin:/opt/intel/oneapi/redist/lib:/opt/intel/oneapi/umf/1.0/lib",
+   "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin/llama-server",
+   "binary_fingerprint": "7e56dd8185d9794f",
+   "pre": {
+    "loadavg": "2.21 2.75 3.80 1/2852 3103127",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 1018656,
+     "MemAvailable_kB": 25022620,
+     "Cached_kB": 24150020,
+     "SwapCached_kB": 394940,
+     "Dirty_kB": 1792
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 32085377024
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 12767461376
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 22034672704,
+     "total_bytes": 196062656864,
+     "fraction": 0.1124
+    },
+    "disk": {
+     "read_ios": 377726807,
+     "read_sectors": 20889603256,
+     "read_ticks_ms": 108178177,
+     "ts": 1785606697.2218423
+    }
+   },
+   "server_pid": 3104132,
+   "load_seconds": 84.2,
+   "log_moe_cache_initialized": false,
+   "warmup": {
+    "wall_s": 176.0,
+    "timings": {
+     "cache_n": 0,
+     "prompt_n": 44,
+     "prompt_ms": 75165.316,
+     "prompt_per_token_ms": 1708.3026363636366,
+     "prompt_per_second": 0.5853763722619086,
+     "predicted_n": 32,
+     "predicted_ms": 100782.123,
+     "predicted_per_token_ms": 3149.44134375,
+     "predicted_per_second": 0.3175166294125397
+    },
+    "tokens": [
+     271,
+     248068,
+     198,
+     8160,
+     579,
+     264,
+     7047,
+     1817,
+     421,
+     11177,
+     310,
+     279,
+     15673,
+     25,
+     271,
+     16,
+     13,
+     220,
+     2972,
+     1847,
+     7355,
+     279,
+     5952,
+     64700,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     25562,
+     64700,
+     380
+    ],
+    "content": "\n\n<think>\nHere's a thinking process that leads to the explanation:\n\n1.  **Deconstruct the Request:**\n    *   **Topic:** M"
+   },
+   "metrics_after_warmup": {
+    "hits_total": {
+     "SYCL0": 32028.0
+    },
+    "misses_total": {
+     "SYCL0": 52052.0
+    },
+    "evictions_total": {
+     "SYCL0": 2290.0
+    },
+    "promotions_total": {
+     "SYCL0": 15845.0
+    },
+    "slots": {
+     "SYCL0": 3060.0
+    },
+    "slots_used": {
+     "SYCL0": 3060.0
+    },
+    "hit_ratio": {
+     "SYCL0": 0.380923
+    },
+    "h2d_bytes_total": {
+     "SYCL0": 31422545920.0
+    },
+    "served_projections_total": {
+     "SYCL0": 32028.0
+    },
+    "host_weight_copy_fallbacks_total": {
+     "SYCL0": 38550.0
+    },
+    "advise_willneed_total": {
+     "SYCL0": 0.0
+    },
+    "advise_dontneed_total": {
+     "SYCL0": 0.0
+    },
+    "advise_dropped_total": {
+     "SYCL0": 0.0
+    },
+    "learning": {
+     "SYCL0": 0.0
+    }
+   },
+   "metrics_after_warmup_raw": [
+    "llamacpp:moe_cache_hits_total{device=\"SYCL0\"} 32028",
+    "llamacpp:moe_cache_misses_total{device=\"SYCL0\"} 52052",
+    "llamacpp:moe_cache_evictions_total{device=\"SYCL0\"} 2290",
+    "llamacpp:moe_cache_promotions_total{device=\"SYCL0\"} 15845",
+    "llamacpp:moe_cache_slots{device=\"SYCL0\"} 3060",
+    "llamacpp:moe_cache_slots_used{device=\"SYCL0\"} 3060",
+    "llamacpp:moe_cache_hit_ratio{device=\"SYCL0\"} 0.380923",
+    "llamacpp:moe_cache_h2d_bytes_total{device=\"SYCL0\"} 31422545920",
+    "llamacpp:moe_cache_served_projections_total{device=\"SYCL0\"} 32028",
+    "llamacpp:moe_cache_host_weight_copy_fallbacks_total{device=\"SYCL0\"} 38550",
+    "llamacpp:moe_cache_advise_willneed_total{device=\"SYCL0\"} 0",
+    "llamacpp:moe_cache_advise_dontneed_total{device=\"SYCL0\"} 0",
+    "llamacpp:moe_cache_advise_dropped_total{device=\"SYCL0\"} 0",
+    "llamacpp:moe_cache_learning{device=\"SYCL0\"} 0"
+   ],
+   "cache_engaged": true,
+   "cache_reset_response": {
+    "reset_devices": 1
+   },
+   "metrics_after_reset": {
+    "hits_total": {
+     "SYCL0": 0.0
+    },
+    "misses_total": {
+     "SYCL0": 0.0
+    },
+    "evictions_total": {
+     "SYCL0": 0.0
+    },
+    "promotions_total": {
+     "SYCL0": 0.0
+    },
+    "slots": {
+     "SYCL0": 3060.0
+    },
+    "slots_used": {
+     "SYCL0": 0.0
+    },
+    "hit_ratio": {
+     "SYCL0": 0.0
+    },
+    "h2d_bytes_total": {
+     "SYCL0": 0.0
+    },
+    "served_projections_total": {
+     "SYCL0": 0.0
+    },
+    "host_weight_copy_fallbacks_total": {
+     "SYCL0": 0.0
+    },
+    "advise_willneed_total": {
+     "SYCL0": 0.0
+    },
+    "advise_dontneed_total": {
+     "SYCL0": 0.0
+    },
+    "advise_dropped_total": {
+     "SYCL0": 0.0
+    },
+    "learning": {
+     "SYCL0": 0.0
+    }
+   },
+   "measure_pre": {
+    "loadavg": "3.15 3.06 3.68 1/2894 3106377",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 316372,
+     "MemAvailable_kB": 25303396,
+     "Cached_kB": 25130156,
+     "SwapCached_kB": 313204,
+     "Dirty_kB": 0
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 3650093056
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 9210691584
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 23256207360,
+     "total_bytes": 196062656864,
+     "fraction": 0.1186
+    },
+    "disk": {
+     "read_ios": 378548896,
+     "read_sectors": 21597591480,
+     "read_ticks_ms": 108591024,
+     "ts": 1785606960.6175914
+    }
+   },
+   "measure_post": {
+    "loadavg": "2.18 2.61 3.14 1/2876 3111785",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 285440,
+     "MemAvailable_kB": 24939800,
+     "Cached_kB": 24796212,
+     "SwapCached_kB": 320092,
+     "Dirty_kB": 340
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 3642753024
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 9210691584
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 23091867648,
+     "total_bytes": 196062656864,
+     "fraction": 0.1178
+    },
+    "disk": {
+     "read_ios": 380298704,
+     "read_sectors": 23060054200,
+     "read_ticks_ms": 109449259,
+     "ts": 1785607507.1548872
+    }
+   },
+   "measured": {
+    "wall_s": 543.34,
+    "timings": {
+     "cache_n": 0,
+     "prompt_n": 44,
+     "prompt_ms": 73243.046,
+     "prompt_per_token_ms": 1664.614681818182,
+     "prompt_per_second": 0.600739625165234,
+     "predicted_n": 128,
+     "predicted_ms": 470081.477,
+     "predicted_per_token_ms": 3672.5115390625,
+     "predicted_per_second": 0.2722932220535037
+    },
+    "tokens": [
+     271,
+     248068,
+     198,
+     8160,
+     579,
+     264,
+     7047,
+     1817,
+     421,
+     11177,
+     310,
+     279,
+     15673,
+     25,
+     271,
+     16,
+     13,
+     220,
+     2972,
+     1847,
+     7355,
+     279,
+     5952,
+     64700,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     25562,
+     64700,
+     380,
+     12370,
+     8404,
+     12,
+     83167,
+     318,
+     24797,
+     36,
+     8,
+     77754,
+     13,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     5218,
+     15380,
+     220,
+     16,
+     64700,
+     2500,
+     1503,
+     424,
+     9973,
+     864,
+     11312,
+     310,
+     19660,
+     364,
+     264,
+     2574,
+     3817,
+     30,
+     318,
+     26117,
+     3665,
+     553,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     5218,
+     15380,
+     220,
+     17,
+     64700,
+     8169,
+     1503,
+     6009,
+     25147,
+     3808,
+     23173,
+     10885,
+     4766,
+     364,
+     13092,
+     4906,
+     30,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     45930,
+     42794,
+     64700,
+     561,
+     2193,
+     369,
+     12282,
+     1332,
+     6009,
+     13914,
+     4129,
+     494,
+     12977,
+     318,
+     316,
+     2460,
+     286,
+     6973,
+     20243,
+     1354,
+     22629,
+     28000,
+     8390,
+     11,
+     974,
+     10313,
+     24481,
+     553,
+     198,
+     262,
+     348,
+     256
+    ],
+    "content": "\n\n<think>\nHere's a thinking process that leads to the explanation:\n\n1.  **Deconstruct the Request:**\n    *   **Topic:** Mixture-of-Experts (MoE) Transformers.\n    *   **Core Question 1:** How does it decide which experts to activate for a given token? (Plain terms).\n    *   **Core Question 2:** Why does expert reuse across consecutive tokens matter for serving performance?\n    *   **Specific Constraint:** The context is machines where expert weights stream from disk (implying limited SRAM/HBM capacity, offloading scenarios).\n    *  ",
+    "stop_type": "limit",
+    "disk_samples": [
+     {
+      "t": 1785606965.6,
+      "read_MBps": 1353.2,
+      "loadavg": "3.06 3.04 3.67 1/2889 3107425"
+     },
+     {
+      "t": 1785606970.6,
+      "read_MBps": 1425.2,
+      "loadavg": "2.89 3.01 3.65 4/2884 3107477"
+     },
+     {
+      "t": 1785606975.6,
+      "read_MBps": 1408.1,
+      "loadavg": "2.74 2.97 3.64 2/2884 3107511"
+     },
+     {
+      "t": 1785606980.6,
+      "read_MBps": 1348.3,
+      "loadavg": "2.60 2.94 3.62 2/2884 3107545"
+     },
+     {
+      "t": 1785606985.6,
+      "read_MBps": 1379.7,
+      "loadavg": "2.47 2.91 3.61 2/2884 3107593"
+     },
+     {
+      "t": 1785606990.6,
+      "read_MBps": 1354.7,
+      "loadavg": "2.52 2.91 3.61 1/2882 3107628"
+     },
+     {
+      "t": 1785606995.6,
+      "read_MBps": 1348.5,
+      "loadavg": "2.48 2.89 3.60 2/2884 3107667"
+     },
+     {
+      "t": 1785607000.6,
+      "read_MBps": 1381.8,
+      "loadavg": "3.00 3.00 3.63 3/2885 3107721"
+     },
+     {
+      "t": 1785607005.6,
+      "read_MBps": 1354.0,
+      "loadavg": "2.84 2.96 3.61 3/2885 3107756"
+     },
+     {
+      "t": 1785607010.6,
+      "read_MBps": 1287.0,
+      "loadavg": "2.69 2.93 3.60 1/2884 3107792"
+     },
+     {
+      "t": 1785607015.6,
+      "read_MBps": 1368.7,
+      "loadavg": "2.56 2.90 3.58 2/2887 3107833"
+     },
+     {
+      "t": 1785607020.6,
+      "read_MBps": 1376.2,
+      "loadavg": "2.59 2.90 3.58 4/2881 3107874"
+     },
+     {
+      "t": 1785607025.6,
+      "read_MBps": 1382.7,
+      "loadavg": "2.54 2.89 3.57 4/2881 3107908"
+     },
+     {
+      "t": 1785607030.6,
+      "read_MBps": 1359.0,
+      "loadavg": "2.50 2.87 3.56 1/2883 3107962"
+     },
+     {
+      "t": 1785607035.6,
+      "read_MBps": 1427.0,
+      "loadavg": "2.54 2.87 3.56 3/2883 3107994"
+     },
+     {
+      "t": 1785607040.6,
+      "read_MBps": 1395.9,
+      "loadavg": "2.66 2.89 3.56 11/2879 3108031"
+     },
+     {
+      "t": 1785607045.6,
+      "read_MBps": 1330.5,
+      "loadavg": "2.52 2.86 3.55 1/2880 3108065"
+     },
+     {
+      "t": 1785607050.6,
+      "read_MBps": 1348.9,
+      "loadavg": "2.40 2.83 3.53 1/2876 3108112"
+     },
+     {
+      "t": 1785607055.6,
+      "read_MBps": 1376.8,
+      "loadavg": "2.69 2.88 3.55 2/2878 3108148"
+     },
+     {
+      "t": 1785607060.6,
+      "read_MBps": 1392.7,
+      "loadavg": "2.72 2.88 3.54 1/2879 3108201"
+     },
+     {
+      "t": 1785607065.6,
+      "read_MBps": 1405.8,
+      "loadavg": "2.58 2.85 3.53 3/2872 3108236"
+     },
+     {
+      "t": 1785607070.6,
+      "read_MBps": 1376.0,
+      "loadavg": "2.53 2.84 3.52 2/2870 3108270"
+     },
+     {
+      "t": 1785607075.6,
+      "read_MBps": 1390.0,
+      "loadavg": "2.41 2.81 3.51 6/2873 3108307"
+     },
+     {
+      "t": 1785607080.6,
+      "read_MBps": 1383.1,
+      "loadavg": "2.30 2.78 3.49 3/2869 3108352"
+     },
+     {
+      "t": 1785607085.6,
+      "read_MBps": 1384.6,
+      "loadavg": "2.27 2.76 3.49 1/2868 3108388"
+     },
+     {
+      "t": 1785607090.6,
+      "read_MBps": 1378.5,
+      "loadavg": "2.17 2.73 3.47 2/2869 3108421"
+     },
+     {
+      "t": 1785607095.6,
+      "read_MBps": 1328.4,
+      "loadavg": "2.16 2.72 3.46 4/2873 3108476"
+     },
+     {
+      "t": 1785607100.6,
+      "read_MBps": 1350.8,
+      "loadavg": "2.06 2.69 3.45 2/2873 3108511"
+     },
+     {
+      "t": 1785607105.6,
+      "read_MBps": 1327.1,
+      "loadavg": "1.98 2.66 3.44 3/2873 3108546"
+     },
+     {
+      "t": 1785607110.6,
+      "read_MBps": 1393.6,
+      "loadavg": "1.90 2.64 3.42 3/2873 3108595"
+     },
+     {
+      "t": 1785607115.6,
+      "read_MBps": 1336.4,
+      "loadavg": "1.91 2.63 3.42 6/2873 3108629"
+     },
+     {
+      "t": 1785607120.6,
+      "read_MBps": 1367.3,
+      "loadavg": "1.83 2.60 3.40 5/2873 3108664"
+     },
+     {
+      "t": 1785607125.6,
+      "read_MBps": 1429.2,
+      "loadavg": "1.85 2.59 3.39 2/2875 3108717"
+     },
+     {
+      "t": 1785607130.6,
+      "read_MBps": 1392.3,
+      "loadavg": "1.78 2.56 3.38 2/2876 3108754"
+     },
+     {
+      "t": 1785607135.6,
+      "read_MBps": 1387.0,
+      "loadavg": "1.72 2.54 3.37 2/2875 3108787"
+     },
+     {
+      "t": 1785607140.6,
+      "read_MBps": 1410.2,
+      "loadavg": "1.66 2.51 3.36 3/2875 3108834"
+     },
+     {
+      "t": 1785607145.6,
+      "read_MBps": 1393.2,
+      "loadavg": "1.69 2.50 3.35 1/2873 3108867"
+     },
+     {
+      "t": 1785607150.7,
+      "read_MBps": 1387.2,
+      "loadavg": "1.79 2.51 3.35 2/2872 3108902"
+     },
+     {
+      "t": 1785607155.7,
+      "read_MBps": 1349.0,
+      "loadavg": "1.81 2.50 3.34 3/2874 3108955"
+     },
+     {
+      "t": 1785607160.7,
+      "read_MBps": 1383.9,
+      "loadavg": "1.91 2.51 3.34 2/2874 3108989"
+     },
+     {
+      "t": 1785607165.7,
+      "read_MBps": 1388.5,
+      "loadavg": "1.91 2.50 3.33 2/2875 3109025"
+     },
+     {
+      "t": 1785607170.7,
+      "read_MBps": 1391.3,
+      "loadavg": "2.16 2.54 3.34 2/2871 3109072"
+     },
+     {
+      "t": 1785607175.7,
+      "read_MBps": 1396.8,
+      "loadavg": "2.07 2.52 3.33 2/2871 3109109"
+     },
+     {
+      "t": 1785607180.7,
+      "read_MBps": 1407.3,
+      "loadavg": "1.98 2.49 3.31 1/2871 3109141"
+     },
+     {
+      "t": 1785607185.7,
+      "read_MBps": 1410.6,
+      "loadavg": "2.62 2.62 3.35 2/2873 3109195"
+     },
+     {
+      "t": 1785607190.7,
+      "read_MBps": 1423.9,
+      "loadavg": "2.81 2.66 3.36 2/2873 3109229"
+     },
+     {
+      "t": 1785607195.7,
+      "read_MBps": 1367.6,
+      "loadavg": "2.67 2.63 3.35 2/2874 3109264"
+     },
+     {
+      "t": 1785607200.7,
+      "read_MBps": 1414.6,
+      "loadavg": "2.54 2.60 3.33 4/2872 3109310"
+     },
+     {
+      "t": 1785607205.7,
+      "read_MBps": 1370.8,
+      "loadavg": "2.65 2.62 3.34 2/2872 3109347"
+     },
+     {
+      "t": 1785607210.7,
+      "read_MBps": 1388.2,
+      "loadavg": "2.52 2.60 3.32 1/2873 3109380"
+     },
+     {
+      "t": 1785607215.7,
+      "read_MBps": 1382.0,
+      "loadavg": "2.48 2.59 3.32 3/2877 3109436"
+     },
+     {
+      "t": 1785607220.7,
+      "read_MBps": 1358.6,
+      "loadavg": "2.36 2.56 3.30 2/2875 3109471"
+     },
+     {
+      "t": 1785607225.7,
+      "read_MBps": 1377.1,
+      "loadavg": "2.33 2.55 3.30 8/2875 3109506"
+     },
+     {
+      "t": 1785607230.7,
+      "read_MBps": 1372.4,
+      "loadavg": "2.22 2.52 3.28 2/2875 3109556"
+     },
+     {
+      "t": 1785607235.7,
+      "read_MBps": 1390.3,
+      "loadavg": "2.13 2.50 3.27 3/2872 3109588"
+     },
+     {
+      "t": 1785607240.7,
+      "read_MBps": 1404.1,
+      "loadavg": "2.04 2.47 3.26 3/2874 3109624"
+     },
+     {
+      "t": 1785607245.7,
+      "read_MBps": 1369.6,
+      "loadavg": "2.11 2.48 3.26 3/2876 3109677"
+     },
+     {
+      "t": 1785607250.7,
+      "read_MBps": 1390.7,
+      "loadavg": "2.10 2.47 3.25 2/2876 3109714"
+     },
+     {
+      "t": 1785607255.7,
+      "read_MBps": 1334.4,
+      "loadavg": "2.02 2.45 3.24 2/2877 3109753"
+     },
+     {
+      "t": 1785607260.7,
+      "read_MBps": 1421.5,
+      "loadavg": "1.93 2.42 3.23 2/2877 3109811"
+     },
+     {
+      "t": 1785607265.7,
+      "read_MBps": 1375.9,
+      "loadavg": "1.94 2.42 3.22 1/2871 3109843"
+     },
+     {
+      "t": 1785607270.7,
+      "read_MBps": 1395.8,
+      "loadavg": "1.86 2.39 3.21 4/2874 3109880"
+     },
+     {
+      "t": 1785607275.7,
+      "read_MBps": 1386.8,
+      "loadavg": "2.60 2.54 3.25 6/2876 3109933"
+     },
+     {
+      "t": 1785607280.7,
+      "read_MBps": 1387.6,
+      "loadavg": "2.55 2.53 3.24 1/2875 3109967"
+     },
+     {
+      "t": 1785607285.7,
+      "read_MBps": 1421.2,
+      "loadavg": "2.50 2.52 3.24 1/2875 3110002"
+     },
+     {
+      "t": 1785607290.7,
+      "read_MBps": 1373.5,
+      "loadavg": "3.18 2.66 3.28 2/2875 3110052"
+     },
+     {
+      "t": 1785607295.7,
+      "read_MBps": 1388.5,
+      "loadavg": "3.17 2.67 3.28 2/2874 3110087"
+     },
+     {
+      "t": 1785607300.7,
+      "read_MBps": 1407.7,
+      "loadavg": "3.48 2.74 3.30 2/2876 3110121"
+     },
+     {
+      "t": 1785607305.7,
+      "read_MBps": 1377.9,
+      "loadavg": "3.36 2.72 3.29 2/2878 3110175"
+     },
+     {
+      "t": 1785607310.7,
+      "read_MBps": 1426.6,
+      "loadavg": "3.33 2.73 3.29 2/2878 3110209"
+     },
+     {
+      "t": 1785607315.7,
+      "read_MBps": 1385.4,
+      "loadavg": "3.22 2.72 3.28 7/2878 3110243"
+     },
+     {
+      "t": 1785607320.7,
+      "read_MBps": 1378.8,
+      "loadavg": "3.04 2.69 3.27 1/2879 3110291"
+     },
+     {
+      "t": 1785607325.7,
+      "read_MBps": 1353.5,
+      "loadavg": "3.12 2.71 3.27 2/2876 3110324"
+     },
+     {
+      "t": 1785607330.7,
+      "read_MBps": 1397.7,
+      "loadavg": "2.95 2.68 3.26 4/2877 3110376"
+     },
+     {
+      "t": 1785607335.7,
+      "read_MBps": 1380.0,
+      "loadavg": "2.79 2.65 3.25 1/2878 3110446"
+     },
+     {
+      "t": 1785607340.7,
+      "read_MBps": 1388.5,
+      "loadavg": "2.65 2.63 3.23 3/2878 3110482"
+     },
+     {
+      "t": 1785607345.7,
+      "read_MBps": 1299.1,
+      "loadavg": "2.60 2.62 3.23 11/2878 3110516"
+     },
+     {
+      "t": 1785607350.7,
+      "read_MBps": 1336.7,
+      "loadavg": "2.47 2.59 3.22 3/2878 3110566"
+     },
+     {
+      "t": 1785607355.7,
+      "read_MBps": 1330.5,
+      "loadavg": "2.59 2.61 3.22 1/2876 3110599"
+     },
+     {
+      "t": 1785607360.7,
+      "read_MBps": 1355.0,
+      "loadavg": "2.46 2.58 3.21 3/2876 3110633"
+     },
+     {
+      "t": 1785607365.7,
+      "read_MBps": 1370.4,
+      "loadavg": "2.35 2.56 3.20 2/2875 3110687"
+     },
+     {
+      "t": 1785607370.7,
+      "read_MBps": 1353.5,
+      "loadavg": "2.32 2.55 3.19 2/2876 3110724"
+     },
+     {
+      "t": 1785607375.7,
+      "read_MBps": 1357.3,
+      "loadavg": "2.29 2.54 3.18 2/2876 3110757"
+     },
+     {
+      "t": 1785607380.7,
+      "read_MBps": 1360.9,
+      "loadavg": "2.19 2.51 3.17 2/2876 3110804"
+     },
+     {
+      "t": 1785607385.7,
+      "read_MBps": 1382.1,
+      "loadavg": "2.49 2.57 3.19 2/2875 3110838"
+     },
+     {
+      "t": 1785607390.7,
+      "read_MBps": 1408.4,
+      "loadavg": "3.26 2.73 3.23 1/2875 3110870"
+     },
+     {
+      "t": 1785607395.7,
+      "read_MBps": 1381.3,
+      "loadavg": "3.56 2.80 3.25 2/2875 3110904"
+     },
+     {
+      "t": 1785607400.7,
+      "read_MBps": 1367.2,
+      "loadavg": "3.59 2.82 3.26 3/2872 3110958"
+     },
+     {
+      "t": 1785607405.7,
+      "read_MBps": 1400.6,
+      "loadavg": "3.38 2.79 3.25 1/2872 3110993"
+     },
+     {
+      "t": 1785607410.7,
+      "read_MBps": 1363.1,
+      "loadavg": "3.83 2.89 3.28 1/2873 3111042"
+     },
+     {
+      "t": 1785607415.7,
+      "read_MBps": 1290.8,
+      "loadavg": "4.01 2.95 3.29 1/2875 3111079"
+     },
+     {
+      "t": 1785607420.7,
+      "read_MBps": 1376.6,
+      "loadavg": "3.77 2.91 3.28 2/2873 3111111"
+     },
+     {
+      "t": 1785607425.7,
+      "read_MBps": 1376.6,
+      "loadavg": "3.54 2.88 3.27 3/2874 3111146"
+     },
+     {
+      "t": 1785607430.7,
+      "read_MBps": 1374.7,
+      "loadavg": "3.42 2.87 3.26 3/2873 3111202"
+     },
+     {
+      "t": 1785607435.7,
+      "read_MBps": 1393.5,
+      "loadavg": "3.31 2.85 3.25 3/2873 3111236"
+     },
+     {
+      "t": 1785607440.7,
+      "read_MBps": 1385.9,
+      "loadavg": "3.20 2.84 3.25 5/2874 3111284"
+     },
+     {
+      "t": 1785607445.7,
+      "read_MBps": 1408.4,
+      "loadavg": "3.18 2.84 3.24 1/2873 3111316"
+     },
+     {
+      "t": 1785607450.7,
+      "read_MBps": 1370.1,
+      "loadavg": "3.01 2.81 3.23 1/2871 3111350"
+     },
+     {
+      "t": 1785607455.7,
+      "read_MBps": 1399.9,
+      "loadavg": "2.93 2.80 3.22 2/2871 3111383"
+     },
+     {
+      "t": 1785607460.7,
+      "read_MBps": 1367.3,
+      "loadavg": "2.77 2.77 3.21 3/2873 3111439"
+     },
+     {
+      "t": 1785607465.7,
+      "read_MBps": 1359.9,
+      "loadavg": "2.63 2.74 3.20 2/2873 3111475"
+     },
+     {
+      "t": 1785607470.7,
+      "read_MBps": 1375.7,
+      "loadavg": "2.58 2.72 3.19 3/2874 3111525"
+     },
+     {
+      "t": 1785607475.7,
+      "read_MBps": 1395.7,
+      "loadavg": "2.53 2.71 3.19 1/2876 3111559"
+     },
+     {
+      "t": 1785607480.7,
+      "read_MBps": 1382.0,
+      "loadavg": "2.41 2.68 3.17 4/2873 3111592"
+     },
+     {
+      "t": 1785607485.7,
+      "read_MBps": 1412.8,
+      "loadavg": "2.38 2.67 3.17 1/2873 3111626"
+     },
+     {
+      "t": 1785607490.7,
+      "read_MBps": 1374.8,
+      "loadavg": "2.43 2.68 3.17 3/2876 3111682"
+     },
+     {
+      "t": 1785607495.7,
+      "read_MBps": 1369.1,
+      "loadavg": "2.39 2.66 3.16 2/2877 3111717"
+     },
+     {
+      "t": 1785607500.7,
+      "read_MBps": 1379.6,
+      "loadavg": "2.28 2.64 3.15 2/2877 3111763"
+     }
+    ],
+    "nvme_read_bytes": 748780912640,
+    "nvme_read_MBps_avg": 1370.0
+   },
+   "metrics_after_measure": {
+    "hits_total": {
+     "SYCL0": 114099.0
+    },
+    "misses_total": {
+     "SYCL0": 137919.0
+    },
+    "evictions_total": {
+     "SYCL0": 12480.0
+    },
+    "promotions_total": {
+     "SYCL0": 46054.0
+    },
+    "slots": {
+     "SYCL0": 3060.0
+    },
+    "slots_used": {
+     "SYCL0": 3060.0
+    },
+    "hit_ratio": {
+     "SYCL0": 0.452741
+    },
+    "h2d_bytes_total": {
+     "SYCL0": 91341717504.0
+    },
+    "served_projections_total": {
+     "SYCL0": 114099.0
+    },
+    "host_weight_copy_fallbacks_total": {
+     "SYCL0": 99005.0
+    },
+    "advise_willneed_total": {
+     "SYCL0": 0.0
+    },
+    "advise_dontneed_total": {
+     "SYCL0": 0.0
+    },
+    "advise_dropped_total": {
+     "SYCL0": 0.0
+    },
+    "learning": {
+     "SYCL0": 0.0
+    }
+   },
+   "metrics_after_measure_raw": [
+    "llamacpp:moe_cache_hits_total{device=\"SYCL0\"} 114099",
+    "llamacpp:moe_cache_misses_total{device=\"SYCL0\"} 137919",
+    "llamacpp:moe_cache_evictions_total{device=\"SYCL0\"} 12480",
+    "llamacpp:moe_cache_promotions_total{device=\"SYCL0\"} 46054",
+    "llamacpp:moe_cache_slots{device=\"SYCL0\"} 3060",
+    "llamacpp:moe_cache_slots_used{device=\"SYCL0\"} 3060",
+    "llamacpp:moe_cache_hit_ratio{device=\"SYCL0\"} 0.452741",
+    "llamacpp:moe_cache_h2d_bytes_total{device=\"SYCL0\"} 91341717504",
+    "llamacpp:moe_cache_served_projections_total{device=\"SYCL0\"} 114099",
+    "llamacpp:moe_cache_host_weight_copy_fallbacks_total{device=\"SYCL0\"} 99005",
+    "llamacpp:moe_cache_advise_willneed_total{device=\"SYCL0\"} 0",
+    "llamacpp:moe_cache_advise_dontneed_total{device=\"SYCL0\"} 0",
+    "llamacpp:moe_cache_advise_dropped_total{device=\"SYCL0\"} 0",
+    "llamacpp:moe_cache_learning{device=\"SYCL0\"} 0"
+   ],
+   "server_exit_code": 0,
+   "vram_released": true,
+   "post": {
+    "loadavg": "2.24 2.62 3.14 1/2833 3113800",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 1261976,
+     "MemAvailable_kB": 25494128,
+     "Cached_kB": 24373464,
+     "SwapCached_kB": 327908,
+     "Dirty_kB": 232
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 32088522752
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 12767461376
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 22955859968,
+     "total_bytes": 196062656864,
+     "fraction": 0.1171
+    }
+   },
+   "orphan_check": "none",
+   "finished_at": "2026-08-01T14:05:10-0400"
+  },
+  "C4B": {
+   "condition": "C4B",
+   "spec": {
+    "cache": true,
+    "hybrid": null,
+    "advise": true
+   },
+   "port": 18131,
+   "profile": "ornith-397b",
+   "prompt": "Explain, in plain terms, how a mixture-of-experts transformer decides which experts to activate for a given token, and why expert reuse across consecutive tokens matters for serving performance on machines whose expert weights stream from disk.",
+   "seed": 42,
+   "warmup_tokens": 32,
+   "decode_tokens": 128,
+   "started_at": "2026-08-01T14:05:11-0400",
+   "argv": [
+    "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin/llama-server",
+    "--model",
+    "/home/aaron/models/unsloth/Ornith-1.0-397B-GGUF/UD-IQ4_NL/Ornith-1.0-397B-UD-IQ4_NL-00001-of-00005.gguf",
+    "--flash-attn",
+    "auto",
+    "--jinja",
+    "--parallel",
+    "1",
+    "-ngl",
+    "999",
+    "-c",
+    "4096",
+    "--split-mode",
+    "layer",
+    "--tensor-split",
+    "8,3",
+    "--cache-type-k",
+    "q8_0",
+    "--cache-type-v",
+    "q4_0",
+    "--moe-cache-bytes",
+    "SYCL0=18253611008,SYCL1=5368709120",
+    "--moe-cache-policy",
+    "slru",
+    "--moe-cache-admission-misses",
+    "2",
+    "--moe-cache-prefill-admission",
+    "off",
+    "--metrics",
+    "--fit",
+    "off",
+    "--device",
+    "SYCL0,SYCL1",
+    "-ot",
+    "ffn_.*_exps=CPU",
+    "--no-warmup",
+    "--ubatch-size",
+    "128",
+    "--port",
+    "18131"
+   ],
+   "env_overrides": {
+    "GGML_OP_OFFLOAD_MOE_MIN_BATCH": "1",
+    "GGML_MOE_CACHE_MMAP_ADVISE": "1"
+   },
+   "env_ld_library_path": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin:/opt/intel/oneapi/redist/lib:/opt/intel/oneapi/umf/1.0/lib",
+   "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin/llama-server",
+   "binary_fingerprint": "7e56dd8185d9794f",
+   "pre": {
+    "loadavg": "2.55 2.67 3.15 4/2835 3115813",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 613428,
+     "MemAvailable_kB": 25328224,
+     "Cached_kB": 24855264,
+     "SwapCached_kB": 334736,
+     "Dirty_kB": 1440
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 32090619904
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 12767461376
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 22977371200,
+     "total_bytes": 196062656864,
+     "fraction": 0.1172
+    },
+    "disk": {
+     "read_ios": 380299673,
+     "read_sectors": 23060246944,
+     "read_ticks_ms": 109449614,
+     "ts": 1785607515.56568
+    }
+   },
+   "server_pid": 3116819,
+   "load_seconds": 83.2,
+   "log_moe_cache_initialized": false,
+   "warmup": {
+    "wall_s": 190.1,
+    "timings": {
+     "cache_n": 0,
+     "prompt_n": 44,
+     "prompt_ms": 86552.995,
+     "prompt_per_token_ms": 1967.1135227272725,
+     "prompt_per_second": 0.5083590694926271,
+     "predicted_n": 32,
+     "predicted_ms": 103492.65000000001,
+     "predicted_per_token_ms": 3234.1453125000003,
+     "predicted_per_second": 0.3092007016923424
+    },
+    "tokens": [
+     271,
+     248068,
+     198,
+     8160,
+     579,
+     264,
+     7047,
+     1817,
+     421,
+     11177,
+     310,
+     279,
+     15673,
+     25,
+     271,
+     16,
+     13,
+     220,
+     2972,
+     1847,
+     7355,
+     279,
+     5952,
+     64700,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     25562,
+     64700,
+     380
+    ],
+    "content": "\n\n<think>\nHere's a thinking process that leads to the explanation:\n\n1.  **Deconstruct the Request:**\n    *   **Topic:** M"
+   },
+   "metrics_after_warmup": {
+    "hits_total": {
+     "SYCL0": 32031.0
+    },
+    "misses_total": {
+     "SYCL0": 52050.0
+    },
+    "evictions_total": {
+     "SYCL0": 2288.0
+    },
+    "promotions_total": {
+     "SYCL0": 15834.0
+    },
+    "slots": {
+     "SYCL0": 3060.0
+    },
+    "slots_used": {
+     "SYCL0": 3060.0
+    },
+    "hit_ratio": {
+     "SYCL0": 0.380954
+    },
+    "h2d_bytes_total": {
+     "SYCL0": 31398821888.0
+    },
+    "served_projections_total": {
+     "SYCL0": 32031.0
+    },
+    "host_weight_copy_fallbacks_total": {
+     "SYCL0": 38561.0
+    },
+    "advise_willneed_total": {
+     "SYCL0": 29993.0
+    },
+    "advise_dontneed_total": {
+     "SYCL0": 6670.0
+    },
+    "advise_dropped_total": {
+     "SYCL0": 22434.0
+    },
+    "learning": {
+     "SYCL0": 0.0
+    }
+   },
+   "metrics_after_warmup_raw": [
+    "llamacpp:moe_cache_hits_total{device=\"SYCL0\"} 32031",
+    "llamacpp:moe_cache_misses_total{device=\"SYCL0\"} 52050",
+    "llamacpp:moe_cache_evictions_total{device=\"SYCL0\"} 2288",
+    "llamacpp:moe_cache_promotions_total{device=\"SYCL0\"} 15834",
+    "llamacpp:moe_cache_slots{device=\"SYCL0\"} 3060",
+    "llamacpp:moe_cache_slots_used{device=\"SYCL0\"} 3060",
+    "llamacpp:moe_cache_hit_ratio{device=\"SYCL0\"} 0.380954",
+    "llamacpp:moe_cache_h2d_bytes_total{device=\"SYCL0\"} 31398821888",
+    "llamacpp:moe_cache_served_projections_total{device=\"SYCL0\"} 32031",
+    "llamacpp:moe_cache_host_weight_copy_fallbacks_total{device=\"SYCL0\"} 38561",
+    "llamacpp:moe_cache_advise_willneed_total{device=\"SYCL0\"} 29993",
+    "llamacpp:moe_cache_advise_dontneed_total{device=\"SYCL0\"} 6670",
+    "llamacpp:moe_cache_advise_dropped_total{device=\"SYCL0\"} 22434",
+    "llamacpp:moe_cache_learning{device=\"SYCL0\"} 0"
+   ],
+   "cache_engaged": true,
+   "cache_reset_response": {
+    "reset_devices": 1
+   },
+   "metrics_after_reset": {
+    "hits_total": {
+     "SYCL0": 0.0
+    },
+    "misses_total": {
+     "SYCL0": 0.0
+    },
+    "evictions_total": {
+     "SYCL0": 0.0
+    },
+    "promotions_total": {
+     "SYCL0": 0.0
+    },
+    "slots": {
+     "SYCL0": 3060.0
+    },
+    "slots_used": {
+     "SYCL0": 0.0
+    },
+    "hit_ratio": {
+     "SYCL0": 0.0
+    },
+    "h2d_bytes_total": {
+     "SYCL0": 0.0
+    },
+    "served_projections_total": {
+     "SYCL0": 0.0
+    },
+    "host_weight_copy_fallbacks_total": {
+     "SYCL0": 0.0
+    },
+    "advise_willneed_total": {
+     "SYCL0": 0.0
+    },
+    "advise_dontneed_total": {
+     "SYCL0": 0.0
+    },
+    "advise_dropped_total": {
+     "SYCL0": 0.0
+    },
+    "learning": {
+     "SYCL0": 0.0
+    }
+   },
+   "measure_pre": {
+    "loadavg": "2.10 3.00 3.25 1/2894 3119178",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 387660,
+     "MemAvailable_kB": 25064668,
+     "Cached_kB": 25072856,
+     "SwapCached_kB": 345172,
+     "Dirty_kB": 32
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 3644850176
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 9210691584
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 23964459008,
+     "total_bytes": 196062656864,
+     "fraction": 0.1222
+    },
+    "disk": {
+     "read_ios": 381089163,
+     "read_sectors": 23700707312,
+     "read_ticks_ms": 109816278,
+     "ts": 1785607792.2667115
+    }
+   },
+   "measure_post": {
+    "loadavg": "2.64 2.71 2.98 1/2872 3125062",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 354772,
+     "MemAvailable_kB": 25289240,
+     "Cached_kB": 25091088,
+     "SwapCached_kB": 307288,
+     "Dirty_kB": 0
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 3652190208
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 9210691584
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 23942823936,
+     "total_bytes": 196062656864,
+     "fraction": 0.1221
+    },
+    "disk": {
+     "read_ios": 382816311,
+     "read_sectors": 25042986592,
+     "read_ticks_ms": 110597209,
+     "ts": 1785608369.3121874
+    }
+   },
+   "measured": {
+    "wall_s": 573.77,
+    "timings": {
+     "cache_n": 0,
+     "prompt_n": 44,
+     "prompt_ms": 94769.467,
+     "prompt_per_token_ms": 2153.851522727273,
+     "prompt_per_second": 0.464284556966011,
+     "predicted_n": 128,
+     "predicted_ms": 478989.317,
+     "predicted_per_token_ms": 3742.1040390625,
+     "predicted_per_second": 0.2672293419855124
+    },
+    "tokens": [
+     271,
+     248068,
+     198,
+     8160,
+     579,
+     264,
+     7047,
+     1817,
+     421,
+     11177,
+     310,
+     279,
+     15673,
+     25,
+     271,
+     16,
+     13,
+     220,
+     2972,
+     1847,
+     7355,
+     279,
+     5952,
+     64700,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     25562,
+     64700,
+     380,
+     12370,
+     8404,
+     12,
+     83167,
+     318,
+     24797,
+     36,
+     8,
+     77754,
+     13,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     5218,
+     15380,
+     220,
+     16,
+     64700,
+     2500,
+     1503,
+     424,
+     9973,
+     864,
+     11312,
+     310,
+     19660,
+     364,
+     264,
+     2574,
+     3817,
+     30,
+     318,
+     26117,
+     3665,
+     553,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     5218,
+     15380,
+     220,
+     17,
+     64700,
+     8169,
+     1503,
+     6009,
+     25147,
+     3808,
+     23173,
+     10885,
+     4766,
+     364,
+     13092,
+     4906,
+     30,
+     198,
+     262,
+     348,
+     256,
+     2972,
+     45930,
+     42794,
+     64700,
+     561,
+     2193,
+     369,
+     12282,
+     1332,
+     6009,
+     13914,
+     4129,
+     494,
+     12977,
+     318,
+     316,
+     2460,
+     286,
+     6973,
+     20243,
+     1354,
+     22629,
+     28000,
+     8390,
+     11,
+     31733,
+     310,
+     2706,
+     13914,
+     383,
+     7244,
+     553,
+     271
+    ],
+    "content": "\n\n<think>\nHere's a thinking process that leads to the explanation:\n\n1.  **Deconstruct the Request:**\n    *   **Topic:** Mixture-of-Experts (MoE) Transformers.\n    *   **Core Question 1:** How does it decide which experts to activate for a given token? (Plain terms).\n    *   **Core Question 2:** Why does expert reuse across consecutive tokens matter for serving performance?\n    *   **Specific Constraint:** The context is machines where expert weights stream from disk (implying limited SRAM/HBM capacity, needing to load weights on demand).\n\n",
+    "stop_type": "limit",
+    "disk_samples": [
+     {
+      "t": 1785607797.3,
+      "read_MBps": 999.8,
+      "loadavg": "2.09 2.99 3.25 1/2893 3120251"
+     },
+     {
+      "t": 1785607802.3,
+      "read_MBps": 1038.6,
+      "loadavg": "2.01 2.95 3.23 2/2893 3120299"
+     },
+     {
+      "t": 1785607807.3,
+      "read_MBps": 992.5,
+      "loadavg": "2.01 2.94 3.23 5/2893 3120340"
+     },
+     {
+      "t": 1785607812.3,
+      "read_MBps": 976.1,
+      "loadavg": "2.00 2.92 3.22 2/2889 3120380"
+     },
+     {
+      "t": 1785607817.3,
+      "read_MBps": 944.3,
+      "loadavg": "1.92 2.89 3.21 1/2888 3120419"
+     },
+     {
+      "t": 1785607822.3,
+      "read_MBps": 954.3,
+      "loadavg": "1.85 2.86 3.20 2/2886 3120460"
+     },
+     {
+      "t": 1785607827.3,
+      "read_MBps": 925.0,
+      "loadavg": "1.78 2.83 3.18 2/2883 3120520"
+     },
+     {
+      "t": 1785607832.3,
+      "read_MBps": 967.9,
+      "loadavg": "1.72 2.79 3.17 2/2884 3120574"
+     },
+     {
+      "t": 1785607837.3,
+      "read_MBps": 873.3,
+      "loadavg": "1.90 2.81 3.18 2/2882 3120614"
+     },
+     {
+      "t": 1785607842.3,
+      "read_MBps": 1020.8,
+      "loadavg": "2.39 2.90 3.20 5/2882 3120652"
+     },
+     {
+      "t": 1785607847.3,
+      "read_MBps": 978.9,
+      "loadavg": "2.28 2.87 3.19 1/2881 3120692"
+     },
+     {
+      "t": 1785607852.3,
+      "read_MBps": 992.3,
+      "loadavg": "2.18 2.84 3.18 4/2880 3120731"
+     },
+     {
+      "t": 1785607857.3,
+      "read_MBps": 991.2,
+      "loadavg": "2.32 2.86 3.18 8/2884 3120791"
+     },
+     {
+      "t": 1785607862.3,
+      "read_MBps": 1033.6,
+      "loadavg": "2.22 2.83 3.17 1/2884 3120841"
+     },
+     {
+      "t": 1785607867.3,
+      "read_MBps": 1285.0,
+      "loadavg": "2.20 2.81 3.16 2/2883 3120878"
+     },
+     {
+      "t": 1785607872.3,
+      "read_MBps": 962.3,
+      "loadavg": "2.42 2.85 3.17 2/2884 3120921"
+     },
+     {
+      "t": 1785607877.3,
+      "read_MBps": 993.3,
+      "loadavg": "2.95 2.95 3.21 1/2883 3120961"
+     },
+     {
+      "t": 1785607882.3,
+      "read_MBps": 1033.2,
+      "loadavg": "2.87 2.93 3.20 2/2871 3121001"
+     },
+     {
+      "t": 1785607887.3,
+      "read_MBps": 1165.9,
+      "loadavg": "2.72 2.90 3.19 1/2875 3121059"
+     },
+     {
+      "t": 1785607892.3,
+      "read_MBps": 1040.2,
+      "loadavg": "2.59 2.87 3.17 1/2875 3121107"
+     },
+     {
+      "t": 1785607897.3,
+      "read_MBps": 1028.2,
+      "loadavg": "2.46 2.84 3.16 1/2877 3121145"
+     },
+     {
+      "t": 1785607902.3,
+      "read_MBps": 1016.6,
+      "loadavg": "2.42 2.83 3.16 2/2877 3121183"
+     },
+     {
+      "t": 1785607907.3,
+      "read_MBps": 1023.5,
+      "loadavg": "2.31 2.79 3.14 2/2875 3121217"
+     },
+     {
+      "t": 1785607912.3,
+      "read_MBps": 1047.7,
+      "loadavg": "2.20 2.76 3.13 2/2873 3121253"
+     },
+     {
+      "t": 1785607917.3,
+      "read_MBps": 1011.3,
+      "loadavg": "2.19 2.75 3.13 1/2879 3121313"
+     },
+     {
+      "t": 1785607922.3,
+      "read_MBps": 1053.0,
+      "loadavg": "2.09 2.72 3.12 2/2878 3121364"
+     },
+     {
+      "t": 1785607927.3,
+      "read_MBps": 1010.1,
+      "loadavg": "2.00 2.69 3.10 3/2875 3121402"
+     },
+     {
+      "t": 1785607932.3,
+      "read_MBps": 1051.7,
+      "loadavg": "1.92 2.67 3.09 5/2874 3121438"
+     },
+     {
+      "t": 1785607937.3,
+      "read_MBps": 943.9,
+      "loadavg": "1.93 2.65 3.09 2/2873 3121512"
+     },
+     {
+      "t": 1785607942.3,
+      "read_MBps": 1088.3,
+      "loadavg": "1.93 2.64 3.08 5/2871 3121547"
+     },
+     {
+      "t": 1785607947.3,
+      "read_MBps": 908.9,
+      "loadavg": "2.10 2.67 3.08 1/2875 3121610"
+     },
+     {
+      "t": 1785607952.3,
+      "read_MBps": 1035.2,
+      "loadavg": "2.41 2.72 3.10 1/2876 3121666"
+     },
+     {
+      "t": 1785607957.3,
+      "read_MBps": 996.9,
+      "loadavg": "2.30 2.69 3.09 2/2875 3121700"
+     },
+     {
+      "t": 1785607962.3,
+      "read_MBps": 1035.7,
+      "loadavg": "2.76 2.78 3.12 7/2876 3121738"
+     },
+     {
+      "t": 1785607967.3,
+      "read_MBps": 1062.7,
+      "loadavg": "2.86 2.80 3.12 2/2874 3121774"
+     },
+     {
+      "t": 1785607972.3,
+      "read_MBps": 1042.1,
+      "loadavg": "2.71 2.77 3.11 4/2872 3121813"
+     },
+     {
+      "t": 1785607977.3,
+      "read_MBps": 1065.5,
+      "loadavg": "3.53 2.94 3.16 1/2875 3121869"
+     },
+     {
+      "t": 1785607982.3,
+      "read_MBps": 981.7,
+      "loadavg": "3.81 3.01 3.18 4/2875 3121919"
+     },
+     {
+      "t": 1785607987.3,
+      "read_MBps": 1019.7,
+      "loadavg": "3.91 3.04 3.19 1/2872 3121958"
+     },
+     {
+      "t": 1785607992.3,
+      "read_MBps": 1010.8,
+      "loadavg": "3.83 3.04 3.19 1/2872 3121994"
+     },
+     {
+      "t": 1785607997.3,
+      "read_MBps": 1098.2,
+      "loadavg": "3.61 3.01 3.18 8/2871 3122031"
+     },
+     {
+      "t": 1785608002.3,
+      "read_MBps": 1012.1,
+      "loadavg": "3.48 2.99 3.17 6/2870 3122070"
+     },
+     {
+      "t": 1785608007.3,
+      "read_MBps": 1045.0,
+      "loadavg": "3.36 2.97 3.17 2/2875 3122134"
+     },
+     {
+      "t": 1785608012.3,
+      "read_MBps": 1045.1,
+      "loadavg": "3.17 2.94 3.16 1/2876 3122188"
+     },
+     {
+      "t": 1785608017.3,
+      "read_MBps": 1035.1,
+      "loadavg": "3.08 2.92 3.15 7/2876 3122222"
+     },
+     {
+      "t": 1785608022.3,
+      "read_MBps": 1044.8,
+      "loadavg": "3.63 3.04 3.19 1/2874 3122264"
+     },
+     {
+      "t": 1785608027.3,
+      "read_MBps": 1068.0,
+      "loadavg": "3.74 3.07 3.20 2/2874 3122301"
+     },
+     {
+      "t": 1785608032.3,
+      "read_MBps": 1106.5,
+      "loadavg": "3.60 3.06 3.19 2/2872 3122339"
+     },
+     {
+      "t": 1785608037.3,
+      "read_MBps": 990.1,
+      "loadavg": "3.71 3.09 3.20 1/2880 3122405"
+     },
+     {
+      "t": 1785608042.3,
+      "read_MBps": 995.6,
+      "loadavg": "3.58 3.07 3.19 2/2879 3122452"
+     },
+     {
+      "t": 1785608047.3,
+      "read_MBps": 942.6,
+      "loadavg": "3.37 3.04 3.18 2/2879 3122488"
+     },
+     {
+      "t": 1785608052.3,
+      "read_MBps": 1061.9,
+      "loadavg": "3.26 3.02 3.17 1/2879 3122525"
+     },
+     {
+      "t": 1785608057.3,
+      "read_MBps": 1039.2,
+      "loadavg": "3.08 2.98 3.16 2/2878 3122565"
+     },
+     {
+      "t": 1785608062.3,
+      "read_MBps": 1010.8,
+      "loadavg": "2.99 2.97 3.16 2/2876 3122607"
+     },
+     {
+      "t": 1785608067.3,
+      "read_MBps": 976.3,
+      "loadavg": "2.83 2.94 3.14 2/2880 3122665"
+     },
+     {
+      "t": 1785608072.3,
+      "read_MBps": 1003.8,
+      "loadavg": "2.68 2.90 3.13 2/2880 3122716"
+     },
+     {
+      "t": 1785608077.3,
+      "read_MBps": 1004.1,
+      "loadavg": "2.63 2.89 3.13 3/2880 3122753"
+     },
+     {
+      "t": 1785608082.3,
+      "read_MBps": 1067.3,
+      "loadavg": "2.50 2.86 3.11 3/2882 3122789"
+     },
+     {
+      "t": 1785608087.3,
+      "read_MBps": 1069.6,
+      "loadavg": "2.38 2.83 3.10 1/2878 3122828"
+     },
+     {
+      "t": 1785608092.3,
+      "read_MBps": 1386.5,
+      "loadavg": "2.35 2.81 3.10 1/2876 3122862"
+     },
+     {
+      "t": 1785608097.3,
+      "read_MBps": 1396.6,
+      "loadavg": "2.32 2.80 3.09 1/2880 3122920"
+     },
+     {
+      "t": 1785608102.3,
+      "read_MBps": 1383.3,
+      "loadavg": "2.45 2.82 3.09 3/2881 3122966"
+     },
+     {
+      "t": 1785608107.3,
+      "read_MBps": 1386.0,
+      "loadavg": "2.50 2.82 3.09 4/2880 3122998"
+     },
+     {
+      "t": 1785608112.3,
+      "read_MBps": 1390.8,
+      "loadavg": "2.46 2.81 3.09 1/2881 3123033"
+     },
+     {
+      "t": 1785608117.3,
+      "read_MBps": 1363.9,
+      "loadavg": "2.42 2.79 3.08 2/2875 3123067"
+     },
+     {
+      "t": 1785608122.3,
+      "read_MBps": 1392.7,
+      "loadavg": "2.39 2.78 3.08 2/2874 3123104"
+     },
+     {
+      "t": 1785608127.3,
+      "read_MBps": 1409.0,
+      "loadavg": "2.36 2.77 3.07 1/2878 3123160"
+     },
+     {
+      "t": 1785608132.3,
+      "read_MBps": 1412.4,
+      "loadavg": "2.41 2.77 3.07 2/2879 3123210"
+     },
+     {
+      "t": 1785608137.3,
+      "read_MBps": 1414.8,
+      "loadavg": "2.29 2.74 3.06 3/2879 3123242"
+     },
+     {
+      "t": 1785608142.3,
+      "read_MBps": 1410.4,
+      "loadavg": "2.27 2.73 3.05 3/2880 3123279"
+     },
+     {
+      "t": 1785608147.3,
+      "read_MBps": 1426.4,
+      "loadavg": "2.25 2.72 3.05 3/2879 3123312"
+     },
+     {
+      "t": 1785608152.3,
+      "read_MBps": 1425.1,
+      "loadavg": "2.79 2.82 3.08 1/2873 3123348"
+     },
+     {
+      "t": 1785608157.3,
+      "read_MBps": 1390.0,
+      "loadavg": "2.73 2.81 3.07 2/2877 3123404"
+     },
+     {
+      "t": 1785608162.3,
+      "read_MBps": 1428.3,
+      "loadavg": "2.83 2.83 3.08 2/2877 3123450"
+     },
+     {
+      "t": 1785608167.3,
+      "read_MBps": 1390.7,
+      "loadavg": "2.68 2.80 3.07 2/2876 3123484"
+     },
+     {
+      "t": 1785608172.3,
+      "read_MBps": 1380.5,
+      "loadavg": "2.55 2.77 3.06 2/2877 3123518"
+     },
+     {
+      "t": 1785608177.3,
+      "read_MBps": 1398.9,
+      "loadavg": "2.74 2.80 3.07 1/2878 3123555"
+     },
+     {
+      "t": 1785608182.3,
+      "read_MBps": 1397.5,
+      "loadavg": "2.68 2.79 3.06 2/2876 3123589"
+     },
+     {
+      "t": 1785608187.3,
+      "read_MBps": 1341.2,
+      "loadavg": "2.55 2.76 3.05 2/2877 3123647"
+     },
+     {
+      "t": 1785608192.3,
+      "read_MBps": 1350.0,
+      "loadavg": "2.34 2.71 3.03 2/2876 3123694"
+     },
+     {
+      "t": 1785608197.3,
+      "read_MBps": 1383.9,
+      "loadavg": "2.24 2.68 3.02 2/2877 3123729"
+     },
+     {
+      "t": 1785608202.3,
+      "read_MBps": 1405.2,
+      "loadavg": "2.38 2.71 3.03 6/2877 3123761"
+     },
+     {
+      "t": 1785608207.3,
+      "read_MBps": 1353.6,
+      "loadavg": "2.43 2.71 3.03 3/2875 3123795"
+     },
+     {
+      "t": 1785608212.3,
+      "read_MBps": 1406.2,
+      "loadavg": "2.63 2.75 3.04 6/2873 3123829"
+     },
+     {
+      "t": 1785608217.3,
+      "read_MBps": 1364.3,
+      "loadavg": "2.66 2.75 3.04 1/2878 3123887"
+     },
+     {
+      "t": 1785608222.3,
+      "read_MBps": 1406.0,
+      "loadavg": "3.49 2.92 3.09 3/2878 3123932"
+     },
+     {
+      "t": 1785608227.3,
+      "read_MBps": 1368.2,
+      "loadavg": "3.53 2.94 3.10 2/2878 3123967"
+     },
+     {
+      "t": 1785608232.3,
+      "read_MBps": 1372.0,
+      "loadavg": "3.57 2.96 3.10 2/2878 3124000"
+     },
+     {
+      "t": 1785608237.3,
+      "read_MBps": 1379.1,
+      "loadavg": "3.44 2.94 3.09 1/2877 3124033"
+     },
+     {
+      "t": 1785608242.3,
+      "read_MBps": 1355.1,
+      "loadavg": "3.33 2.93 3.09 1/2874 3124069"
+     },
+     {
+      "t": 1785608247.3,
+      "read_MBps": 1355.8,
+      "loadavg": "3.30 2.93 3.09 3/2874 3124103"
+     },
+     {
+      "t": 1785608252.3,
+      "read_MBps": 1381.0,
+      "loadavg": "3.20 2.91 3.08 1/2879 3124175"
+     },
+     {
+      "t": 1785608257.3,
+      "read_MBps": 1360.1,
+      "loadavg": "3.10 2.90 3.08 9/2878 3124207"
+     },
+     {
+      "t": 1785608262.3,
+      "read_MBps": 1371.3,
+      "loadavg": "2.93 2.87 3.06 1/2878 3124242"
+     },
+     {
+      "t": 1785608267.3,
+      "read_MBps": 1381.8,
+      "loadavg": "2.78 2.84 3.05 2/2875 3124275"
+     },
+     {
+      "t": 1785608272.3,
+      "read_MBps": 1382.8,
+      "loadavg": "2.72 2.82 3.05 2/2873 3124313"
+     },
+     {
+      "t": 1785608277.3,
+      "read_MBps": 1386.3,
+      "loadavg": "2.58 2.79 3.04 2/2873 3124347"
+     },
+     {
+      "t": 1785608282.3,
+      "read_MBps": 1374.5,
+      "loadavg": "2.53 2.78 3.03 1/2876 3124417"
+     },
+     {
+      "t": 1785608287.3,
+      "read_MBps": 1377.5,
+      "loadavg": "2.41 2.75 3.02 2/2876 3124450"
+     },
+     {
+      "t": 1785608292.3,
+      "read_MBps": 1390.1,
+      "loadavg": "2.30 2.72 3.01 2/2877 3124483"
+     },
+     {
+      "t": 1785608297.3,
+      "read_MBps": 1279.4,
+      "loadavg": "2.19 2.69 3.00 9/2877 3124518"
+     },
+     {
+      "t": 1785608302.3,
+      "read_MBps": 1396.4,
+      "loadavg": "2.26 2.70 3.00 3/2874 3124553"
+     },
+     {
+      "t": 1785608307.3,
+      "read_MBps": 1387.0,
+      "loadavg": "2.24 2.68 2.99 1/2875 3124589"
+     },
+     {
+      "t": 1785608312.3,
+      "read_MBps": 1410.5,
+      "loadavg": "2.14 2.66 2.98 2/2879 3124659"
+     },
+     {
+      "t": 1785608317.3,
+      "read_MBps": 1395.0,
+      "loadavg": "2.12 2.64 2.98 2/2878 3124694"
+     },
+     {
+      "t": 1785608322.3,
+      "read_MBps": 1398.1,
+      "loadavg": "2.11 2.63 2.97 2/2878 3124726"
+     },
+     {
+      "t": 1785608327.3,
+      "read_MBps": 1349.4,
+      "loadavg": "2.11 2.62 2.96 2/2878 3124759"
+     },
+     {
+      "t": 1785608332.3,
+      "read_MBps": 1384.8,
+      "loadavg": "2.02 2.60 2.95 4/2874 3124795"
+     },
+     {
+      "t": 1785608337.3,
+      "read_MBps": 1401.6,
+      "loadavg": "2.26 2.64 2.97 7/2875 3124828"
+     },
+     {
+      "t": 1785608342.3,
+      "read_MBps": 1393.2,
+      "loadavg": "2.64 2.71 2.99 3/2879 3124898"
+     },
+     {
+      "t": 1785608347.3,
+      "read_MBps": 1396.8,
+      "loadavg": "2.75 2.73 2.99 1/2874 3124930"
+     },
+     {
+      "t": 1785608352.3,
+      "read_MBps": 1388.3,
+      "loadavg": "2.93 2.77 3.00 2/2875 3124966"
+     },
+     {
+      "t": 1785608357.3,
+      "read_MBps": 1350.4,
+      "loadavg": "2.85 2.75 3.00 2/2876 3125000"
+     },
+     {
+      "t": 1785608362.3,
+      "read_MBps": 1421.4,
+      "loadavg": "2.78 2.74 2.99 2/2873 3125037"
+     }
+    ],
+    "nvme_read_bytes": 687246991360,
+    "nvme_read_MBps_avg": 1191.0
+   },
+   "metrics_after_measure": {
+    "hits_total": {
+     "SYCL0": 114225.0
+    },
+    "misses_total": {
+     "SYCL0": 137820.0
+    },
+    "evictions_total": {
+     "SYCL0": 12483.0
+    },
+    "promotions_total": {
+     "SYCL0": 46054.0
+    },
+    "slots": {
+     "SYCL0": 3060.0
+    },
+    "slots_used": {
+     "SYCL0": 3060.0
+    },
+    "hit_ratio": {
+     "SYCL0": 0.453193
+    },
+    "h2d_bytes_total": {
+     "SYCL0": 91338375168.0
+    },
+    "served_projections_total": {
+     "SYCL0": 114225.0
+    },
+    "host_weight_copy_fallbacks_total": {
+     "SYCL0": 98903.0
+    },
+    "advise_willneed_total": {
+     "SYCL0": 119623.0
+    },
+    "advise_dontneed_total": {
+     "SYCL0": 36437.0
+    },
+    "advise_dropped_total": {
+     "SYCL0": 22390.0
+    },
+    "learning": {
+     "SYCL0": 0.0
+    }
+   },
+   "metrics_after_measure_raw": [
+    "llamacpp:moe_cache_hits_total{device=\"SYCL0\"} 114225",
+    "llamacpp:moe_cache_misses_total{device=\"SYCL0\"} 137820",
+    "llamacpp:moe_cache_evictions_total{device=\"SYCL0\"} 12483",
+    "llamacpp:moe_cache_promotions_total{device=\"SYCL0\"} 46054",
+    "llamacpp:moe_cache_slots{device=\"SYCL0\"} 3060",
+    "llamacpp:moe_cache_slots_used{device=\"SYCL0\"} 3060",
+    "llamacpp:moe_cache_hit_ratio{device=\"SYCL0\"} 0.453193",
+    "llamacpp:moe_cache_h2d_bytes_total{device=\"SYCL0\"} 91338375168",
+    "llamacpp:moe_cache_served_projections_total{device=\"SYCL0\"} 114225",
+    "llamacpp:moe_cache_host_weight_copy_fallbacks_total{device=\"SYCL0\"} 98903",
+    "llamacpp:moe_cache_advise_willneed_total{device=\"SYCL0\"} 119623",
+    "llamacpp:moe_cache_advise_dontneed_total{device=\"SYCL0\"} 36437",
+    "llamacpp:moe_cache_advise_dropped_total{device=\"SYCL0\"} 22390",
+    "llamacpp:moe_cache_learning{device=\"SYCL0\"} 0"
+   ],
+   "server_exit_code": 0,
+   "vram_released": true,
+   "post": {
+    "loadavg": "2.75 2.73 2.99 1/2833 3127099",
+    "meminfo": {
+     "MemTotal_kB": 32593528,
+     "MemFree_kB": 1066824,
+     "MemAvailable_kB": 25892512,
+     "Cached_kB": 24976936,
+     "SwapCached_kB": 316448,
+     "Dirty_kB": 572
+    },
+    "gpus": [
+     {
+      "device": "SYCL0",
+      "name": "Intel(R) Arc(TM) Pro B70 Graphics",
+      "total_bytes": 34242297856,
+      "free_bytes": 32091668480
+     },
+     {
+      "device": "SYCL1",
+      "name": "Intel(R) Arc(TM) B580 Graphics",
+      "total_bytes": 12809404416,
+      "free_bytes": 12767461376
+     }
+    ],
+    "page_cache_residency": {
+     "resident_bytes": 23520804864,
+     "total_bytes": 196062656864,
+     "fraction": 0.12
+    }
+   },
+   "orphan_check": "none",
+   "finished_at": "2026-08-01T14:19:33-0400"
+  }
+ },
+ "token_identity": {
+  "C2_vs_C3": true,
+  "C2_vs_C3_warmup": true,
+  "C4A_vs_C4B": false,
+  "C4A_vs_C4B_warmup": true,
+  "C4A_vs_C4B_first_divergence_index": 120,
+  "C4A_vs_C2": true,
+  "C1_vs_C2": false
+ }
+}
