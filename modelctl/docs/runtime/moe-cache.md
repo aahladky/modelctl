@@ -62,6 +62,34 @@ allocates the pool from the observed sizes. A projection the learning
 pass never observes is simply never cached (fail-safe). The learned
 geometry is logged at finalization.
 
+## SSD/mmap tier advice (`GGML_MOE_CACHE_MMAP_ADVISE=1`)
+
+Opt-in madvise management for models whose expert weights stream from
+NVMe through the page cache (`moe_cache_mmap_advise` capability). When
+enabled, after each completed step the runtime issues
+`POSIX_MADV_WILLNEED` for the host ranges that step's cache misses read
+(likely needed again next step) and `MADV_DONTNEED` for the ranges of
+experts the cache just evicted (pressure judged them cold, so their
+mapped pages become immediately reclaimable). Default off: on a box
+where the model is RAM-comfortable, dropping resident pages costs
+refaults and buys nothing.
+
+Scoping is structural, not heuristic: the advice syscalls live behind a
+bridge in the fork's mmap layer that no-ops for any range not wholly
+inside a live model mapping. A `--no-mmap` load never registers the
+bridge, cache hits are never advised (their bytes are device-resident),
+and an eviction whose range was also used in the same step is not
+DONTNEEDed. `/cache/reset` clears the pending batches without firing
+them, so resetting between benchmark conditions cannot yank the page
+cache out from under the next condition.
+
+Like everything else about the cache, this only acts where the
+scheduler hook fires (cross-backend staged copies above the offload
+threshold) — it does nothing for routed experts statically pinned to
+CPU at batch 1. Counters: `moe_cache_advise_willneed_total` (coalesced
+calls, not misses), `moe_cache_advise_dontneed_total`,
+`moe_cache_advise_dropped_total` (per-step batch cap overflow).
+
 ## Observability
 
 - Prometheus `/metrics`: `moe_cache_hits_total`,

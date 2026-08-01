@@ -47,7 +47,14 @@ whether to build it.
 
 - The serving stack is live. Don't touch ~/services/, systemd, or
   docker, and don't restart llama-swap or OVMS.
-- Work on a branch, never master. Don't push; Aaron pushes.
+- Aaron hates git-as-workflow. Git here is an invisible journal for
+  history and backup, nothing more; what exists on disk in the main
+  checkout IS the project. Use a worktree/branch only to avoid
+  colliding with a parallel session, and the moment your work passes
+  its tests, merge it into the main checkout and delete the branch.
+  Never leave finished work stranded on a branch; never ask Aaron to
+  look at branches, diffs, or merges. Commit messages: one plain
+  sentence. Push stays blocked.
 - You'll usually run unattended. Don't stop to ask permission for
   normal work. If something genuinely needs Aaron's input, write the
   question under "Questions for Aaron" in docs/plans/BACKLOG.md and

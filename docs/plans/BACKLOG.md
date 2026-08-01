@@ -7,11 +7,13 @@ docs/research/2026-08-01-moe-offloading-landscape.md.
 
 ## The list
 
-P1 — madvise hints for the SSD/mmap tier. CODE DONE on branch agent/P1
-(WILLNEED after decode steps, DONTNEED on eviction, new test-mmap-advise
-passing incl. sanitizer build). Still needs: run the ornith-397b bench
-per the testing protocol, write the raw numbers down for Aaron. Baseline
-to compare against: 0.37 tok/s static.
+P1 — madvise hints for the SSD/mmap tier. MERGED — the code exists in
+the main tree on disk (llama-mmap.cpp + moe-cache, tests green incl.
+sanitizer; session write-up in docs/plans/evidence/). Still needs: the
+ornith-397b bench per the testing protocol, raw numbers for Aaron.
+Prebuilt binaries remain in llama.cpp/.claude/worktrees/agent-P1 as a
+build cache until the bench runs, then that worktree gets cleaned up.
+Baseline: 0.37 tok/s static.
 
 P2 — add a --moe-route-trace FILE flag to the fork's llama-server:
 stream (token, layer, expert ids) per step, near-zero overhead when off.
@@ -84,7 +86,7 @@ hot experts at full quant. Report speed AND output-quality numbers raw.
 
 ## Aaron's own list
 
-- Decide whether agents may push branches to Gitea (currently push is
-  blocked; everything is local).
+- (optional) turn on automatic push to Gitea as invisible off-site
+  backup — currently everything is local-only.
 - Post the P6 comment to #20757 if it reads well.
 - Look at the P1 bench numbers when they exist.
