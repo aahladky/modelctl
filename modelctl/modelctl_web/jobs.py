@@ -72,9 +72,45 @@ _MIGRATE_COLUMNS = {
 }
 
 
+def scratch_safe_mode():
+    """Scratch-safe mode (MODELCTL_WEB_SCRATCH=1): this instance is a
+    scratch walk, not the live console. It must be able to open the live
+    job DB without rewriting anyone else's rows and must refuse every
+    mutating endpoint (app.py owns that half)."""
+    return os.environ.get("MODELCTL_WEB_SCRATCH", "") == "1"
+
+
+# Env redirections the add-wizard carve-out requires before scratch mode
+# lets the chain run its own jobs: profiles/state, the models dir, and
+# llama-swap's config file, systemd unit, and API URL are everything the
+# chain can write to or drive.
+_SCRATCH_REDIRECTIONS = (
+    ("MODELCTL_HOME", ("MODELCTL_HOME", "MODELCTL_STATE_DIR")),
+    ("MODELCTL_MODELS_DIR", ("MODELCTL_MODELS_DIR",)),
+    ("MODELCTL_LLAMA_SWAP_CONFIG", ("MODELCTL_LLAMA_SWAP_CONFIG",)),
+    ("MODELCTL_LLAMA_SWAP_SERVICE", ("MODELCTL_LLAMA_SWAP_SERVICE",)),
+    ("MODELCTL_LLAMA_SWAP_BASE_URL", ("MODELCTL_LLAMA_SWAP_BASE_URL",)),
+)
+
+
+def scratch_missing_redirections():
+    """Redirections still pointing at the live install ([] == hermetic)."""
+    return [label for label, names in _SCRATCH_REDIRECTIONS
+            if not any(os.environ.get(n) for n in names)]
+
+
+def scratch_write_blocked():
+    """True when this is a scratch instance sharing the live state dir --
+    the configuration in which even side-effect writes (wizard state
+    refreshes on GET) must become no-ops."""
+    return scratch_safe_mode() and bool(scratch_missing_redirections())
+
+
 class JobStore:
-    def __init__(self, db_path=DB_PATH):
+    def __init__(self, db_path=DB_PATH, scratch_safe=None):
         self.db_path = Path(db_path)
+        self.scratch_safe = (scratch_safe if scratch_safe is not None
+                             else scratch_safe_mode())
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         with self._conn() as c:
@@ -83,8 +119,13 @@ class JobStore:
             for col, decl in _MIGRATE_COLUMNS.items():
                 if col not in cols:
                     c.execute(f"ALTER TABLE jobs ADD COLUMN {col} {decl}")
-            c.execute(
-                "UPDATE jobs SET status='interrupted' WHERE status IN ('queued','running')")
+            # 'running' means "a worker in the OWNING service is on it".
+            # Only the owning service may conclude that worker is gone; a
+            # scratch instance opening the same DB used to flip the live
+            # console's in-flight jobs to 'interrupted' just by starting.
+            if not self.scratch_safe:
+                c.execute(
+                    "UPDATE jobs SET status='interrupted' WHERE status IN ('queued','running')")
 
     def _conn(self):
         conn = getattr(self._local, "conn", None)
@@ -265,15 +306,22 @@ def _make_job_event(job):
     }
 
 
-def sse_job_stream(store, job_id, timeout=1800):
+def sse_job_stream(store, job_id, timeout=1800, stop=None):
     """Generator yielding SSE events when the job's revision changes.
     Heartbeat comments every ~15s so disconnected clients are detected on
-    the next failed write instead of lingering for the full timeout."""
+    the next failed write instead of lingering for the full timeout.
+
+    `stop` (threading.Event, default telemetry's process-wide SHUTDOWN)
+    ends the stream between polls so app shutdown never waits on an open
+    job stream."""
+    if stop is None:
+        from . import telemetry
+        stop = telemetry.SHUTDOWN
     last_rev = -1
     idle = 0
     deadline = time.time() + timeout
     try:
-        while time.time() < deadline:
+        while time.time() < deadline and not stop.is_set():
             job = store.get(job_id)
             if not job:
                 yield f"data: {json.dumps({'status': 'not_found'})}\n\n"
@@ -290,7 +338,8 @@ def sse_job_stream(store, job_id, timeout=1800):
                 if idle >= 15:
                     idle = 0
                     yield ": heartbeat\n\n"
-            time.sleep(1)
+            if stop.wait(1):
+                return
     except (GeneratorExit, BrokenPipeError, ConnectionResetError):
         return
 

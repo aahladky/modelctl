@@ -82,7 +82,7 @@ function ModelRowView({ m, spark, stale }:
     <tr class="rowlink"
         onClick={(e) => {
           if ((e.target as HTMLElement).closest("button")) return;
-          location.href = `/profiles/${encodeURIComponent(m.name)}`;
+          location.href = `/v2/models/${encodeURIComponent(m.name)}`;
         }}>
       <td>
         {m.name}
@@ -238,7 +238,7 @@ export function Operate() {
       <div class={wcls}>
         <h2>resident models</h2>
         {models.length === 0
-          ? <p class="sub">no profiles registered yet — <a href="/add">add a model</a></p>
+          ? <p class="sub">no profiles registered yet — <a href="/v2/add">add a model</a></p>
           : (
             <table>
               <thead>

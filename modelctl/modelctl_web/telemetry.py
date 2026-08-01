@@ -15,11 +15,24 @@ what it last did.
 """
 import json
 import re
+import threading
 import time
 import urllib.request
 
 MOE_METRIC_RE = re.compile(r"llamacpp:moe_cache_(\w+)(\{[^}]*\})?\s+(\S+)")
 DEVICE_LABEL_RE = re.compile(r'device="([^"]*)"')
+
+# Process-wide shutdown signal for every SSE generator. Open event
+# streams otherwise outlive a SIGTERM (uvicorn waits for in-flight
+# responses to drain, and a tick loop never drains on its own), so a
+# graceful restart of the console hung until systemd's SIGKILL.
+# __main__ sets this from uvicorn's exit handler; generators treat it as
+# "finish this iteration and end the response".
+SHUTDOWN = threading.Event()
+
+
+def request_shutdown():
+    SHUTDOWN.set()
 
 
 def read_meminfo(path="/proc/meminfo"):
@@ -345,15 +358,21 @@ class TelemetryCollector:
                 "ram": ram, "models": models, "jobs": jobs}
 
 
-def sse_stream(collector, interval=2.0, max_seconds=3600):
+def sse_stream(collector, interval=2.0, max_seconds=3600, stop=None):
     """SSE generator: one `tick` event per interval. Bounded lifetime so a
     forgotten tab reconnects rather than pinning a thread forever (the
-    client's EventSource reconnect handles the cut invisibly)."""
+    client's EventSource reconnect handles the cut invisibly).
+
+    `stop` (threading.Event, default the module-wide SHUTDOWN) ends the
+    stream between ticks; the wait doubles as the tick sleep, so a
+    shutdown interrupts the pause instead of riding it out."""
+    stop = SHUTDOWN if stop is None else stop
     deadline = time.time() + max_seconds
     try:
-        while time.time() < deadline:
+        while time.time() < deadline and not stop.is_set():
             snap = collector.snapshot()
             yield f"event: tick\ndata: {json.dumps(snap)}\n\n"
-            time.sleep(interval)
+            if stop.wait(interval):
+                return
     except (GeneratorExit, BrokenPipeError, ConnectionResetError):
         return

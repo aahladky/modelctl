@@ -1,4 +1,4 @@
-import { LocationProvider, Router, Route, useLocation } from "preact-iso";
+import { LocationProvider, Router, Route, useLocation, useRoute } from "preact-iso";
 import type { ComponentChildren } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { effectiveTheme, onSystemThemeChange, toggleTheme } from "./theme";
@@ -6,6 +6,10 @@ import { useStream } from "./lib/stream";
 import { ToastHost } from "./lib/toasts";
 import { Operate } from "./pages/operate";
 import { Jobs } from "./pages/jobs";
+import { Models } from "./pages/models";
+import { Model } from "./pages/model";
+import { Add } from "./pages/add";
+import { Wizard } from "./pages/wizard";
 
 function ThemeButton() {
   const [, bump] = useState(0);
@@ -28,18 +32,19 @@ function Side() {
   const { tick } = useStream();
   const running = tick ? tick.jobs.filter((j) => j.status === "running").length : 0;
   const here = (p: string) => (path === p ? "item here" : "item");
+  const under = (p: string) =>
+    (path === p || path.startsWith(p + "/") ? "item here" : "item");
   return (
     <aside class="side">
       <div class="brand">modelctl</div>
       <a class={here("/v2/")} href="/v2/">▣ operate</a>
-      {/* model hub / add / settings still live in the old console until
-          their phases land -- plain hrefs leave the SPA on purpose */}
-      <a class="item" href="/">◇ model hub</a>
-      <a class="item" href="/add">＋ add</a>
+      <a class={under("/v2/models")} href="/v2/models">◇ model hub</a>
+      <a class={under("/v2/add")} href="/v2/add">＋ add</a>
       <a class={here("/v2/jobs")} href="/v2/jobs">
         ≡ jobs{running > 0 && <span class="badge">{running}</span>}
       </a>
       <span class="spacer"></span>
+      {/* settings lands in phase 3 -- a plain href into the old console */}
       <a class="item" href="/settings">⚙ settings</a>
       <a class="item" href="/logout">← logout</a>
     </aside>
@@ -76,6 +81,27 @@ function Shell({ title, live, children }:
   );
 }
 
+function ModelShell() {
+  // preact-iso already URL-decodes params.
+  const { params } = useRoute();
+  const name = params.name ?? "";
+  return (
+    <Shell title={`model hub · ${name}`} live="telemetry live">
+      <Model name={name} />
+    </Shell>
+  );
+}
+
+function WizardShell() {
+  const { params } = useRoute();
+  const id = params.id ?? "";
+  return (
+    <Shell title="add model" live="wizard live">
+      <Wizard id={id} />
+    </Shell>
+  );
+}
+
 export function App() {
   return (
     <LocationProvider scope="/v2">
@@ -87,6 +113,14 @@ export function App() {
         <Route path="/v2/jobs" component={() => (
           <Shell title="jobs" live="job stream live"><Jobs /></Shell>
         )} />
+        <Route path="/v2/models" component={() => (
+          <Shell title="model hub" live="telemetry live"><Models /></Shell>
+        )} />
+        <Route path="/v2/models/:name" component={ModelShell} />
+        <Route path="/v2/add" component={() => (
+          <Shell title="add model" live="wizard live"><Add /></Shell>
+        )} />
+        <Route path="/v2/add/:id" component={WizardShell} />
         <Route default component={() => (
           <Shell title="not found" live="">
             <div class="widget">

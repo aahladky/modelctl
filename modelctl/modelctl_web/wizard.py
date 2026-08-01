@@ -222,7 +222,17 @@ class WizardStore:
         return self.base_dir / f"{wizard_id}.json"
 
     def save(self, state: WizardState):
-        """Persist wizard state to disk."""
+        """Persist wizard state to disk.
+
+        A scratch-safe instance sharing the live state dir must not
+        rewrite the live console's wizard files -- several GET handlers
+        save opportunistic refreshes, and those writes would race the
+        live service (and resurrect stale wizards by bumping
+        updated_at). The guard makes every such save a no-op; a scratch
+        instance with the full env redirection writes normally."""
+        from .jobs import scratch_write_blocked
+        if scratch_write_blocked():
+            return
         state.updated_at = time.time()
         modelctl_fsutil.atomic_write_text(
             self._path(state.wizard_id),
@@ -240,6 +250,9 @@ class WizardStore:
 
     def delete(self, wizard_id: str):
         """Remove wizard state."""
+        from .jobs import scratch_write_blocked
+        if scratch_write_blocked():
+            return
         path = self._path(wizard_id)
         if path.exists():
             path.unlink()
