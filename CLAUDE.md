@@ -15,3 +15,6 @@ sessions.
   on this hardware.
 - One pass: do the scoped task, print a plain summary of what you did
   and measured as your final output, and stop. No questions mid-run.
+- Outside the llama.cpp submodule, every session ends with all work
+  committed to master and any scratch branches or worktrees removed —
+  nothing is ever parked. The fork keeps normal branch discipline.
