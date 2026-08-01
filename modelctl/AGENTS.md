@@ -61,6 +61,12 @@ Or run a single test file:
 
 The suite is stdlib `unittest`; data fixtures live in `tests/fixtures/`.
 Web tests use FastAPI's `TestClient` with mocked modelctl state.
+`test__hermeticity.py` deliberately sorts first: it redirects
+`MODELCTL_HOME` to a throwaway dir and empties the llama-server discovery
+globs before any other test module imports modelctl, so the suite can
+never write the real `~/.local/share/modelctl` or probe (and crash) the
+real SYCL builds. Don't rename it, and keep new test files isolating
+their own state too -- single-file runs bypass the bootstrap.
 Hardware/reproduction scripts outside the unit suite are documented
 where they live (`docs/runtime/`).
 

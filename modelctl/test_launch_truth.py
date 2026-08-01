@@ -93,17 +93,29 @@ class LaunchTruthBase(unittest.TestCase):
             self.profile["moe_cache"] = self.moe_cache
         (self.profiles_dir / "m1.json").write_text(json.dumps(self.profile))
 
-        # The probe caches by binary content hash; a stale entry from another
-        # test's fake binary would defeat the point of using a real one.
-        modelctl_capabilities.clear_cache()
-        self.addCleanup(modelctl_capabilities.clear_cache)
-
         caps_dir = root / "capabilities"
+        no_binaries = str(root / "no-binaries" / "*")
         for p in (mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir),
                   mock.patch.object(modelctl_capabilities, "CAPABILITIES_DIR",
-                                    caps_dir)):
+                                    caps_dir),
+                  # Hardware fingerprints and preflight auto-fix sweep these
+                  # globs and probe whatever they find. On this box that
+                  # means the real SYCL builds, which SIGABRT bare-env; the
+                  # only binary these tests may execute is self.binary.
+                  mock.patch.object(modelctl, "COMMON_LLAMA_SERVER_GLOBS",
+                                    [no_binaries]),
+                  mock.patch.object(modelctl, "COMMON_ENV_SCRIPT_GLOBS",
+                                    [no_binaries])):
             p.start()
             self.addCleanup(p.stop)
+
+        # The probe caches by binary content hash; a stale entry from another
+        # test's fake binary would defeat the point of using a real one.
+        # Both clears must run inside the CAPABILITIES_DIR patch (cleanups
+        # are LIFO), or they delete the REAL probe cache -- which is exactly
+        # what this setUp used to do on every test.
+        modelctl_capabilities.clear_cache()
+        self.addCleanup(modelctl_capabilities.clear_cache)
 
     def web_client(self):
         store = JobStore(Path(self.tmp.name) / "jobs.db")

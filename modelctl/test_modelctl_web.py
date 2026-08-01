@@ -9,6 +9,7 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 import modelctl
+import modelctl_runtime
 from modelctl_web.app import create_app
 from modelctl_web.jobs import JobStore, JobRunner
 
@@ -38,12 +39,45 @@ class WebTestBase(unittest.TestCase):
         app = create_app(token=TOKEN, store=store, runner=runner)
         self.client = TestClient(app)
         self.auth = {"Authorization": f"Bearer {TOKEN}"}
+        # Endpoints construct RuntimeDB() with its default path, which is
+        # the real ~/.local/share/modelctl/runtime.db -- that is how test
+        # plan-run rows (m1/p1) leaked into production plan history.
+        # Redirect default constructions into this test's tmp dir while
+        # still honoring an explicit db_path.
+        self.runtime_db_path = Path(self.tmp.name) / "runtime.db"
+        real_runtime_db = modelctl_runtime.RuntimeDB
+
+        def _redirected_runtime_db(db_path=None):
+            return real_runtime_db(db_path=db_path or self.runtime_db_path)
+
+        # Setup banners and plan pages sweep these globs and probe what
+        # they find; keep single-file runs off the real llama.cpp builds
+        # (the full suite already empties them via test__hermeticity).
+        no_binaries = str(Path(self.tmp.name) / "no-binaries" / "*")
         self.patches = [
             mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir),
+            mock.patch.object(modelctl_runtime, "RuntimeDB",
+                              _redirected_runtime_db),
+            mock.patch.object(modelctl, "COMMON_LLAMA_SERVER_GLOBS",
+                              [no_binaries]),
+            mock.patch.object(modelctl, "COMMON_ENV_SCRIPT_GLOBS",
+                              [no_binaries]),
         ]
         for p in self.patches:
             p.start()
             self.addCleanup(p.stop)
+
+    def resolvable_backend(self):
+        """Make the setup probe see a runnable llama-server, so first_run
+        stays False and the dashboard renders profiles. Without this the
+        dashboard tests only passed on machines that happened to have a
+        real llama.cpp build for the candidate sweep to find."""
+        binary = Path(self.tmp.name) / "llama-server"
+        binary.write_text("#!/bin/sh\nexit 1\n")
+        binary.chmod(0o755)
+        return mock.patch.multiple(modelctl,
+                                   LLAMA_SERVER_BIN=str(binary),
+                                   find_llama_server_candidates=lambda: [])
 
     def wait_job(self, job_id, timeout=10):
         deadline = time.time() + timeout
@@ -100,7 +134,8 @@ class TestProfilesApi(WebTestBase):
 
     def test_dashboard_renders(self):
         with mock.patch.object(modelctl, "get_gpu_inventory", return_value=[]), \
-             mock.patch("modelctl_web.app._fetch_json", return_value=None):
+             mock.patch("modelctl_web.app._fetch_json", return_value=None), \
+             self.resolvable_backend():
             resp = self.client.get("/", headers=self.auth)
         self.assertEqual(resp.status_code, 200)
         self.assertIn("m1", resp.text)
@@ -244,7 +279,7 @@ class TestRuntimeApi(WebTestBase):
     def test_dashboard_shows_runtime_state(self):
         with mock.patch.object(modelctl, "get_gpu_inventory", return_value=[]), \
              mock.patch("modelctl_web.app._fetch_json", return_value=None), \
-             self._mock_runtime():
+             self._mock_runtime(), self.resolvable_backend():
             resp = self.client.get("/", headers=self.auth)
         self.assertEqual(resp.status_code, 200)
         self.assertIn("m1", resp.text)
@@ -911,13 +946,20 @@ class TestPlanTesting(WebTestBase):
         at.assert_called_once()
 
     def test_history_endpoint(self):
-        import modelctl_runtime
+        # WebTestBase redirects default RuntimeDB() paths into self.tmp,
+        # so this writes where the endpoint reads -- and nowhere else.
         rdb = modelctl_runtime.RuntimeDB()
+        self.assertEqual(Path(rdb.db_path), self.runtime_db_path,
+                         "test wrote plan runs to the real runtime.db")
         rdb.record_plan_run({"profile_name": "m1", "plan_id": "p1",
                              "success": True, "generation_tps": 42.0})
         resp = self.client.get("/api/profiles/m1/history", headers=self.auth)
         self.assertEqual(resp.status_code, 200)
-        self.assertTrue(any(r["generation_tps"] == 42.0 for r in resp.json()))
+        rows = resp.json()
+        # Exactly the one row written above: an isolated store makes the
+        # count assertable, and a leak to shared state fails loudly here.
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["generation_tps"], 42.0)
 
 
 class TestManagedMatrix(unittest.TestCase):
