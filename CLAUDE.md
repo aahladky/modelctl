@@ -17,8 +17,12 @@ fullest extent reasonably possible."
 In practice: the web console is the primary interface — the CLI exists
 for bootstrap and agents, not for Aaron. A failure should end in a
 diagnosis and an offered fix on screen, never in a terminal archaeology
-session. And "reasonably possible" means performance work serves this
-mission; it is not the mission.
+session. "Reasonably possible" caps expectations, not effort: don't
+expect 10-20 tok/s from an SSD-bound model, but if research or
+community experience shows an optimization for RAM/SSD-bound serving
+works, build it — no artificial development gates, no self-imposed
+testing barriers. Tests verify what got built; they don't decide
+whether to build it.
 
 ## Things that prevent expensive repeat mistakes
 

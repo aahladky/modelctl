@@ -21,7 +21,8 @@ P3 — offline predictor study (Python only, needs P2's traces): implement
 the ETH pre-attention linear probe (arXiv 2511.10676), measure top-k
 recall vs the real router on laguna + a Qwen3.5-MoE, compare against a
 simple "reuse last token's experts" baseline. Write the recall table up
-for Aaron; roughly 90%+ means prefetch is worth building for that model.
+for Aaron. The study picks WHICH predictor drives prefetch, not whether
+prefetch gets built — it does (P12).
 
 P4 — reorder same-expert tokens to compute contiguously in the
 prefill/batch path (idea from arXiv 2511.14102). Outputs must stay
@@ -45,8 +46,8 @@ a laguna benchmark with raw numbers for Aaron; the hope is beating
 14.2 tok/s by a decent margin.
 
 P8 — the B580's cache never engages (scheduler picks the first capable
-backend). After P7: either fix it or rip out the dead config, with a
-short written reason either way.
+backend). Fix it or rip out the dead config, with a short written
+reason either way. Doesn't have to wait for P7.
 
 P9 — batch "ticket" mode in modelctl: submit a prompt file as a job
 against the SSD-tier model, results + stats land in a directory.
@@ -59,6 +60,23 @@ P11 — console overhaul. First: teardown + proposed layout + 2-3 HTML
 mockup directions (IN PROGRESS, session running; brief has the
 details). Then: build a route-walk/wizard/cancel test harness BEFORE
 restructuring, then restructure.
+
+P12 — build prefetch into the fork (the moe_cache_prefetch capability):
+asynchronously stage predicted experts so transfer overlaps compute.
+Predictor = P3's winner; fall back to "reuse last token's experts" for
+models without a trained probe. Literature: ETH probe 93-97% accuracy
+(arXiv 2511.10676), ProMoE ~2x decode (2410.22134). Report hit-rate and
+throughput numbers raw.
+
+P13 — pinned-RAM tier-2 backing store + double-buffered async H2D
+staging, per llama.cpp #20757's design (tinyserve PoC: 12-14 tok/s on
+an 8GB GPU for GPT-OSS-120B). Misses copy from pinned memory
+overlapping GPU compute instead of pageable mmap. Directly targets
+RAM/SSD-bound serving.
+
+P14 — mixed-precision expert tiers (HOBBIT, arXiv 2411.01433, up to
+9.93x decode reported): cold experts stored/served at lower precision,
+hot experts at full quant. Report speed AND output-quality numbers raw.
 
 ## Questions for Aaron
 
