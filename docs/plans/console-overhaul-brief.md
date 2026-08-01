@@ -17,8 +17,11 @@ and app.py's monolith coupling.
 
 ## Owner defaults (inferred from project philosophy; strike to amend)
 
-- No node toolchain, no build step, no SPA framework. Server-rendered
-  + htmx stays.
+- Stack is an open design variable (owner ruling 2026-08-01): new
+  stacks may be proposed, including ones with a build step. The judge
+  is the homelab philosophy — single service, low maintenance
+  overhead, still buildable in a year, no churn for churn's sake —
+  applied as evaluation criteria, not as a veto.
 - Single service, single token, one CSS file (can be a good one).
 - Every page must render useful degraded states when subsystems are
   down (llama-swap absent, fork not built, GPU missing) — error
@@ -30,18 +33,24 @@ and app.py's monolith coupling.
 - No churn for its own sake: keep JobRunner write-serialization and
   the auth model unless the teardown finds concrete rot.
 
-## Owner inputs (TBD — if still TBD when P11a runs, adopt the stated
-default and say so in the memo)
+## Owner inputs (answered 2026-08-01)
 
-- Q1 biggest pain: TBD. Default: fragile flows (wizard/jobs) first,
-  then IA, then visual.
-- Q2 posture: TBD. Default: evolve in place on the current stack
-  (routers per domain + view-model layer); clean rebuild only if the
-  teardown finds the foundation unsalvageable.
-- Q3 Sunday-review surface (backlog status, evidence links, decision
-  inbox, staging summary as a console section): TBD. Default:
-  yes, core goal — the console becomes the weekly review surface as
-  well as the runtime console.
+- Q1 biggest pain: ALL OF IT — flows, IA, and visual are each real
+  pain. Do not sequence one and quietly defer the rest; the mandate is
+  comprehensive, and the mockups carry real weight.
+- Q2 posture: OPEN TO A NEW STACK. Present at least one direction on
+  the current stack (evolve or clean rebuild) and at least one
+  new-stack direction, each scored against the philosophy criteria
+  above (maintenance burden, single service, year-later
+  buildability). Recommendation goes in the decision memo; owner
+  picks.
+- Q3 weekly-review surface: YES, CORE GOAL. The console is both the
+  runtime console and the owner's weekly review surface: BACKLOG
+  status, evidence browser, decisions inbox, staging/promotion
+  summary. Candidate feature for P11a to design: answering decision
+  memos inline from the console (writes the answer into the memo file
+  and appends an Owner precedent to CLAUDE.md), collapsing the weekly
+  sitting into one page.
 
 ## Success criteria for the overhaul (all phases)
 
@@ -55,7 +64,9 @@ default and say so in the memo)
 ## P11a deliverables
 
 Teardown memo (keep/kill/restructure per module), proposed IA/page
-map, 2–3 static HTML mockup directions in
-docs/plans/evidence/console-mockups/ (shell + one data-dense page +
-one wizard step each; openable directly in a browser), phased
-migration plan, decision memo with a recommendation.
+map covering both domains (runtime ops + weekly review), 2–3 static
+HTML mockup directions in docs/plans/evidence/console-mockups/ (shell
++ one data-dense page + one wizard step each; openable directly in a
+browser) — at least one direction on the current stack and one
+assuming a new stack — phased migration plan per direction, decision
+memo with a recommendation.

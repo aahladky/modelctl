@@ -95,3 +95,7 @@ sitting over `staging`; (c) items tagged needs-hands in BACKLOG.
 ## Owner precedents
 - 2026-08-01: SSD tier stays active, batch-first, not held to the
   interactive bar (landscape doc RQ6).
+- 2026-08-01: Console overhaul mandate is comprehensive (flows + IA +
+  visual all in scope); stack is an open variable judged by the
+  maintenance philosophy; the weekly-review surface is a core console
+  goal (see docs/plans/console-overhaul-brief.md).

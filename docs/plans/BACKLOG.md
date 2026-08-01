@@ -142,9 +142,8 @@ Log:
 
 ## P11a — console overhaul: teardown, IA, and design directions
 Status: ready
-Autonomy: memo + mockups only; if Owner inputs in
-docs/plans/console-overhaul-brief.md are TBD, adopt its defaults and
-note that in the memo
+Autonomy: memo + mockups only; Owner inputs in
+docs/plans/console-overhaul-brief.md are answered — honor them
 Spec: read the brief, the 2026-07-31/08-01 audit trail in
 docs/upstream-sync/, and modelctl_web/. Deliver everything under "P11a
 deliverables" in the brief, ending in a decision memo with a
