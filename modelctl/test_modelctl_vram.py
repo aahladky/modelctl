@@ -8,18 +8,22 @@ from unittest import mock
 import modelctl_vram
 
 
-def gguf_bytes(kvs, version=3, magic=b"GGUF"):
-    """Build a minimal GGUF file: header + metadata KVs, zero tensors.
+def gguf_bytes(kvs, version=3, magic=b"GGUF", tensors=()):
+    """Build a minimal GGUF file: header + metadata KVs + tensor infos.
 
     kvs: dict of key -> (type_id, value). Supported type_ids here:
     4=uint32, 8=string, 9=array-of-uint32 (value = list of ints),
     10=uint64.
+    tensors: iterable of (name, ggml_type_id, dims) infos (no data payload
+    -- the readers under test only parse the info table).
     """
     def s(text):
         b = text.encode()
         return struct.pack("<Q", len(b)) + b
 
-    out = [magic, struct.pack("<I", version), struct.pack("<QQ", 0, len(kvs))]
+    tensors = list(tensors)
+    out = [magic, struct.pack("<I", version),
+           struct.pack("<QQ", len(tensors), len(kvs))]
     for key, (type_id, value) in kvs.items():
         out.append(s(key))
         out.append(struct.pack("<I", type_id))
@@ -34,7 +38,42 @@ def gguf_bytes(kvs, version=3, magic=b"GGUF"):
             out.append(struct.pack("<Q", value))
         else:
             raise AssertionError(f"fixture doesn't support type {type_id}")
+    for name, type_id, dims in tensors:
+        out.append(s(name))
+        out.append(struct.pack("<I", len(dims)))
+        out.extend(struct.pack("<Q", d) for d in dims)
+        out.append(struct.pack("<I", type_id))
+        out.append(struct.pack("<Q", 0))  # data offset -- unread
     return b"".join(out)
+
+
+class TestGgufModelLayout(unittest.TestCase):
+    def _layout(self, tensors):
+        kvs = {"general.architecture": (8, "testmoe"),
+               "testmoe.block_count": (4, 2)}
+        with TemporaryDirectory() as td:
+            path = Path(td) / "model.gguf"
+            path.write_bytes(gguf_bytes(kvs, tensors=tensors))
+            return modelctl_vram.gguf_model_layout(str(path))
+
+    def test_shexp_is_non_expert_and_sets_flag(self):
+        # F32 (type 0) keeps the byte math trivial: 4 bytes per element.
+        layout = self._layout([
+            ("blk.0.ffn_gate_exps.weight", 0, (32, 32)),
+            ("blk.0.ffn_gate_shexp.weight", 0, (32, 16)),
+            ("blk.0.ffn_gate_inp_shexp.weight", 0, (16,)),
+        ])
+        self.assertTrue(layout["is_moe"])
+        self.assertTrue(layout["has_shexp"])
+        # shexp bytes stay in the non-expert (GPU-resident) set
+        self.assertEqual(layout["expert_bytes_per_layer"], {0: 32 * 32 * 4})
+        self.assertEqual(layout["non_expert_bytes"], (32 * 16 + 16) * 4)
+
+    def test_plain_moe_has_no_shexp_flag(self):
+        layout = self._layout([("blk.0.ffn_gate_exps.weight", 0, (8, 8)),
+                               ("blk.0.attn_q.weight", 0, (8, 8))])
+        self.assertTrue(layout["is_moe"])
+        self.assertFalse(layout["has_shexp"])
 
 
 class TestReadGgufKvMetadata(unittest.TestCase):

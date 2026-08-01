@@ -1,4 +1,5 @@
 import re
+import shlex
 import unittest
 from pathlib import Path
 
@@ -14,15 +15,42 @@ B580 = {"device": "SYCL1", "name": "Intel(R) Arc(TM) B580 Graphics",
 INVENTORY = [B70, B580]
 
 
-def moe_layout(n_layers, per_layer_gib, non_expert_gib=4.0, arch="testmoe"):
-    layers = {i: int(per_layer_gib * GIB) for i in range(1, n_layers + 1)}
-    meta = {"general.architecture": arch, f"{arch}.block_count": n_layers + 1}
+def moe_layout(n_layers, per_layer_gib, non_expert_gib=4.0, arch="testmoe",
+               first_layer=1, has_shexp=False):
+    layers = {i: int(per_layer_gib * GIB)
+              for i in range(first_layer, first_layer + n_layers)}
+    block_count = first_layer + n_layers
+    meta = {"general.architecture": arch, f"{arch}.block_count": block_count}
     weights = sum(layers.values()) + int(non_expert_gib * GIB)
-    return {"arch": arch, "meta": meta, "block_count": n_layers + 1,
+    return {"arch": arch, "meta": meta, "block_count": block_count,
             "is_moe": True, "weight_bytes": weights,
             "non_expert_bytes": int(non_expert_gib * GIB),
             "other_bytes": GIB, "layer_bytes": int((non_expert_gib - 1) * GIB),
-            "expert_bytes_per_layer": layers, "unknown_type_tensors": 0}
+            "expert_bytes_per_layer": layers, "has_shexp": has_shexp,
+            "unknown_type_tensors": 0}
+
+
+def ot_rules(extra):
+    """The -ot rules of an extra-flags string as [(pattern, target)], in
+    order, after shlex processing (what llama-server actually receives)."""
+    toks = shlex.split(extra)
+    rules = []
+    for i, tok in enumerate(toks):
+        if tok == "-ot" and i + 1 < len(toks):
+            for part in toks[i + 1].split(","):
+                pattern, _, target = part.rpartition("=")
+                rules.append((pattern, target))
+    return rules
+
+
+def ot_first_match(extra, tensor_name):
+    """Mimic llama.cpp --override-tensor: the first rule (in flag order)
+    whose regex search-matches the tensor name decides its placement;
+    None means no override (default layer-split placement)."""
+    for pattern, target in ot_rules(extra):
+        if re.search(pattern, tensor_name):
+            return target
+    return None
 
 
 def dense_layout(n_layers, per_layer_gib, other_gib=2.0, arch="testdense"):
@@ -190,6 +218,118 @@ class TestPlanTiers(unittest.TestCase):
     def test_none_on_empty_layout(self):
         self.assertIsNone(modelctl_tiers.plan_tiers(
             profile(), INVENTORY, 90, "SYCL0", layout=None))
+
+
+class TestP5PinRules(unittest.TestCase):
+    """P5 hard rule (landscape RQ7): shared experts and leading dense
+    layers are pinned to a GPU by explicit -ot rules; only routed experts
+    (_exps) ever flow to the CPU/offload tiers."""
+
+    def _plan(self, layout, ram_gib=25, ctx=8192):
+        return modelctl_tiers.plan_tiers(
+            profile(ctx=ctx), INVENTORY, 90, "SYCL0",
+            ram_available=ram_gib * GIB, layout=layout)
+
+    def test_shexp_always_pinned_to_a_gpu(self):
+        extra = self._plan(moe_layout(48, 1.1, first_layer=0,
+                                      has_shexp=True))["config"]["extra"]
+        for layer in (0, 19, 20, 25, 26, 47):  # GPU- and CPU-expert layers
+            for stem in ("ffn_gate_shexp", "ffn_up_shexp",
+                         "ffn_down_shexp", "ffn_gate_inp_shexp"):
+                target = ot_first_match(extra, f"blk.{layer}.{stem}.weight")
+                self.assertIn(target, ("SYCL0", "SYCL1"),
+                              f"blk.{layer}.{stem} must be pinned to a GPU")
+
+    def test_routed_experts_still_flow_to_tiers(self):
+        extra = self._plan(moe_layout(48, 1.1, first_layer=0,
+                                      has_shexp=True))["config"]["extra"]
+        # per the greedy assignment: 0-19 -> SYCL0, 20-25 -> SYCL1, rest CPU
+        self.assertEqual(
+            ot_first_match(extra, "blk.0.ffn_gate_exps.weight"), "SYCL0")
+        self.assertEqual(
+            ot_first_match(extra, "blk.25.ffn_up_exps.weight"), "SYCL1")
+        self.assertEqual(
+            ot_first_match(extra, "blk.40.ffn_down_exps.weight"), "CPU")
+
+    def test_dense_leading_layers_pinned_to_primary(self):
+        # DeepSeek/GLM pattern: blk.0-2 dense, experts from blk.3
+        extra = self._plan(moe_layout(61, 2.9, first_layer=3, has_shexp=True),
+                           ctx=4096)["config"]["extra"]
+        for layer in (0, 1, 2):
+            for stem in ("ffn_gate", "ffn_up", "ffn_down", "ffn_norm"):
+                self.assertEqual(
+                    ot_first_match(extra, f"blk.{layer}.{stem}.weight"),
+                    "SYCL0", f"dense blk.{layer}.{stem} must pin to primary")
+        # the [0-2] range must not swallow two-digit layers (blk.20 etc.)
+        self.assertEqual(
+            ot_first_match(extra, "blk.20.ffn_gate_exps.weight"), "CPU")
+
+    def test_no_shexp_rules_without_shexp(self):
+        extra = self._plan(moe_layout(47, 1.1))["config"]["extra"]
+        self.assertNotIn("_shexp", extra)
+
+    def test_no_dense_pin_when_experts_start_at_layer_zero(self):
+        extra = self._plan(moe_layout(48, 1.1, first_layer=0,
+                                      has_shexp=True))["config"]["extra"]
+        self.assertFalse(
+            any(p.endswith("ffn_.*") for p, _ in ot_rules(extra)),
+            "no dense-leading pin expected when every layer routes")
+
+    def test_pins_precede_expert_rules(self):
+        extra = self._plan(moe_layout(61, 2.9, first_layer=3, has_shexp=True),
+                           ctx=4096)["config"]["extra"]
+        rules = ot_rules(extra)
+        kinds = ["dense" if p.endswith("ffn_.*")
+                 else "shexp" if p.endswith("_shexp")
+                 else "exps" for p, _ in rules]
+        self.assertEqual(kinds, sorted(
+            kinds, key=["dense", "shexp", "exps"].index),
+            "pin rules must come before routed-expert rules")
+        self.assertEqual(rules[-1], ("ffn_.*_exps", "CPU"))
+
+
+class TestP5PlacementSnapshots(unittest.TestCase):
+    """Frozen planner output for the affected MoE profiles.
+
+    Hermetic mirrors: tests never read the real GGUFs, so each snapshot
+    runs on a synthetic layout encoding the profile's documented shape --
+    laguna-s2.1 (qwen35moe pattern: shexp, MoE from layer 0, RAM-resident
+    tier 3) and ornith-397b (DeepSeek pattern: shexp + dense blk.0-2,
+    SSD tier 4). Any intended planner change must re-freeze these."""
+
+    def test_laguna_class_snapshot(self):
+        plan = modelctl_tiers.plan_tiers(
+            profile(ctx=8192), INVENTORY, 90, "SYCL0",
+            ram_available=31 * GIB,
+            layout=moe_layout(48, 1.1, first_layer=0, has_shexp=True))
+        self.assertEqual(plan["tier"], 3)
+        self.assertEqual(plan["warnings"], [])
+        self.assertEqual(plan["config"], {
+            "device": "", "split_mode": "layer", "tensor_split": "8,3",
+            "extra": r"--fit off --device SYCL0,SYCL1 "
+                     r"-ot blk\\.(?:[0-9]|1[0-9])\\.ffn_.*_shexp=SYCL0,"
+                     r"blk\\.2[0-5]\\.ffn_.*_shexp=SYCL1,"
+                     r"ffn_.*_shexp=SYCL0,"
+                     r"blk\\.(?:[0-9]|1[0-9])\\.ffn_.*_exps=SYCL0,"
+                     r"blk\\.2[0-5]\\.ffn_.*_exps=SYCL1,"
+                     r"ffn_.*_exps=CPU --no-mmap"})
+
+    def test_ornith_class_snapshot(self):
+        plan = modelctl_tiers.plan_tiers(
+            profile(ctx=4096), INVENTORY, 90, "SYCL0",
+            ram_available=25 * GIB,
+            layout=moe_layout(61, 2.9, first_layer=3, has_shexp=True))
+        self.assertEqual(plan["tier"], 4)
+        self.assertEqual(plan["config"], {
+            "device": "", "split_mode": "layer", "tensor_split": "8,3",
+            "extra": r"--fit off --device SYCL0,SYCL1 "
+                     r"-ot blk\\.[0-2]\\.ffn_.*=SYCL0,"
+                     r"blk\\.[3-9]\\.ffn_.*_shexp=SYCL0,"
+                     r"blk\\.1[0-1]\\.ffn_.*_shexp=SYCL1,"
+                     r"ffn_.*_shexp=SYCL0,"
+                     r"blk\\.[3-9]\\.ffn_.*_exps=SYCL0,"
+                     r"blk\\.1[0-1]\\.ffn_.*_exps=SYCL1,"
+                     r"ffn_.*_exps=CPU"})
 
 
 if __name__ == "__main__":

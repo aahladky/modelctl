@@ -451,6 +451,12 @@ GGML_TYPE_BLOCK = {
 # the non-expert/GPU-resident set.
 _EXPERT_RE = re.compile(r"^blk\.(\d+)\.ffn_.*_exps\.weight$")
 
+# Shared-expert tensors (ffn_gate_shexp / ffn_up_shexp / ffn_down_shexp /
+# ffn_gate_inp_shexp). Bytes stay in the non-expert set; the flag lets the
+# tier planner pin them to a GPU explicitly instead of relying on the CPU
+# catch-all happening not to match.
+_SHEXP_RE = re.compile(r"^blk\.\d+\.ffn_.*_shexp\.weight$")
+
 # Repeating (per-layer) tensors of any kind, for dense per-layer byte math.
 _LAYER_TENSOR_RE = re.compile(r"^blk\.(\d+)\.")
 
@@ -503,12 +509,14 @@ def gguf_model_layout(model_path):
       other_bytes            -- non-expert, non-layer tensors (embd/output)
       layer_bytes            -- non-expert bytes inside blk.N.* (dense FFN etc.)
       expert_bytes_per_layer -- {layer_index: bytes} for routed experts
+      has_shexp              -- True when shared-expert (_shexp) tensors exist
       unknown_type_tensors   -- count of tensors skipped (unlisted quant type)
     """
     meta = {}
     total = non_expert = other = layer_non_expert = 0
     expert = {}
     unknown = 0
+    has_shexp = False
     saw_tensors = False
     for shard in _shard_paths(model_path):
         shard_meta, tensors = read_gguf_tensors(shard)
@@ -529,6 +537,8 @@ def gguf_model_layout(model_path):
                 expert[layer] = expert.get(layer, 0) + nbytes
             else:
                 non_expert += nbytes
+                if _SHEXP_RE.match(name):
+                    has_shexp = True
                 if _LAYER_TENSOR_RE.match(name):
                     layer_non_expert += nbytes
                 else:
@@ -542,6 +552,7 @@ def gguf_model_layout(model_path):
             "non_expert_bytes": non_expert, "other_bytes": other,
             "layer_bytes": layer_non_expert,
             "expert_bytes_per_layer": expert,
+            "has_shexp": has_shexp,
             "unknown_type_tensors": unknown}
 
 
