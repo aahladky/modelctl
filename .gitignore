@@ -1,5 +1,7 @@
 *.pyc
 __pycache__/
+.pytest_cache/
+*.tmp
 .venv/
 .worktrees/
 # secrets
