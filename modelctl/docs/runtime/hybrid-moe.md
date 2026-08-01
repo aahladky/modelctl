@@ -27,12 +27,26 @@ miss is staged host→device as usual (the transfer-cache path, see
   unstaged regions.
 - GPU rows (cache hits and staged experts) are queued asynchronously on
   the device's in-order queue.
-- The CPU tier (`moe_cpu_execute_gemvs` in `moe-hybrid.cpp`, threaded
-  over contiguous chunks, bit-identical to sequential execution)
-  computes the skipped experts' rows **while the GPU works**, using
-  ggml-base's dequantizer (`ggml_get_type_traits()->to_float`) plus an
-  f32 dot. It cannot reach ggml-cpu's optimized vec_dot kernels from
-  the SYCL backend (see "Not implemented").
+- The CPU tier (`moe_cpu_execute_gemvs` in `moe-hybrid.cpp`) computes
+  the skipped experts' rows **while the GPU works**, through
+  ggml-cpu's quantized `vec_dot` kernels: the activation is quantized
+  once into the weight type's `vec_dot_type` (Q8_K for the IQ2 family)
+  and dotted straight against the quantized weight blocks, so nothing
+  is ever materialized as f32. Work is split by output-row slice over
+  a persistent worker pool, claimed dynamically; every output row has
+  exactly one writer, so the result is bit-identical to sequential
+  execution however the slices are scheduled.
+- Reaching those kernels is a deliberate link edge: backends normally
+  see only ggml-base, and `ggml-sycl` additionally links `ggml-cpu`
+  (guarded on the target existing). Where it does not exist — CPU
+  backend off, or the multi-variant DL build — the tier falls back to
+  the dequantize-and-dot path, which is the same math and about 25x
+  slower per row. `moe_hybrid_cpu_kernel_rows_total` says which one
+  ran, so the fallback is visible rather than silent.
+- The tier calls `ggml_cpu_init()` before first use. Without it every
+  quantized `vec_dot` returns exactly 0.0 — silently, which is how a
+  host-only test that linked the tier directly produced all-zero
+  expert outputs that no throughput number would have revealed.
 - CPU results are copied in with one H2D transfer per batch and land
   through the same in-order queue. The single synchronization point is
   the join before the output is consumed. Both the batch-1 decode
@@ -80,38 +94,97 @@ never skipped from staging — it stages and runs on GPU as usual
 
 ## Metrics (`/metrics`)
 
-`moe_hybrid_cpu_rows_total`, `moe_hybrid_gpu_rows_total`,
+Execution: `moe_hybrid_cpu_rows_total`, `moe_hybrid_gpu_rows_total`,
 `moe_hybrid_gpu_fallback_rows_total`,
 `moe_hybrid_h2d_bytes_avoided_total`, `moe_hybrid_staging_skips_total`,
 `moe_hybrid_cpu_time_ms`, `moe_hybrid_merge_time_ms`.
 
-## Correctness evidence (2026-07-31)
+Miss-path profile: `moe_hybrid_cpu_tier_calls_total`,
+`moe_hybrid_cpu_tier_jobs_total`, `moe_hybrid_cpu_weight_rows_total`,
+`moe_hybrid_cpu_kernel_rows_total`,
+`moe_hybrid_cpu_weight_bytes_total`, `moe_hybrid_cpu_threads_used`,
+`moe_hybrid_cpu_wall_ns_total`, `moe_hybrid_cpu_dispatch_ns_total`,
+`moe_hybrid_cpu_quant_act_ns_total`.
 
-Token-identical greedy output against the non-hybrid reference on the
-tiny-MoE fixture (6 distinct prompts × 16 tokens, including an
-all-CPU-tier stress with 5,577 CPU rows and a main+draft two-context
-run) and on the real target (Qwen3.5-122B-A10B IQ1_M, 24-token greedy,
-identical to the cache-only condition). Zero device loss.
+`weight_bytes / wall_ns` is the number to watch: it says whether the
+tier is reading the weight stream at memory speed or is stuck behind
+something else. `kernel_rows == weight_rows` confirms the quantized
+kernels ran.
 
-## Performance verdict (2026-07-31, this machine)
+`moe_hybrid_cpu_dequant_ns_total` and `moe_hybrid_cpu_matmul_ns_total`
+split one row's time and cost two clock reads per row to collect, so
+they are recorded only under `GGML_MOE_HYBRID_PROFILE=1`;
+`moe_hybrid_cpu_profiled_rows_total` says how many rows they cover, so
+zero cannot be misread as "no time spent".
 
-Hybrid **loses** to the plain transfer cache on the current target and
-placement: 2.46 vs 4.33 t/s decode (Qwen3.5-122B-A10B IQ1_M, 96
+## Environment switches
+
+- `GGML_MOE_HYBRID_PROFILE=1` -- record the per-row ns breakdown.
+- `GGML_MOE_HYBRID_NO_VEC_DOT=1` -- force the dequantize-and-dot path,
+  for A/B measurement and for bisecting a numerical difference back to
+  the kernel change.
+- `GGML_MOE_HYBRID_THREADS=N` -- pool size, counting the caller.
+  Default is `nproc - 2`.
+
+## Correctness evidence
+
+**2026-07-31.** Token-identical greedy output against the non-hybrid
+reference on the tiny-MoE fixture (6 distinct prompts × 16 tokens,
+including an all-CPU-tier stress with 5,577 CPU rows and a main+draft
+two-context run) and on the real target (Qwen3.5-122B-A10B, 24-token
+greedy, identical to the cache-only condition). Zero device loss.
+
+**2026-08-01, after the CPU-kernel pass.** Re-verified on the tiny-MoE
+fixture: 4 prompts × 2 repeats, hybrid on vs off, identical token
+arrays in all 8 sequences, with the kernel path exercised (72 staging
+skips, all 62,592 weight rows through `vec_dot`). The kernel path dots
+against a Q8_K-quantized activation, so it is not bit-identical to
+dequantize-and-dot: relative RMS 0.0073 against that reference on real
+IQ2_XXS weights. See also the known defect below.
+
+## Performance verdict
+
+**2026-07-31, before the CPU-kernel pass.** Hybrid **lost** to the
+plain transfer cache: 2.46 vs 4.33 t/s decode (Qwen3.5-122B-A10B, 96
 tokens, MoE offload threshold 1, 4 GiB cache, admission 2), despite
 avoiding 35.9 GB of expert H2D transfer. Threading the CPU tier moved
-it from 1.91 to 2.46 t/s; IQ1_M dequantization cost still exceeds the
-PCIe transfer it replaces at this miss rate. The feature therefore
-stays opt-in and is never auto-selected — the experimental-margin
-guardrail sees the measured loss. The acceptance matrix has a
-`hybrid-cpu-miss` cell, so the comparison reruns in one command when
-anything changes.
+it from 1.91 to 2.46 t/s; dequantization cost still exceeded the PCIe
+transfer it replaced at that miss rate.
+
+**2026-08-01, after it**
+([evidence](../evidence/2026-08-01-hybrid-cpu-kernel-pass.md)). The
+miss path is 74x faster on the microbenchmark and 1.84x faster
+in-server (103 -> 56 ns/row over the same ~158M rows and 75 GB), and
+the tier is now bound by the weight stream rather than by FLOPs. On the
+122B, three replicates: cache+hybrid **6.033** vs cache-only **5.394**
+t/s — hybrid is no longer behind. The per-condition spread is 4-18%,
+so three runs do not separate those means on their own; the tier
+counters do.
+
+Static placement still wins that comparison outright at **23.975**
+t/s, because this model fits in 42.8 GiB of VRAM and nothing has to
+stream. Hybrid remains opt-in and is never auto-selected. The
+acceptance matrix has a `hybrid-cpu-miss` cell, so the comparison
+reruns in one command when anything changes.
 
 ## Not implemented
 
 - Promotion-delay and eviction-before-reuse counters. (Promotions are
   already queue-asynchronous and never block the miss path; the two
   counters just aren't recorded.)
-- A vec_dot-grade CPU tier: reaching ggml-cpu's optimized kernels from
-  the SYCL backend needs a cross-backend interface. This is the single
-  change most likely to flip the performance verdict.
 - Per-projection (rather than per-expert) skip decisions.
+- Weight reuse across a batched prompt: the batched branch issues one
+  job per (expert, row), so an expert's weights are re-streamed once
+  per routed row. Decode is batch 1 and unaffected, and with
+  `--moe-cache-prefill-admission off` no skips happen during prefill at
+  all, so this has not been worth fixing yet.
+
+## Known defect in the surrounding cache path
+
+On the 122B, an identical cache condition does **not** reproduce its
+own greedy token sequence run to run — including with hybrid off, which
+executes no CPU-tier code at all. Static placement reproduces
+perfectly. This predates the CPU-kernel pass and means "hybrid on
+matches hybrid off" has no fixed reference on that model; the
+deterministic tiny-MoE fixture is where that rail can still be
+evaluated (and passes). See §4 of the 2026-08-01 evidence.
