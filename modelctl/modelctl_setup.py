@@ -219,7 +219,7 @@ def _check_llama_swap() -> SetupCheck:
             if r.status == 200:
                 return SetupCheck(
                     id="llama_swap", title="llama-swap", severity="ok",
-                    detail=f"reachable at {base}", fix_url="/routing")
+                    detail=f"reachable at {base}", fix_url="/runtime/routing")
     except Exception:
         pass
     if not config.exists():
@@ -228,13 +228,13 @@ def _check_llama_swap() -> SetupCheck:
             detail=f"not running, and no config at {config}",
             fix="Profiles can still be created and tested; registering them "
                 "for serving needs llama-swap.",
-            fix_url="/routing",
+            fix_url="/runtime/routing",
             fix_command="modelctl sync")
     return SetupCheck(
         id="llama_swap", title="llama-swap", severity="warning",
         detail=f"config at {config}, but {base} is not responding",
         fix="Start the service to load and serve registered models.",
-        fix_url="/routing",
+        fix_url="/runtime/routing",
         fix_command=f"systemctl --user start {modelctl.LLAMA_SWAP_SERVICE_NAME}")
 
 

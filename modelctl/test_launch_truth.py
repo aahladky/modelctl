@@ -57,6 +57,63 @@ FULL_CACHE = {
 }
 
 
+class TestProbeEnvHandling(unittest.TestCase):
+    """The probe env cache and the relocated-RUNPATH workaround.
+
+    A cold-cache promote used to seed the cache as [env, None], dropping
+    every other discovered env script for the life of the process -- a
+    second binary needing a different env was then silently declared
+    unsupported. And run_llama_probe skipped the LD_LIBRARY_PATH
+    workaround every other probe path applies.
+    """
+
+    def setUp(self):
+        self._saved = modelctl._PROBE_ENV_CACHE
+        modelctl._PROBE_ENV_CACHE = None
+        self.addCleanup(
+            lambda: setattr(modelctl, "_PROBE_ENV_CACHE", self._saved))
+
+    def test_promote_on_cold_cache_keeps_all_candidates(self):
+        env_a = {"ONEAPI_ROOT": "/opt/a"}
+        env_b = {"ONEAPI_ROOT": "/opt/b"}
+        with mock.patch.object(modelctl, "find_env_script_candidates",
+                               return_value=["/a.sh", "/b.sh"]), \
+             mock.patch.object(
+                 modelctl, "source_env_script",
+                 side_effect=lambda s: env_a if s == "/a.sh" else env_b):
+            modelctl._promote_probe_env(env_b)
+        cache = modelctl._PROBE_ENV_CACHE
+        self.assertEqual(cache[0], env_b)
+        self.assertIn(env_a, cache)
+        self.assertIn(None, cache)
+
+    def test_promote_on_warm_cache_reorders(self):
+        env_a = {"A": "1"}
+        env_b = {"B": "2"}
+        modelctl._PROBE_ENV_CACHE = [None, env_a, env_b]
+        modelctl._promote_probe_env(env_b)
+        self.assertEqual(modelctl._PROBE_ENV_CACHE, [env_b, None, env_a])
+
+    def test_run_llama_probe_applies_library_path_workaround(self):
+        import subprocess as _sp
+        seen = {}
+
+        def fake_run(cmd, capture_output, text, timeout, env):
+            seen["env"] = env
+            return _sp.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+        with TemporaryDirectory() as td:
+            binary = Path(td) / "bin" / "llama-server"
+            binary.parent.mkdir()
+            binary.write_text("#!/bin/sh\nexit 0\n")
+            modelctl._PROBE_ENV_CACHE = [None]
+            with mock.patch.object(modelctl.subprocess, "run",
+                                   side_effect=fake_run):
+                modelctl.run_llama_probe(str(binary), ["--version"])
+        self.assertIn(str(binary.parent.resolve()),
+                      seen["env"].get("LD_LIBRARY_PATH", ""))
+
+
 class LaunchTruthBase(unittest.TestCase):
     """A profile pinned to a stock binary, with a real model file on disk."""
 

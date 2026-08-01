@@ -793,8 +793,11 @@ def _promote_probe_env(env):
     if env is None:
         return
     if _PROBE_ENV_CACHE is None:
-        _PROBE_ENV_CACHE = [env, None]
-        return
+        # Warm the cache with the full candidate list before reordering.
+        # Seeding it as [env, None] here dropped every other env script
+        # from the process-wide cache: a second binary whose working env
+        # differed was then declared unsupported by every later probe.
+        _probe_env_candidates()
     if env in _PROBE_ENV_CACHE:
         _PROBE_ENV_CACHE.remove(env)
     _PROBE_ENV_CACHE.insert(0, env)
@@ -811,7 +814,14 @@ def run_llama_probe(binary_path: str, args: list, timeout=15):
     result = None
     candidates = _probe_env_candidates()
     for i, env in enumerate(list(candidates)):
-        full_env = {**os.environ, **env} if env else None
+        full_env = dict(os.environ)
+        if env:
+            full_env.update(env)
+        # Same relocated-RUNPATH workaround every other probe/launch path
+        # applies: builds bake an absolute RUNPATH that breaks when the
+        # tree moves (it did, Jul 30), and an env script's LD_LIBRARY_PATH
+        # replaces -- not extends -- the process one.
+        ensure_binary_ld_library_path(full_env, binary_path)
         try:
             attempt = subprocess.run(
                 [binary_path] + list(args), capture_output=True, text=True,

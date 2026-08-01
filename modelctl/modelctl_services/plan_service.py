@@ -48,23 +48,30 @@ def apply_plan(profile_name: str, plan_id: str, resync: bool = True) -> PlanResu
     compared and (optionally) tested means the profile actually launches
     with that plan's device/split/context/etc, not whatever it had before.
     """
-    try:
-        profile = modelctl.load_profile(profile_name)
-    except (SystemExit, Exception) as e:
-        return PlanResult(ok=False, messages=[f"failed to load profile: {e}"])
+    import modelctl_fsutil
 
-    snap = modelctl_hardware.capture_hardware_snapshot()
-    plans = modelctl_plans.compile_launch_plans(profile, snap)
-    plan = next((p for p in plans if p.id == plan_id), None)
-    if plan is None:
-        return PlanResult(ok=False, messages=[f"plan {plan_id} not found for '{profile_name}'"])
+    # The whole read-modify-write holds the state lock: the wizard's
+    # register step calls this inline on a request thread, concurrent with
+    # mutation-lane jobs writing the same profile/config files. save_profile
+    # locks only its own write; that left the load-to-sync window racy.
+    with modelctl_fsutil.state_lock():
+        try:
+            profile = modelctl.load_profile(profile_name)
+        except (SystemExit, Exception) as e:
+            return PlanResult(ok=False, messages=[f"failed to load profile: {e}"])
 
-    if plan.config:
-        profile["config"] = plan.config
-    modelctl.save_profile(profile)
-    modelctl.generate_artifacts(profile)
-    if resync:
-        modelctl.sync_all_backends(restart_router=True, restart_openarc=True)
+        snap = modelctl_hardware.capture_hardware_snapshot()
+        plans = modelctl_plans.compile_launch_plans(profile, snap)
+        plan = next((p for p in plans if p.id == plan_id), None)
+        if plan is None:
+            return PlanResult(ok=False, messages=[f"plan {plan_id} not found for '{profile_name}'"])
+
+        if plan.config:
+            profile["config"] = plan.config
+        modelctl.save_profile(profile)
+        modelctl.generate_artifacts(profile)
+        if resync:
+            modelctl.sync_all_backends(restart_router=True, restart_openarc=True)
 
     return PlanResult(ok=True, plans=[plan], selected_plan={"id": plan_id, "label": plan.label},
                       messages=[f"applied plan {plan.label} ({plan_id[:8]})"])

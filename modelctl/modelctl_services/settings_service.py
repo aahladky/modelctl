@@ -60,9 +60,15 @@ def update_defaults(updates: dict) -> ServiceResult:
         result.add_message("nothing changed")
         return result
 
-    defaults.update(applied)
     try:
-        modelctl.save_defaults(defaults)
+        # Re-read and write under the state lock so a concurrent writer
+        # (CLI `modelctl defaults`, another request) can't be dropped by
+        # this read-modify-write.
+        import modelctl_fsutil
+        with modelctl_fsutil.state_lock():
+            defaults = modelctl.load_defaults()
+            defaults.update(applied)
+            modelctl.save_defaults(defaults)
     except Exception as e:
         return ServiceResult.failure(f"could not save defaults: {e}",
                                      warnings=result.warnings)

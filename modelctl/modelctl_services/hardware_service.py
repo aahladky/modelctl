@@ -102,13 +102,18 @@ def calibrate_storage(file_path: str) -> HardwareResult:
         return HardwareResult(ok=False, messages=result.messages)
 
     info = modelctl_storage.probe_storage(file_path)
-    settings = modelctl_hardware.load_settings()
-    entry = settings.setdefault("storage", {}).setdefault(info.mount_point, {})
-    entry["measured_sequential_read_bps"] = result.sequential_read_bps
-    entry["measured_at"] = time.time()
-    entry["calibration_method"] = result.method
-    entry["calibration_file"] = result.file_path
-    modelctl_hardware.save_settings(settings)
+    # Lock the settings read-modify-write: /hardware/save writes the same
+    # hardware.json from a request thread while this runs on the mutation
+    # lane; last-write-wins dropped whichever finished first.
+    import modelctl_fsutil
+    with modelctl_fsutil.state_lock():
+        settings = modelctl_hardware.load_settings()
+        entry = settings.setdefault("storage", {}).setdefault(info.mount_point, {})
+        entry["measured_sequential_read_bps"] = result.sequential_read_bps
+        entry["measured_at"] = time.time()
+        entry["calibration_method"] = result.method
+        entry["calibration_file"] = result.file_path
+        modelctl_hardware.save_settings(settings)
 
     mib_s = result.sequential_read_bps / (1 << 20)
     return HardwareResult(
