@@ -73,9 +73,14 @@ Decision rules (pre-committed; do not re-ask the owner):
   and — for anything touching dispatch or the scheduler — the correctness
   matrix and k-quant determinism harness. No performance result excuses a
   correctness failure.
-- Performance thresholds adjudicate themselves: meet the gate -> merge to
-  `staging` and proceed; miss it -> write findings, mark parked-evidence,
-  move on. Missing a threshold is a result, not a failure.
+- Correctness gates self-adjudicate. Performance gates do NOT (owner
+  ruling 2026-08-01): agents run benches and MEASURE, never judge.
+  Capture raw artifacts (full tool output, exact configs, metrics
+  scrape, concurrent-load context), write a bench report in
+  docs/plans/evidence/, set the item Status: bench-review, and stop
+  that item there. The owner applies the Gate's threshold and decides
+  merge vs findings. Quick informal spot-checks may guide your work but
+  never satisfy a gate.
 - Rollback is cheap (integration-manifest.json names the target). Prefer
   attempting over asking.
 
@@ -84,9 +89,10 @@ Hard guardrails:
   OVMS, or any live service. Production serving is out of bounds.
 - All work in worktrees. Never commit to master. Pushes limited to
   `agent/*` and `staging` branches.
-- Benchmarks that contend for SYCL0 (the B70) run only in the bench
-  window (02:00-06:00 local) or when serving is verifiably idle. CPU,
-  SYCL1, and offline work run anytime.
+- Hardware benchmarks may run at ANY time (owner ruling 2026-08-01; the
+  old 02:00-06:00 window is lifted). Record what else was using the
+  GPUs and host during the run in the bench report — contention skews
+  numbers and the owner needs to see it.
 - No destructive operations outside the worktree. No credential handling.
 
 Execution discipline (wall-clock economy):
@@ -119,3 +125,6 @@ sitting over `staging`; (c) items tagged needs-hands in BACKLOG.
   visual all in scope); stack is an open variable judged by the
   maintenance philosophy; the weekly-review surface is a core console
   goal (see docs/plans/console-overhaul-brief.md).
+- 2026-08-01: Bench window abolished — hardware benchmarks run anytime.
+  Performance results are owner-adjudicated: agents measure and file
+  bench-review, never merge on a perf number themselves.

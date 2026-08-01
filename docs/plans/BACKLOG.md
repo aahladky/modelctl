@@ -3,8 +3,11 @@
 Worked top-to-bottom by unattended sessions per the Autonomous work
 protocol in /CLAUDE.md. Agents update Status and Log lines in place; do
 not reorder items. Status values: ready, in_progress, blocked (memo in
-decisions/), gated (dependency or bench window), parked-evidence (missed
-threshold, findings written), done, needs-hands (owner-only).
+decisions/), gated (waiting on a dependency), bench-review (bench run,
+raw results captured, awaiting owner adjudication), parked-evidence
+(owner-confirmed miss; findings written), done, needs-hands
+(owner-only). Performance thresholds in Gates are applied by the OWNER;
+agents measure, file bench-review, and stop (see CLAUDE.md).
 
 Before designing any item, read
 docs/research/2026-08-01-moe-offloading-landscape.md and WebFetch the
@@ -13,8 +16,8 @@ item's sources.
 ---
 
 ## P1 — madvise WILLNEED/DONTNEED per-expert SSD-tier management
-Status: ready
-Autonomy: auto-merge to staging on gate
+Status: ready (bench pending)
+Autonomy: implementation may merge only after owner adjudicates the bench
 Spec: after each decode step on the mmap/SSD tier, POSIX_MADV_WILLNEED
 the byte ranges of the experts just used; on tier eviction,
 POSIX_MADV_DONTNEED the evicted range. DONTNEED does not exist in
@@ -22,10 +25,13 @@ llama-mmap.cpp yet and must be added. Scope strictly to the fork's
 SSD/mmap path; no behavior change when the model is RAM/VRAM-resident.
 Sources: llama.cpp issue #20757 (design sketch, ~60 LOC estimate);
 src/llama-mmap.cpp WILLNEED pattern.
-Gate: test-moe-cache + modelctl suite green; ornith-397b batch bench
-(three-condition protocol, bench window) shows >= +10% over the 0.37
-tok/s static baseline, else findings doc.
-Log:
+Gate: test-moe-cache + modelctl suite green (self-adjudicated, already
+met on agent/P1); ornith-397b batch bench (three-condition protocol,
+runnable anytime) captured to bench-review; owner adjudicates vs the
++10%-over-0.37-tok/s threshold.
+Log: 2026-08-01: implementation complete on agent/P1 (fork worktree at
+llama.cpp/.claude/worktrees/agent-P1, CPU + sanitizer builds ready, new
+test-mmap-advise green 3/3). Bench pending, dispatchable anytime.
 
 ## P2 — routing-trace dump flag in the fork
 Status: ready
@@ -61,16 +67,18 @@ laguna prefill throughput >= +5%, else findings.
 Log:
 
 ## P5 — planner rule: pin shared experts and dense early layers
-Status: ready
+Status: in_progress
 Autonomy: auto-merge to staging on gate
 Spec: modelctl place emits placement that always pins `shexp` tensors
 and dense early layers (e.g. blk.0-2 on GLM/DeepSeek-pattern models) to
 GPU; only routed experts flow through cache/offload tiers.
 Gate: modelctl suite + a placement snapshot test per affected profile.
 Log:
+- 2026-08-01 session start: reading landscape doc + surveying modelctl
+  place; worktree agent/p5 off staging.
 
 ## P6 — llama.cpp issue #20757 engagement draft
-Status: ready
+Status: in_progress
 Autonomy: draft only; posting is needs-hands
 Spec: draft a comment presenting this fork as the C++ implementation the
 issue requested: architecture summary, what matches their design, what
@@ -78,6 +86,9 @@ differs (transfer cache vs slot remap), measured results, link to the
 GitHub mirror. Tone: offering, not selling.
 Gate: draft at docs/plans/evidence/20757-comment-draft.md.
 Log:
+- 2026-08-01 session start (dispatched): worktree agent/P6 off staging;
+  issue #20757 fetched, mirror branch verified public; draft committed
+  (d0078cf); full modelctl suite running as gate.
 
 ## P7a — Phase G design memo
 Status: ready
@@ -129,7 +140,7 @@ and a stats file.
 Log:
 
 ## P10 — RAM upgrade memo (research only)
-Status: ready
+Status: in_progress
 Autonomy: memo only; purchase is owner's call via decisions/
 Spec: read board identity from /sys/devices/virtual/dmi/id/ (no sudo),
 determine max supported DDR5 capacity/speeds, price 96GB and 128GB kits,
@@ -137,11 +148,13 @@ compute resulting on-disk expert tail for ornith-397b per RQ6 lever 1.
 Gate: memo at docs/plans/decisions/010-ram-upgrade.md with a
 recommendation.
 Log:
+- 2026-08-01 claimed (dispatched session, queued after P6): worktree
+  agent/P10 off staging; DMI read done (ASUS Z790 GAMING WIFI7).
 
 ---
 
 ## P11a — console overhaul: teardown, IA, and design directions
-Status: ready
+Status: in_progress
 Autonomy: memo + mockups only; Owner inputs in
 docs/plans/console-overhaul-brief.md are answered — honor them
 Spec: read the brief, the 2026-07-31/08-01 audit trail in
@@ -151,6 +164,8 @@ recommended direction.
 Gate: teardown memo + mockups + migration plan committed; decision
 memo filed in docs/plans/decisions/.
 Log:
+- 2026-08-01 session start: worktree agent/P11a off staging; reading
+  brief, audit trail, modelctl_web/.
 
 ## P11b — console overhaul phase 1: harness, then backbone
 Status: gated (depends P11a + direction pick)
