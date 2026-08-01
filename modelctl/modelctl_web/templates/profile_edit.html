@@ -18,7 +18,8 @@
   {% endfor %}
   </div>
   <label><input type="checkbox" name="enabled" {% if p.get('enabled', true) %}checked{% endif %}> enabled</label>
-  <p><button type="submit">save &amp; resync</button></p>
+  <input type="hidden" name="_full_form" value="1">
+  <p><button type="submit" class="btn-primary">save &amp; resync</button></p>
 </form>
 <h2>MoE expert cache</h2>
 <div class="card">

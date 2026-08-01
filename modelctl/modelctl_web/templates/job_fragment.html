@@ -11,7 +11,7 @@
   {% endif %}
   {% if job.error %}<pre class="warn">{{ job.error }}</pre>{% endif %}
   {% if job.result %}<pre>{{ job.result }}</pre>{% endif %}
-  {% if job.status == "done" and job.type == "pull" %}
+  {% if job.status == "done" and job.type in ("pull", "import") %}
     {% set outcome = job.outcome | fromjson if job.outcome else {} %}
     {% if outcome.profile %}
     <p class="ok card">profile <strong>{{ outcome.profile }}</strong> created —

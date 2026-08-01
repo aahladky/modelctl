@@ -72,10 +72,30 @@ class LlamaSwapClient:
     def running_model_ids(self):
         return {m.get("model") for m in self.running_models()}
 
-    def logs(self, model_id=None, lines=200):
-        if model_id:
-            return self._request("GET", f"/logs/stream/{self._enc(model_id)}")
-        return self._request("GET", "/logs")
+    def logs(self, model_id=None, lines=200, max_bytes=256 * 1024):
+        """Bounded read: /logs/stream/* streams forever on a live server,
+        and _request()'s read-to-EOF pinned a request thread for as long
+        as the model kept logging."""
+        path = (f"/logs/stream/{self._enc(model_id)}" if model_id
+                else "/logs")
+        req = urllib.request.Request(self.base + path, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                raw = r.read(max_bytes)
+        except urllib.error.HTTPError as e:
+            raise ModelctlSwapError(
+                "SWAP_HTTP_ERROR", f"llama-swap GET {path} -> {e.code}",
+                {"status": e.code,
+                 "body": e.read()[:500].decode(errors="replace")})
+        except (urllib.error.URLError, ConnectionError, TimeoutError,
+                OSError) as e:
+            raise ModelctlSwapError(
+                "LLAMA_SWAP_UNAVAILABLE", f"llama-swap unreachable: {e}")
+        text = raw.decode(errors="replace")
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
 
     # -- lifecycle --------------------------------------------------------
     def unload(self, model_id):

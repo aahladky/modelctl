@@ -167,7 +167,7 @@ class JobContext:
     def log(self, line):
         self._store.append_result_line(self._job_id, line)
 
-    def set_progress(self, value, detail=""):
+    def set_progress(self, value=None, detail=""):
         fields = {}
         if value is not None:
             fields["progress"] = max(0.0, min(1.0, float(value)))
@@ -313,36 +313,74 @@ class JobLane:
 
     def _run(self):
         while True:
-            job_id, fn, store, cancel_set, cancel_lock = self._q.get()
-            job = store.get(job_id)
-            if not job or job["status"] == "cancelled":
-                continue
-            ctx = JobContext(store, job_id)
-            store.update(job_id, status="running", started=time.time())
+            item = self._q.get()
             try:
-                with cancel_lock:
-                    cancel_set[job_id] = ctx
-                result = fn(ctx)
-                store.update(job_id, status="done", progress=1.0,
-                             outcome=json.dumps(result or {}),
+                self._run_one(*item)
+            except Exception:
+                # Even recording job state can fail (e.g. SQLITE_BUSY past
+                # the timeout). Letting that escape kills this worker
+                # thread: the job stays "running" forever and, on a
+                # single-worker lane, every later job queues eternally.
+                # The lane must outlive any job AND any bookkeeping error.
+                traceback.print_exc()
+
+    @staticmethod
+    def _encode_outcome(result):
+        try:
+            return json.dumps(result or {})
+        except (TypeError, ValueError):
+            # A non-serializable return must not flip a completed job to
+            # "failed" after its work already applied.
+            return json.dumps({"repr": repr(result)})
+
+    def _run_one(self, job_id, fn, store, cancel_set, cancel_lock):
+        job = store.get(job_id)
+        if not job or job["status"] == "cancelled":
+            return
+        ctx = JobContext(store, job_id)
+        # Register for cancellation BEFORE flipping to running: a cancel
+        # landing in between used to write 'cancelled', get overwritten by
+        # 'running', and the ctx flag was never set -- a lost cancel.
+        with cancel_lock:
+            cancel_set[job_id] = ctx
+        store.update(job_id, status="running", started=time.time())
+        try:
+            result = fn(ctx)
+            if ctx.is_cancelled():
+                # The job function ran to completion after a cancel (a
+                # long blocking call nothing could interrupt). The user
+                # was told "cancelled"; do not resurrect the job as
+                # "done". Keep the outcome for forensics.
+                store.update(job_id, status="cancelled",
+                             outcome=self._encode_outcome(result),
                              finished=time.time())
-            except CancelledError:
-                store.update(job_id, status="cancelled", finished=time.time())
-            except BaseException as e:
-                # BaseException, not Exception: CLI-flavored code can raise
-                # SystemExit, and letting it escape kills this lane's worker
-                # thread silently -- the job stays "running" forever and every
-                # later job queues eternally. The lane must outlive any job.
+            else:
+                store.update(job_id, status="done", progress=1.0,
+                             outcome=self._encode_outcome(result),
+                             finished=time.time())
+        except CancelledError:
+            store.update(job_id, status="cancelled", finished=time.time())
+        except BaseException as e:
+            # BaseException, not Exception: CLI-flavored code can raise
+            # SystemExit, and letting it escape kills this lane's worker
+            # thread silently.
+            if ctx.is_cancelled():
+                # The exception is fallout from the cancel itself (killed
+                # process group, closed pipe): report cancelled, not
+                # failed -- a cancelled smoke test is not a failed one.
+                store.update(job_id, status="cancelled",
+                             finished=time.time())
+            else:
                 store.update(
                     job_id, status="failed",
                     error=f"{e}\n{traceback.format_exc(limit=5)}",
                     finished=time.time())
-                if isinstance(e, KeyboardInterrupt):
-                    raise
-            finally:
-                ctx.cancel_all()
-                with cancel_lock:
-                    cancel_set.pop(job_id, None)
+            if isinstance(e, KeyboardInterrupt):
+                raise
+        finally:
+            ctx.cancel_all()
+            with cancel_lock:
+                cancel_set.pop(job_id, None)
 
 
 class JobManager:
@@ -372,7 +410,13 @@ class JobManager:
             # harmlessly when the job function unwinds).
             ctx.set_cancelled()
             ctx.cancel_all()
-        self.store.update(job_id, status="cancelled", finished=time.time())
+        # Only live jobs can be cancelled: clicking cancel in the polling
+        # window right after a job finished used to rewrite its terminal
+        # status to 'cancelled', falsifying history.
+        job = self.store.get(job_id)
+        if job and job.get("status") in ("queued", "running"):
+            self.store.update(job_id, status="cancelled",
+                              finished=time.time())
 
     def is_cancelled(self, job_id):
         with self._cancel_lock:

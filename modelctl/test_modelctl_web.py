@@ -35,6 +35,7 @@ class WebTestBase(unittest.TestCase):
         (self.profiles_dir / "m1.json").write_text(json.dumps(PROFILE))
         store = JobStore(Path(self.tmp.name) / "jobs.db")
         runner = JobRunner(store)
+        self.store = store
         self.addCleanup(lambda: runner._thread.join(timeout=1) or None)
         app = create_app(token=TOKEN, store=store, runner=runner)
         self.client = TestClient(app)
@@ -54,6 +55,7 @@ class WebTestBase(unittest.TestCase):
         # they find; keep single-file runs off the real llama.cpp builds
         # (the full suite already empties them via test__hermeticity).
         no_binaries = str(Path(self.tmp.name) / "no-binaries" / "*")
+        import modelctl_web.wizard as wizard_mod
         self.patches = [
             mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir),
             mock.patch.object(modelctl_runtime, "RuntimeDB",
@@ -62,6 +64,8 @@ class WebTestBase(unittest.TestCase):
                               [no_binaries]),
             mock.patch.object(modelctl, "COMMON_ENV_SCRIPT_GLOBS",
                               [no_binaries]),
+            mock.patch.object(wizard_mod, "WIZARD_DIR",
+                              Path(self.tmp.name) / "wizards"),
         ]
         for p in self.patches:
             p.start()
@@ -213,6 +217,220 @@ class TestJobsApi(WebTestBase):
         self.assertEqual(resp.json()["job"], "fakejob1")
 
 
+class TestWizardAcquisition(WebTestBase):
+    """HTTP-level coverage of the add-model wizard. The inspect step
+    500'd in production twice (total_bytes vs total_size, then unguarded
+    HF fetches) because nothing rendered these pages in tests."""
+
+    REPO_CONTENTS = {
+        "quant_groups": [
+            {"label": "m-Q4_K_M", "files": ["m-Q4_K_M.gguf"],
+             "sharded": False, "total_size": 50 << 30},
+            {"label": "m-Q8_0", "files": ["m-Q8_0.gguf"],
+             "sharded": False, "total_size": None},
+        ],
+        "mmproj_files": [], "mtp_files": [],
+    }
+
+    def _wizard(self, **fields):
+        from modelctl_web.wizard import WizardState, WizardStore
+        state = WizardState(**fields)
+        WizardStore().save(state)
+        return state
+
+    def test_inspect_renders_real_producer_shape(self):
+        """The page renders what get_repo_contents() actually returns --
+        including a group whose total_size is None (missing HF sizes)."""
+        w = self._wizard(step="inspect", repo_id="org/model",
+                         source_type="hf_repo")
+        with mock.patch.object(modelctl, "get_repo_contents",
+                               return_value=self.REPO_CONTENTS):
+            resp = self.client.get(f"/add/{w.wizard_id}/inspect",
+                                   headers=self.auth)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("50.0 GiB", resp.text)
+        self.assertIn("size unknown", resp.text)
+
+    def test_inspect_bad_repo_shows_error_not_500(self):
+        w = self._wizard(step="inspect", repo_id="org/nonexistent",
+                         source_type="hf_repo")
+        with mock.patch.object(modelctl, "get_repo_contents",
+                               side_effect=RuntimeError("404 not found")):
+            resp = self.client.get(f"/add/{w.wizard_id}/inspect",
+                                   headers=self.auth)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Could not fetch repository contents", resp.text)
+        self.assertIn("404 not found", resp.text)
+
+    def test_source_submit_requires_repo_id(self):
+        w = self._wizard()
+        resp = self.client.post(f"/add/{w.wizard_id}/source",
+                                headers=self.auth,
+                                data={"source_type": "hf_repo", "repo_id": ""},
+                                follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
+        self.assertTrue(resp.headers["location"].endswith("/source"))
+        from modelctl_web.wizard import WizardStore
+        state = WizardStore().load(w.wizard_id)
+        self.assertEqual(state.step, "source")
+        self.assertTrue(state.errors)
+
+    def test_source_submit_rejects_malformed_repo_id(self):
+        w = self._wizard()
+        resp = self.client.post(f"/add/{w.wizard_id}/source",
+                                headers=self.auth,
+                                data={"source_type": "hf_repo",
+                                      "repo_id": "no-slash-here"},
+                                follow_redirects=False)
+        self.assertTrue(resp.headers["location"].endswith("/source"))
+        from modelctl_web.wizard import WizardStore
+        self.assertEqual(WizardStore().load(w.wizard_id).step, "source")
+
+    def test_inspect_without_repo_returns_to_source_not_add(self):
+        """A repo-less wizard on inspect used to bounce Resume -> /add
+        forever with no error shown."""
+        w = self._wizard(step="inspect")
+        resp = self.client.get(f"/add/{w.wizard_id}/inspect",
+                               headers=self.auth, follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
+        self.assertTrue(resp.headers["location"].endswith("/source"))
+        from modelctl_web.wizard import WizardStore
+        state = WizardStore().load(w.wizard_id)
+        self.assertEqual(state.step, "source")
+        self.assertTrue(state.errors)
+
+    def test_partial_profile_post_does_not_disable(self):
+        """A programmatic POST setting one field used to read the absent
+        checkbox as 'disable', which unregistered the model on sync."""
+        with mock.patch("modelctl_web.mutate.submit_edit",
+                        return_value="job-edit-1") as sub:
+            self.client.post("/profiles/m1", headers=self.auth,
+                             data={"extra": "--foo"}, follow_redirects=False)
+        self.assertNotIn("enabled", sub.call_args[0][2])
+        with mock.patch("modelctl_web.mutate.submit_edit",
+                        return_value="job-edit-2") as sub:
+            self.client.post("/profiles/m1", headers=self.auth,
+                             data={"extra": "--foo", "_full_form": "1"},
+                             follow_redirects=False)
+        self.assertFalse(sub.call_args[0][2]["enabled"])
+
+    def test_bench_route_accepts_token_budget(self):
+        with mock.patch("modelctl_web.mutate.submit_bench",
+                        return_value="job-bench-1") as sub:
+            self.client.post("/profiles/m1/bench", headers=self.auth,
+                             data={"max_tokens": "64", "runs": "2"},
+                             follow_redirects=False)
+        sub.assert_called_once()
+        self.assertEqual(sub.call_args.kwargs["max_tokens"], 64)
+        self.assertEqual(sub.call_args.kwargs["runs"], 2)
+
+    def test_wizard_delete_removes_it(self):
+        w = self._wizard(step="inspect", repo_id="org/model")
+        resp = self.client.post(f"/add/{w.wizard_id}/delete",
+                                headers=self.auth, follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
+        from modelctl_web.wizard import WizardStore
+        self.assertIsNone(WizardStore().load(w.wizard_id))
+
+    def test_download_get_is_render_only(self):
+        """GET /download used to submit the job as a side effect; two tabs
+        raced the guard into duplicate concurrent pulls."""
+        w = self._wizard(step="download", repo_id="org/model",
+                         source_type="hf_repo")
+        with mock.patch("modelctl_web.mutate.submit_pull") as sub:
+            resp = self.client.get(f"/add/{w.wizard_id}/download",
+                                   headers=self.auth)
+        self.assertEqual(resp.status_code, 200)
+        sub.assert_not_called()
+        self.assertIn("Start download", resp.text)
+
+    def test_inspect_submit_starts_download_once(self):
+        w = self._wizard(step="inspect", repo_id="org/model",
+                         source_type="hf_repo")
+        with mock.patch("modelctl_web.mutate.submit_pull",
+                        return_value="job-pull-1") as sub:
+            self.client.post(f"/add/{w.wizard_id}/inspect",
+                             headers=self.auth,
+                             data={"quant": "m-Q4_K_M"},
+                             follow_redirects=False)
+            # A double-click / resubmission must not start a second pull.
+            self.client.post(f"/add/{w.wizard_id}/inspect",
+                             headers=self.auth,
+                             data={"quant": "m-Q4_K_M"},
+                             follow_redirects=False)
+        sub.assert_called_once()
+        from modelctl_web.wizard import WizardStore
+        self.assertEqual(WizardStore().load(w.wizard_id).download_job_id,
+                         "job-pull-1")
+
+    def test_api_pull_dedups_active_repo(self):
+        job_id = self.store.create("pull", "pull org/model",
+                                   payload={"repo_id": "org/model"},
+                                   lane="download")
+        self.store.update(job_id, status="running")
+        with mock.patch("modelctl_web.mutate.submit_pull") as sub:
+            resp = self.client.post("/api/pull/org/model", headers=self.auth)
+        sub.assert_not_called()
+        self.assertEqual(resp.json()["job"], job_id)
+        self.assertTrue(resp.json()["deduplicated"])
+
+    def test_register_blocked_while_test_job_live(self):
+        """Direct navigation to the register POST while the plan-test's
+        llama-server is still running used to slip past the gate and race
+        it for VRAM."""
+        job_id = self.store.create("benchmark", "plan test m1/p1",
+                                   lane="benchmark")
+        self.store.update(job_id, status="running")
+        w = self._wizard(step="register", profile_name="m1",
+                         selected_plan_id="p1", test_job_id=job_id)
+        with mock.patch("modelctl_services.plan_service.apply_plan") as ap:
+            resp = self.client.post(f"/add/{w.wizard_id}/register",
+                                    headers=self.auth, follow_redirects=False)
+        self.assertTrue(resp.headers["location"].endswith("/register"))
+        ap.assert_not_called()
+        from modelctl_web.wizard import WizardStore
+        state = WizardStore().load(w.wizard_id)
+        self.assertFalse(state.registration_complete)
+        self.assertTrue(state.errors)
+
+    def test_measured_results_reach_done_page(self):
+        """The plan-test job records generation_tps etc., but nothing
+        folded them into wizard state -- the done page called every
+        tested registration 'not measured'."""
+        run = {"success": True, "generation_tps": 12.3, "prompt_tps": 456.7,
+               "load_seconds": 41.5, "cache_state": "cold"}
+        job_id = self.store.create("benchmark", "plan test m1/p1",
+                                   lane="benchmark")
+        self.store.update(job_id, status="done", outcome=json.dumps(run))
+        w = self._wizard(step="test", profile_name="m1",
+                         selected_plan_id="p1", test_job_id=job_id)
+        resp = self.client.post(f"/add/{w.wizard_id}/test",
+                                headers=self.auth, follow_redirects=False)
+        self.assertTrue(resp.headers["location"].endswith("/register"))
+        from modelctl_web.wizard import WizardStore
+        state = WizardStore().load(w.wizard_id)
+        self.assertEqual(state.measured.get("generation_tps"), 12.3)
+        self.assertEqual(state.test_observations["p1"]["cache_state"], "cold")
+        state.advance("done")
+        WizardStore().save(state)
+        page = self.client.get(f"/add/{w.wizard_id}/done", headers=self.auth)
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("12.3", page.text)
+        self.assertNotIn("not measured", page.text)
+
+    def test_analyze_tolerates_legacy_scalar_outcome(self):
+        """Legacy job rows can hold a JSON scalar in outcome; the analyze
+        page 500'd on .get() (seen live Jul 30)."""
+        job_id = self.store.create("pull", "pull org/model", lane="download")
+        self.store.update(job_id, status="done",
+                          outcome=json.dumps("a bare string"))
+        w = self._wizard(step="analyze", repo_id="org/model",
+                         source_type="hf_repo", download_job_id=job_id)
+        resp = self.client.get(f"/add/{w.wizard_id}/analyze",
+                               headers=self.auth)
+        self.assertEqual(resp.status_code, 200)
+
+
 class TestRuntimeApi(WebTestBase):
     def _mock_runtime(self, state=None):
         if state is None:
@@ -256,11 +474,26 @@ class TestRuntimeApi(WebTestBase):
     def test_runtime_logs_page(self):
         with mock.patch("modelctl_web.swap.LlamaSwapClient.logs",
                         return_value="line1\nline2\n"), \
-             mock.patch("modelctl_web.swap.LlamaSwapClient.model_state",
-                        return_value={"state": "ready", "worker": {"pid": 1}}):
+             self._mock_runtime():
             resp = self.client.get("/runtime/logs/m1", headers=self.auth)
         self.assertEqual(resp.status_code, 200)
         self.assertIn("line1", resp.text)
+        # Running model: pid and port are shown (the page used to be fed
+        # model_state()'s {state, worker} shape, so they never rendered).
+        self.assertIn("pid 1234", resp.text)
+        self.assertIn("port 5000", resp.text)
+
+    def test_runtime_logs_page_offers_load_for_stopped_model(self):
+        stopped = {"m1": {"model_id": "m1", "state": "stopped",
+                          "registered": True, "running": False, "pid": None,
+                          "port": None, "started": None,
+                          "state_class": "stopped"}}
+        with mock.patch("modelctl_web.swap.LlamaSwapClient.logs",
+                        return_value=""), \
+             self._mock_runtime(state=stopped):
+            resp = self.client.get("/runtime/logs/m1", headers=self.auth)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(f"/models/m1/load", resp.text)
 
     def test_runtime_logs_api(self):
         with mock.patch("modelctl_web.swap.LlamaSwapClient.logs",
@@ -454,6 +687,71 @@ class TestJobLanes(unittest.TestCase):
         job = store.get(job_id)
         self.assertEqual(job["status"], "cancelled")
 
+    def test_cancelled_job_does_not_resurrect_as_done(self):
+        """A cancel during an uninterruptible call (hf_hub_download, a
+        30-min warm load) used to flip back to 'done' when the call
+        finally returned -- profile created, router restarted, after the
+        UI said cancelled."""
+        import threading
+        store, mgr, tmp = self._make_manager()
+        started = threading.Event()
+        release = threading.Event()
+
+        def stubborn_fn(ctx):
+            started.set()
+            release.wait(timeout=10)  # blocking work that ignores cancel
+            return {"ok": True}
+
+        job_id = mgr.submit("test", "stubborn", stubborn_fn, lane="benchmark")
+        started.wait(timeout=5)
+        mgr.cancel(job_id)
+        release.set()  # the blocking work completes after the cancel
+        time.sleep(1)
+        self.assertEqual(store.get(job_id)["status"], "cancelled")
+
+    def test_cancel_of_finished_job_is_a_noop(self):
+        """Cancelling in the 2s polling window after a job finished used
+        to rewrite its terminal status, falsifying history."""
+        import threading
+        store, mgr, tmp = self._make_manager()
+        done = threading.Event()
+        job_id = mgr.submit("test", "quick",
+                            lambda ctx: done.set() or {"ok": True},
+                            lane="runtime")
+        done.wait(timeout=5)
+        time.sleep(0.5)
+        mgr.cancel(job_id)
+        self.assertEqual(store.get(job_id)["status"], "done")
+
+    def test_lane_survives_bookkeeping_failure(self):
+        """If recording a failure itself raises (SQLITE_BUSY past the
+        timeout), the lane worker used to die -- and with it, every
+        later job on a single-worker lane."""
+        import threading
+        store, mgr, tmp = self._make_manager()
+        boom = threading.Event()
+        real_update = store.update
+
+        def flaky_update(job_id, **fields):
+            if fields.get("status") == "failed" and not boom.is_set():
+                boom.set()
+                raise RuntimeError("database is locked")
+            return real_update(job_id, **fields)
+
+        with mock.patch.object(store, "update", side_effect=flaky_update):
+            mgr.submit("test", "bad", lambda ctx: 1 / 0, lane="mutation")
+            for _ in range(50):
+                if boom.is_set():
+                    break
+                time.sleep(0.1)
+            self.assertTrue(boom.is_set())
+        survived = threading.Event()
+        mgr.submit("test", "good",
+                   lambda ctx: survived.set() or {"ok": True},
+                   lane="mutation")
+        self.assertTrue(survived.wait(timeout=5),
+                        "mutation lane worker died after a bookkeeping error")
+
 
 class TestJobContext(unittest.TestCase):
     def test_log_appends(self):
@@ -481,6 +779,20 @@ class TestJobContext(unittest.TestCase):
         job = store.get(job_id)
         self.assertAlmostEqual(job["progress"], 0.5)
         self.assertEqual(job["detail"], "halfway")
+        tmp.cleanup()
+
+    def test_progress_detail_only(self):
+        """submit_pull's file_start callback passes detail with no value;
+        this exact call TypeError'd and killed every web-submitted pull."""
+        from modelctl_web.jobs import JobStore, JobContext
+        from tempfile import TemporaryDirectory
+        tmp = TemporaryDirectory()
+        store = JobStore(Path(tmp.name) / "jobs.db")
+        job_id = store.create("test", "test job")
+        ctx = JobContext(store, job_id)
+        ctx.set_progress(detail="model-00001.gguf")
+        job = store.get(job_id)
+        self.assertEqual(job["detail"], "model-00001.gguf")
         tmp.cleanup()
 
     def test_cancellation_check(self):

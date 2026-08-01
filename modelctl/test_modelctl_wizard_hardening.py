@@ -164,13 +164,22 @@ class TestSourceVerification(WizardWebBase):
         wid = self.new_wizard()
         good = self.root / "model.gguf"
         good.write_bytes(b"GGUF" + b"\0" * 8192)
-        resp = self.client.post(
-            f"/add/{wid}/source", headers=self.auth,
-            data={"source_type": "local_file", "local_path": str(good)},
-            follow_redirects=False)
+        # The source POST now submits the import job itself (submission
+        # moved out of the download GET); stub it so the test doesn't run
+        # a real import of this fake GGUF in a background thread that can
+        # outlive the patches.
+        with mock.patch("modelctl_web.mutate.submit_import_local",
+                        return_value="job-import-1") as sub:
+            resp = self.client.post(
+                f"/add/{wid}/source", headers=self.auth,
+                data={"source_type": "local_file", "local_path": str(good)},
+                follow_redirects=False)
         self.assertEqual(resp.headers["location"], f"/add/{wid}/download")
         state = wiz.WizardStore().load(wid)
         self.assertTrue(state.source_verification["ok"])
+        # The submission happened exactly once, at POST time.
+        sub.assert_called_once()
+        self.assertEqual(state.download_job_id, "job-import-1")
 
 
 class TestAdvanceGuards(WizardWebBase):

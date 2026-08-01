@@ -9,10 +9,14 @@
 {% for g in snap.gpus %}
   <div class="gauge card {{ '' if g.enabled else 'disabled' }}">
     <div><strong>{{ g.device }}</strong> · {{ g.name }}</div>
+    {% if g.total_bytes %}
     <div class="bar"><div class="fill" style="width: {{ ((g.total_bytes - g.free_bytes) / g.total_bytes * 100) | round(1) }}%"></div></div>
     <div>{{ ((g.total_bytes - g.free_bytes) / 1073741824) | round(1) }} / {{ (g.total_bytes / 1073741824) | round(1) }} GiB used</div>
+    {% else %}
+    <div class="muted">no VRAM reported</div>
+    {% endif %}
     <div class="muted">free: {{ (g.free_bytes / 1073741824) | round(1) }} GiB
-      {% if g.reserve_bytes %} · reserve: {{ (g.reserve_bytes / 1073741824) | round(1) }} GiB{% endif %}
+      {% if g.reserve_bytes %} · reserve: {{ ((g.reserve_bytes or 0) / 1073741824) | round(1) }} GiB{% endif %}
       {% if g.role %} · {{ g.role }}{% endif %}
       {% if g.bandwidth_gbs %} · {{ g.bandwidth_gbs }} GB/s{% endif %}
     </div>
@@ -24,7 +28,7 @@
 <div class="card">
   <div>total: {{ (snap.ram_total_bytes / 1073741824) | round(1) }} GiB ·
     available: {{ (snap.ram_available_bytes / 1073741824) | round(1) }} GiB
-    {% if snap.ram_reserve_bytes %} · reserve: {{ (snap.ram_reserve_bytes / 1073741824) | round(1) }} GiB{% endif %}
+    {% if snap.ram_reserve_bytes %} · reserve: {{ ((snap.ram_reserve_bytes or 0) / 1073741824) | round(1) }} GiB{% endif %}
   </div>
 </div>
 
@@ -82,14 +86,14 @@
     <td>{{ g.device }} <span class="muted">{{ g.name }}</span></td>
     <td><input type="checkbox" name="enabled_{{ g.device }}" {% if g.enabled %}checked{% endif %}></td>
     <td><input name="role_{{ g.device }}" value="{{ g.role }}" size="10" placeholder="primary"></td>
-    <td><input name="reserve_{{ g.device }}" value="{{ (g.reserve_bytes / 1073741824) | round(1) }}" size="6" type="number" step="0.5" min="0"></td>
+    <td><input name="reserve_{{ g.device }}" value="{{ ((g.reserve_bytes or 0) / 1073741824) | round(1) }}" size="6" type="number" step="0.5" min="0"></td>
     <td><input name="bw_{{ g.device }}" value="{{ g.bandwidth_gbs or '' }}" size="6" type="number" step="1" min="0" placeholder="auto"></td>
   </tr>
   {% endfor %}
   </tbody>
 </table>
 <div style="margin-top:.5rem">
-  <label>RAM reserve (GiB): <input name="ram_reserve" value="{{ (snap.ram_reserve_bytes / 1073741824) | round(1) }}" size="6" type="number" step="0.5" min="0"></label>
+  <label>RAM reserve (GiB): <input name="ram_reserve" value="{{ ((snap.ram_reserve_bytes or 0) / 1073741824) | round(1) }}" size="6" type="number" step="0.5" min="0"></label>
 </div>
 <p><button type="submit">save overrides</button></p>
 </form>

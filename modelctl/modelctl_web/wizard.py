@@ -195,6 +195,10 @@ def outcome_from_job(store, job_id: str) -> dict:
             data = json.loads(raw) if isinstance(raw, str) else dict(raw)
         except (ValueError, TypeError):
             data = {}
+        # Legacy rows can hold a JSON-encoded scalar rather than an object;
+        # treating one as a dict 500'd the wizard download page.
+        if not isinstance(data, dict):
+            data = {}
     return {
         "ok": status == "done",
         "status": status,
@@ -208,8 +212,10 @@ def outcome_from_job(store, job_id: str) -> dict:
 class WizardStore:
     """Persistent storage for wizard state."""
 
-    def __init__(self, base_dir: Path = WIZARD_DIR):
-        self.base_dir = base_dir
+    def __init__(self, base_dir: Path | None = None):
+        # Resolved at call time (not bound as a default) so tests can
+        # patch WIZARD_DIR and route handlers pick the patched dir up.
+        self.base_dir = base_dir if base_dir is not None else WIZARD_DIR
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, wizard_id: str) -> Path:

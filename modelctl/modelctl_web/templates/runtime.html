@@ -7,6 +7,7 @@
 {% if not runtime %}
 <div class="card"><span class="warn">llama-swap unreachable or no models registered</span></div>
 {% else %}
+<div class="table-scroll">
 <table>
   <thead><tr>
     <th>model</th><th>state</th><th>pid</th><th>port</th><th>uptime</th>
@@ -16,7 +17,8 @@
   <tbody>
   {% for mid, m in runtime.items() | sort %}
   <tr>
-    <td><a href="/profiles/{{ mid }}">{{ mid }}</a></td>
+    <td>{% if mid in managed_names %}<a href="/profiles/{{ mid }}">{{ mid }}</a>
+        {% else %}{{ mid }} <span class="muted">(unmanaged)</span>{% endif %}</td>
     <td>{{ m.state | state_badge(m.state_class) | safe }}</td>
     <td class="muted">{{ m.pid or '' }}</td>
     <td class="muted">{{ m.port or '' }}</td>
@@ -56,6 +58,7 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 <div class="card" style="margin-top:1rem">
   <form method="post" action="/runtime/unload-all"
         onsubmit="return confirm('unload ALL running models?')">

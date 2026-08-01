@@ -5,8 +5,12 @@
 {% for d in inventory %}
   <div class="gauge card">
     <div class="muted">{{ d.device }} · {{ d.name }}</div>
+    {% if d.total_bytes %}
     <div class="bar"><div class="fill" style="width: {{ ((d.total_bytes - d.free_bytes) / d.total_bytes * 100) | round(1) }}%"></div></div>
     <div>{{ ((d.total_bytes - d.free_bytes) / 1073741824) | round(1) }} / {{ (d.total_bytes / 1073741824) | round(1) }} GiB</div>
+    {% else %}
+    <div class="muted">no VRAM reported</div>
+    {% endif %}
   </div>
 {% endfor %}
   <div class="gauge card">
@@ -14,6 +18,7 @@
     <div style="font-size:1.4rem">{{ (ram_avail / 1073741824) | round(1) }} GiB</div>
   </div>
 </div>
+<div class="table-scroll">
 <table>
   <thead><tr>
     <th>name</th><th>model</th><th>backend</th><th>placement</th><th>ctx</th><th>state</th><th>pid</th><th>port</th><th></th>
@@ -47,4 +52,5 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% endblock %}

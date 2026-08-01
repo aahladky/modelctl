@@ -1,6 +1,7 @@
 {% extends "base.html" %}
+{% block title %}{{ heading | default('not allowed') }} - modelctl{% endblock %}
 {% block content %}
-<h1>not allowed</h1>
+<h1>{{ heading | default('not allowed') }}</h1>
 <div class="warn card"><p>{{ message }}</p></div>
 <p><a href="/">back to dashboard</a></p>
 {% endblock %}

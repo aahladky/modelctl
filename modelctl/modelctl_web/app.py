@@ -123,6 +123,27 @@ def create_app(token=None, store=None, runner=None):
             return JSONResponse({"error": str(exc)}, status_code=404)
         return PlainTextResponse(f"{exc}\n", status_code=404)
 
+    @app.exception_handler(Exception)
+    async def unhandled_error(request: Request, exc: Exception):
+        # A bare "Internal Server Error" is a dead end; keep the operator
+        # in the app with the error visible and a way back. The traceback
+        # still goes to the journal.
+        import sys
+        import traceback as _tb
+        print(f"unhandled error at {request.url.path}", file=sys.stderr)
+        _tb.print_exception(exc, file=sys.stderr)
+        if request.url.path.startswith("/api/"):
+            return JSONResponse({"error": f"{type(exc).__name__}: {exc}"},
+                                status_code=500)
+        # Minimal context on purpose: ctx() itself touches setup probing,
+        # which must not be able to take the error page down with it.
+        return templates.TemplateResponse(
+            request=request, name="error.html",
+            context={"heading": "something went wrong",
+                     "message": f"{type(exc).__name__}: {exc}",
+                     "setup_blocking": []},
+            status_code=500)
+
     @app.middleware("http")
     async def auth(request: Request, call_next):
         if request.url.path in ("/login", "/healthz") or request.url.path.startswith("/static"):
@@ -215,7 +236,13 @@ def create_app(token=None, store=None, runner=None):
     def _fmt_elapsed(start_ts):
         if not start_ts:
             return ""
-        s = max(0, int(time.time() - start_ts))
+        # `started` comes verbatim from the external llama-swap /running
+        # payload, whose shape has drifted before -- a string timestamp
+        # must degrade, not 500 the whole runtime page.
+        try:
+            s = max(0, int(time.time() - float(start_ts)))
+        except (TypeError, ValueError):
+            return ""
         if s < 60:
             return f"{s}s ago"
         if s < 3600:
@@ -387,8 +414,14 @@ def create_app(token=None, store=None, runner=None):
         for f in EDIT_FIELDS:
             if f in form:
                 updates[f] = str(form[f])
-        for key in ("enabled",):
-            updates[key] = key in form
+        # Checkbox-absent means "unchecked" only when the full edit form
+        # was submitted (it carries _full_form). A partial programmatic
+        # POST that just set one field used to silently disable the
+        # profile, which unregistered the model from llama-swap on sync.
+        if "_full_form" in form:
+            updates["enabled"] = "enabled" in form
+        elif "enabled" in form:
+            updates["enabled"] = str(form["enabled"]).lower() in ("1", "true", "on")
         job_id = mutate.submit_edit(runner, name, updates)
         return RedirectResponse(f"/jobs/{job_id}?back=/profiles/{name}", status_code=303)
 
@@ -567,11 +600,17 @@ def create_app(token=None, store=None, runner=None):
         active = store_wiz.list_active()
         # Hugging Face search lives here now (it used to be the separate
         # /pull page): searching and starting the acquisition are one
-        # workflow, not two.
-        results = modelctl.search_models(q) if q else []
+        # workflow, not two. HF being down is a message, not a 500.
+        results, search_error = [], ""
+        if q:
+            try:
+                results = modelctl.search_models(q)
+            except Exception as e:
+                search_error = f"search failed: {e}"
         return templates.TemplateResponse(request=request, name="wizard_list.html",
                                           context=ctx(request, wizards=active,
-                                                      q=q, results=results))
+                                                      q=q, results=results,
+                                                      search_error=search_error))
 
     @app.get("/add/start/{repo_id:path}")
     def wizard_start_from_repo(repo_id: str):
@@ -610,7 +649,20 @@ def create_app(token=None, store=None, runner=None):
         state.source_type = source_type
         state.clear_error()
         if source_type == "hf_repo":
-            state.repo_id = form.get("repo_id", "")
+            # Validate before advancing: an empty or malformed repo id used
+            # to sail through to the inspect step, which then silently
+            # bounced back to /add -- a wizard stuck in a redirect loop with
+            # no error ever shown.
+            repo_id = (form.get("repo_id") or "").strip()
+            if not repo_id or "/" not in repo_id.strip("/"):
+                state.set_error(
+                    "enter a Hugging Face repo id like org/model-name"
+                    if not repo_id else
+                    f"'{repo_id}' is not a repo id -- expected org/model-name")
+                store_wiz.save(state)
+                return RedirectResponse(f"/add/{wizard_id}/source",
+                                        status_code=303)
+            state.repo_id = repo_id
             state.advance("inspect")
         elif source_type == "local_file":
             state.local_path = form.get("local_path", "")
@@ -632,6 +684,11 @@ def create_app(token=None, store=None, runner=None):
                 store_wiz.save(state)
                 return RedirectResponse(f"/add/{wizard_id}/source", status_code=303)
             state.advance("download")
+            _submit_download(state)
+        else:
+            # An unknown source_type used to fall through silently, landing
+            # the user back on the same form with no explanation.
+            state.set_error("pick a source: Hugging Face repository or local file")
         store_wiz.save(state)
         return RedirectResponse(f"/add/{wizard_id}/{state.step}", status_code=303)
 
@@ -640,11 +697,46 @@ def create_app(token=None, store=None, runner=None):
         from .wizard import WizardStore
         store_wiz = WizardStore()
         state = store_wiz.load(wizard_id)
-        if not state or not state.repo_id:
+        if not state:
             return RedirectResponse("/add", status_code=303)
-        contents = modelctl.get_repo_contents(state.repo_id)
+        if not state.repo_id:
+            # A wizard on the inspect step with no repo (pre-validation
+            # wizards could get here) used to bounce silently to /add,
+            # making its Resume link a dead loop. Send it back to source
+            # with the reason instead.
+            state.set_error("no repository selected yet")
+            state.advance("source")
+            store_wiz.save(state)
+            return RedirectResponse(f"/add/{wizard_id}/source", status_code=303)
+        # A typo'd repo id, a private repo, or HF being unreachable raises
+        # out of the HF client -- render the template's error branch instead
+        # of a bare 500 so the user can go back and correct the source.
+        try:
+            contents = modelctl.get_repo_contents(state.repo_id)
+        except Exception as e:
+            state.set_error(f"could not fetch {state.repo_id}: {e}")
+            store_wiz.save(state)
+            contents = None
         return templates.TemplateResponse(request=request, name="wizard_inspect.html",
                                           context=ctx(request, w=state, contents=contents))
+
+    def _submit_download(state):
+        """Submit the wizard's acquisition job exactly once.
+
+        Submission lives in POST handlers; the download GET used to submit
+        as a side effect, so two tabs (or a browser prefetch) raced the
+        job-id guard into two concurrent pulls of the same repo and a
+        duplicate `name-2` profile.
+        """
+        if state.download_job_id:
+            return
+        if state.source_type == "local_file" and state.local_path:
+            state.download_job_id = mutate.submit_import_local(
+                runner, state.local_path)
+        elif state.repo_id:
+            state.download_job_id = mutate.submit_pull(
+                runner, state.repo_id,
+                quant_label=state.selected_quant or None)
 
     @app.post("/add/{wizard_id}/inspect")
     async def wizard_inspect_submit(request: Request, wizard_id: str):
@@ -656,6 +748,7 @@ def create_app(token=None, store=None, runner=None):
         form = await request.form()
         state.selected_quant = form.get("quant", "")
         state.advance("download")
+        _submit_download(state)
         store_wiz.save(state)
         return RedirectResponse(f"/add/{wizard_id}/download", status_code=303)
 
@@ -689,19 +782,9 @@ def create_app(token=None, store=None, runner=None):
         if not state:
             return RedirectResponse("/add", status_code=303)
         is_local = state.source_type == "local_file" and bool(state.local_path)
-
-        # Submit only when nothing has been submitted yet. On a reload or a
-        # service restart the existing job is picked back up instead of a
-        # duplicate download being started.
-        if not state.download_job_id:
-            if is_local:
-                state.download_job_id = mutate.submit_import_local(
-                    runner, state.local_path)
-            elif state.repo_id:
-                state.download_job_id = mutate.submit_pull(
-                    runner, state.repo_id,
-                    quant_label=state.selected_quant or None)
-
+        # Render-only: submission happens in the POST handlers (inspect
+        # submit, source submit, retry, download/start) so reloads and
+        # extra tabs can't start duplicate downloads.
         _refresh_download_outcome(state)
         store_wiz.save(state)
         return templates.TemplateResponse(
@@ -728,6 +811,28 @@ def create_app(token=None, store=None, runner=None):
         store_wiz.save(state)
         return RedirectResponse(f"/add/{wizard_id}/analyze", status_code=303)
 
+    @app.post("/add/{wizard_id}/delete")
+    def wizard_delete(wizard_id: str):
+        """Abandon a wizard. Without this, a stuck wizard sat in the
+        active list for a day with a Resume button as its only affordance."""
+        from .wizard import WizardStore
+        WizardStore().delete(wizard_id)
+        return RedirectResponse("/add", status_code=303)
+
+    @app.post("/add/{wizard_id}/download/start")
+    def wizard_download_start(wizard_id: str):
+        """Explicit (re)start for a wizard that has no download job yet --
+        the landing point for wizards created before submission moved into
+        the POST handlers."""
+        from .wizard import WizardStore
+        store_wiz = WizardStore()
+        state = store_wiz.load(wizard_id)
+        if not state:
+            return RedirectResponse("/add", status_code=303)
+        _submit_download(state)
+        store_wiz.save(state)
+        return RedirectResponse(f"/add/{wizard_id}/download", status_code=303)
+
     @app.post("/add/{wizard_id}/retry/{step}")
     def wizard_retry(wizard_id: str, step: str):
         """Retry one failed step without restarting the wizard."""
@@ -741,6 +846,10 @@ def create_app(token=None, store=None, runner=None):
         if step == "download":
             state.download_job_id = ""
             state.download_complete = False
+            # Resubmit right away -- the download page no longer submits
+            # on GET, so a cleared job id would otherwise strand the
+            # retry on a page waiting for a job that never starts.
+            _submit_download(state)
         elif step == "test":
             state.test_job_id = ""
         elif step == "register":
@@ -770,8 +879,15 @@ def create_app(token=None, store=None, runner=None):
                 # job["result"] is the plain-text log (see append_result_line);
                 # the structured return value submit_pull()/submit_import_local()
                 # return is JSON-encoded in job["outcome"] (job_fragment.html
-                # reads it the same way via the `fromjson` filter).
-                outcome = json.loads(job["outcome"])
+                # reads it the same way via the `fromjson` filter). Legacy
+                # rows can hold a JSON scalar -- treating one as a dict
+                # 500'd this page on Jul 30.
+                try:
+                    outcome = json.loads(job["outcome"])
+                except (ValueError, TypeError):
+                    outcome = {}
+                if not isinstance(outcome, dict):
+                    outcome = {}
                 pname = outcome.get("profile")
                 if pname:
                     state.profile_name = pname
@@ -872,6 +988,21 @@ def create_app(token=None, store=None, runner=None):
                 # Still running: stay put rather than advancing over it.
                 store_wiz.save(state)
                 return RedirectResponse(f"/add/{wizard_id}/test", status_code=303)
+            # Fold the measured numbers into wizard state. The test job's
+            # outcome carries them (plan test: the tune run dict; smoke
+            # test: tok_per_s), but nothing copied them over, so the done
+            # page reported every tested registration as "not measured".
+            if outcome.get("ok"):
+                data = outcome.get("data") or {}
+                measured = {k: data[k] for k in
+                            ("generation_tps", "prompt_tps",
+                             "load_seconds", "cache_state") if data.get(k)}
+                if not measured and data.get("tok_per_s"):
+                    measured = {"generation_tps": data["tok_per_s"]}
+                if measured:
+                    state.measured = measured
+                    if state.selected_plan_id:
+                        state.test_observations[state.selected_plan_id] = measured
             state.advance("register")
             store_wiz.save(state)
             return RedirectResponse(f"/add/{wizard_id}/register", status_code=303)
@@ -915,6 +1046,19 @@ def create_app(token=None, store=None, runner=None):
             state.set_error("no profile to register")
             store_wiz.save(state)
             return RedirectResponse(f"/add/{wizard_id}/register", status_code=303)
+
+        # The recorded outcome alone is not enough: submitting a test
+        # clears it, so navigating straight to this URL while the test's
+        # llama-server is still up slipped past the gate and raced it for
+        # VRAM. Consult the live job store first.
+        if state.test_job_id and not state.registration_complete:
+            live = store.get(state.test_job_id)
+            if live and live.get("status") in ("queued", "running"):
+                state.set_error("the plan test is still running -- "
+                                "wait for it to finish before registering")
+                store_wiz.save(state)
+                return RedirectResponse(f"/add/{wizard_id}/register",
+                                        status_code=303)
 
         # A plan whose test failed (or never ran) must not be registered
         # and reported as verified on the done page. The wizard already
@@ -1045,8 +1189,21 @@ def create_app(token=None, store=None, runner=None):
         return RedirectResponse(f"/jobs/{job_id}?back=/", status_code=303)
 
     @app.post("/profiles/{name}/bench")
-    def profile_bench(name: str):
-        job_id = mutate.submit_bench(runner, name)
+    async def profile_bench(request: Request, name: str):
+        # Optional overrides: SSD-mmap models generate well under 1 tok/s,
+        # so the default 256x3 takes the better part of an hour there --
+        # a smaller budget measures the same steady state.
+        form = await request.form()
+        try:
+            max_tokens = max(1, min(4096, int(form.get("max_tokens", 256))))
+        except (TypeError, ValueError):
+            max_tokens = 256
+        try:
+            runs = max(1, min(10, int(form.get("runs", 3))))
+        except (TypeError, ValueError):
+            runs = 3
+        job_id = mutate.submit_bench(runner, name, max_tokens=max_tokens,
+                                     runs=runs)
         return RedirectResponse(f"/jobs/{job_id}?back=/", status_code=303)
 
     # ---- runtime ---------------------------------------------------------
@@ -1072,8 +1229,13 @@ def create_app(token=None, store=None, runner=None):
             stats = _scrape_moe_cache_metrics(port)
             if stats:
                 cache_stats[mid] = stats
+        # Which runtime models have a modelctl profile: the template only
+        # links "configure" for these -- llama-swap can run models modelctl
+        # doesn't manage, and linking those 404'd.
+        profile_names = {p.stem for p in modelctl.PROFILES_DIR.glob("*.json")}
         return templates.TemplateResponse(request=request, name="runtime.html", context=ctx(
             request, runtime=state, cache_stats=cache_stats,
+            managed_names=profile_names,
             reset_ok=request.query_params.get("reset_ok", ""),
             reset_error=request.query_params.get("reset_error", "")))
 
@@ -1094,7 +1256,14 @@ def create_app(token=None, store=None, runner=None):
             log_text = logs_data if isinstance(logs_data, str) else json.dumps(logs_data, indent=2)
         except ModelctlSwapError as e:
             log_text = f"error: {e.message}"
-        rt = client.model_state(name)
+        # The template reads the per-model runtime_state() shape (pid,
+        # port, registered, state_class); model_state() returns only
+        # {state, worker}, so the load button and pid/port never rendered.
+        rt = client.runtime_state().get(name) or {
+            "model_id": name, "state": "unavailable", "registered": False,
+            "running": False, "pid": None, "port": None, "started": None,
+            "state_class": "",
+        }
         return templates.TemplateResponse(request=request, name="runtime_logs.html", context=ctx(
             request, name=name, log_text=log_text, rt=rt))
 
@@ -1163,41 +1332,46 @@ def create_app(token=None, store=None, runner=None):
     @app.post("/hardware/save")
     async def hardware_save(request: Request):
         import modelctl_hardware
+        import modelctl_fsutil
         form = await request.form()
-        settings = modelctl_hardware.load_settings()
-        dev_settings = settings.setdefault("devices", {})
-        for key, val in form.items():
-            if key.startswith("reserve_"):
-                dev = key.removeprefix("reserve_")
-                ds = dev_settings.setdefault(dev, {})
+        # The whole read-modify-write holds the state lock: the storage
+        # calibration job writes the same hardware.json from the mutation
+        # lane, and an unlocked save here could drop its measurement (or
+        # ours) depending on who wrote last.
+        with modelctl_fsutil.state_lock():
+            settings = modelctl_hardware.load_settings()
+            dev_settings = settings.setdefault("devices", {})
+            for key, val in form.items():
+                if key.startswith("reserve_"):
+                    dev = key.removeprefix("reserve_")
+                    ds = dev_settings.setdefault(dev, {})
+                    try:
+                        ds["reserve_bytes"] = int(val) * 1073741824
+                    except ValueError:
+                        pass
+                elif key.startswith("role_"):
+                    dev = key.removeprefix("role_")
+                    ds = dev_settings.setdefault(dev, {})
+                    ds["role"] = val
+                elif key.startswith("enabled_"):
+                    pass  # handled below -- unchecked checkboxes are absent
+                elif key.startswith("bw_"):
+                    dev = key.removeprefix("bw_")
+                    ds = dev_settings.setdefault(dev, {})
+                    try:
+                        ds["memory_bandwidth_gbs_override"] = float(val)
+                    except ValueError:
+                        pass
+            snap = modelctl_hardware.capture_hardware_snapshot(settings)
+            for g in snap.gpus:
+                ds = dev_settings.setdefault(g.device, {})
+                ds["enabled"] = f"enabled_{g.device}" in form
+            if "ram_reserve" in form:
                 try:
-                    ds["reserve_bytes"] = int(val) * 1073741824
+                    settings.setdefault("ram", {})["reserve_bytes"] = int(form["ram_reserve"]) * 1073741824
                 except ValueError:
                     pass
-            elif key.startswith("role_"):
-                dev = key.removeprefix("role_")
-                ds = dev_settings.setdefault(dev, {})
-                ds["role"] = val
-            elif key.startswith("enabled_"):
-                pass  # handled below -- unchecked checkboxes are absent
-            elif key.startswith("bw_"):
-                dev = key.removeprefix("bw_")
-                ds = dev_settings.setdefault(dev, {})
-                try:
-                    ds["memory_bandwidth_gbs_override"] = float(val)
-                except ValueError:
-                    pass
-        import modelctl_hardware as _hw
-        snap = _hw.capture_hardware_snapshot(settings)
-        for g in snap.gpus:
-            ds = dev_settings.setdefault(g.device, {})
-            ds["enabled"] = f"enabled_{g.device}" in form
-        if "ram_reserve" in form:
-            try:
-                settings.setdefault("ram", {})["reserve_bytes"] = int(form["ram_reserve"]) * 1073741824
-            except ValueError:
-                pass
-        modelctl_hardware.save_settings(settings)
+            modelctl_hardware.save_settings(settings)
         return RedirectResponse("/hardware?saved=1", status_code=303)
 
     @app.post("/hardware/calibrate")
@@ -1488,7 +1662,13 @@ def create_app(token=None, store=None, runner=None):
     @app.get("/runtime/routing", response_class=HTMLResponse)
     def routing_page(request: Request):
         import modelctl_matrix
-        config = modelctl.yaml.safe_load(modelctl.LLAMA_SWAP_CONFIG_PATH.read_text()) or {}
+        try:
+            config = modelctl.yaml.safe_load(
+                modelctl.LLAMA_SWAP_CONFIG_PATH.read_text()) or {}
+        except (OSError, modelctl.yaml.YAMLError):
+            # A missing or unparsable router config is a state to show,
+            # not a 500.
+            config = {}
         generated = modelctl_matrix.generate_matrix()
         merged = modelctl_matrix.merge_matrix(config.get("matrix"), generated)
         preview = modelctl.yaml.safe_dump({"matrix": merged}, sort_keys=False)
@@ -1561,6 +1741,17 @@ def create_app(token=None, store=None, runner=None):
         # the same submit_pull service as everything else -- it owns no
         # validation or registration logic of its own. Browser users go
         # through /add.
+        # Dedup: two concurrent pulls of one repo download into the same
+        # destination paths and mint a duplicate `name-2` profile.
+        for j in store.list():
+            if (j.get("type") == "pull"
+                    and j.get("status") in ("queued", "running")):
+                try:
+                    payload = json.loads(j.get("payload") or "{}")
+                except ValueError:
+                    payload = {}
+                if payload.get("repo_id") == repo_id:
+                    return {"job": j["id"], "deduplicated": True}
         return {"job": mutate.submit_pull(runner, repo_id, quant_label=quant or None)}
 
     @app.get("/api/jobs")

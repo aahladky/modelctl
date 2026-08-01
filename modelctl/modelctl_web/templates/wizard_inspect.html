@@ -17,7 +17,7 @@
       <tr>
         <td>{{ g.label }}</td>
         <td>{{ g.files | length }} part(s)</td>
-        <td>{{ "%.1f" | format(g.total_bytes / 1073741824) }} GiB</td>
+        <td>{% if g.total_size %}{{ "%.1f" | format(g.total_size / 1073741824) }} GiB{% else %}<span class="muted">size unknown</span>{% endif %}</td>
         <td><input type="radio" name="quant" value="{{ g.label }}"
             {% if loop.first %}checked{% endif %}></td>
       </tr>
@@ -39,6 +39,12 @@
   {% endif %}
 </div>
 {% else %}
-<p class="error">Could not fetch repository contents.</p>
+<div class="card">
+  <p class="error">Could not fetch repository contents.</p>
+  {% for e in w.errors %}<p class="muted">{{ e.message }}</p>{% endfor %}
+  <div class="actions" style="margin-top:.5rem">
+    <a href="/add/{{ w.wizard_id }}/source" class="btn">&larr; Change source</a>
+  </div>
+</div>
 {% endif %}
 {% endblock %}

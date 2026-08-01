@@ -18,7 +18,11 @@
       Loading...
     </div>
   {% else %}
-    <p class="muted">Starting...</p>
+    <p class="muted">The {{ 'import' if is_local else 'download' }} has not started.</p>
+    <form method="post" action="/add/{{ w.wizard_id }}/download/start">
+      <button type="submit" class="btn btn-primary">
+        Start {{ 'import' if is_local else 'download' }}</button>
+    </form>
   {% endif %}
 </div>
 

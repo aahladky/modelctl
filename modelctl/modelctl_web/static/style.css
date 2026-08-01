@@ -1,33 +1,197 @@
+/* modelctl console styles.
+   One small system: color tokens, a type scale, spacing, and interactive
+   states. The wizard templates were written against .btn/.field/.error
+   before these existed -- every class referenced by a template is defined
+   here. */
+
+:root {
+  --bg: #14171c;
+  --bg-raised: #1c2129;
+  --bg-inset: #0e1116;
+  --border: #2a313c;
+  --border-strong: #3a4452;
+  --text: #d7dce2;
+  --text-muted: #8b95a3;
+  --link: #8fb4e8;
+  --accent: #3f7fc4;
+  --accent-strong: #2e5a88;
+  --ok: #6fce85;
+  --warn: #e8b25f;
+  --err: #e07a7a;
+  --active: #5ba8e8;
+  --danger: #7a3535;
+  --danger-strong: #8f4040;
+  --radius: 6px;
+}
+
 * { box-sizing: border-box; }
-body { background:#14171c; color:#d7dce2; font:14px/1.45 -apple-system,"Segoe UI",Roboto,sans-serif; margin:0; }
-nav { display:flex; gap:1rem; align-items:center; background:#1c2129; padding:.6rem 1rem; }
-nav a { color:#8fb4e8; text-decoration:none; }
-nav .spacer { flex:1; }
-main { max-width:1100px; margin:1.2rem auto; padding:0 1rem; }
-h1 { font-size:1.25rem; } h2 { font-size:1rem; margin-top:1.4rem; }
-table { width:100%; border-collapse:collapse; margin:.8rem 0; }
-th, td { text-align:left; padding:.4rem .6rem; border-bottom:1px solid #2a313c; vertical-align:top; }
-th { color:#8b95a3; font-weight:600; }
-a { color:#8fb4e8; }
-.card { background:#1c2129; border:1px solid #2a313c; border-radius:6px; padding:.8rem 1rem; margin:.6rem 0; }
-.muted { color:#8b95a3; }
-.ok { color:#6fce85; }
-.warn { color:#e8b25f; }
-.err { color:#e07a7a; }
-.active { color:#5ba8e8; }
-.stopped { color:#8b95a3; }
-.danger { background:#5a2b2b; }
-button { background:#2e5a88; color:#fff; border:0; border-radius:4px; padding:.3rem .8rem; cursor:pointer; }
-button.danger { background:#7a3535; }
-input { background:#14171c; color:#d7dce2; border:1px solid #2a313c; border-radius:4px; padding:.3rem .5rem; }
-.grid2 { display:grid; grid-template-columns:1fr 1fr; gap:.5rem 1.5rem; }
-.gauges { display:flex; gap:1rem; flex-wrap:wrap; }
-.gauge { min-width:220px; }
-.bar { background:#0e1116; border-radius:4px; height:10px; margin:.4rem 0; overflow:hidden; }
-.fill { background:#3f7fc4; height:100%; }
-pre { white-space:pre-wrap; word-break:break-word; font-size:.85rem; max-height:420px; overflow:auto; }
-tr.disabled td { opacity:.45; }
-tr.hl td { background:#223047; }
-.actions { display:flex; gap:.4rem; align-items:center; flex-wrap:wrap; }
-.actions form { display:inline; }
-code { font-size:.85rem; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+  margin: 0;
+}
+
+/* ---- nav ---- */
+nav {
+  display: flex; gap: .25rem; align-items: center;
+  background: var(--bg-raised);
+  padding: .45rem .75rem;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+nav strong { margin-right: .75rem; letter-spacing: .02em; }
+nav a {
+  color: var(--text-muted); text-decoration: none;
+  padding: .3rem .6rem; border-radius: var(--radius);
+}
+nav a:hover { color: var(--text); background: rgba(143, 180, 232, .08); }
+nav a.active { color: var(--text); background: rgba(143, 180, 232, .14); }
+nav .spacer { flex: 1; }
+
+main { max-width: 1100px; margin: 1.2rem auto; padding: 0 1rem; }
+
+/* ---- type ---- */
+h1 { font-size: 1.45rem; margin: .2rem 0 1rem; letter-spacing: -.01em; }
+h2 { font-size: 1.1rem; margin-top: 1.6rem; }
+h3 { font-size: 1rem; margin: .2rem 0 .6rem; }
+a { color: var(--link); }
+code { font-size: .85rem; }
+pre {
+  white-space: pre-wrap; word-break: break-word;
+  font-size: .85rem; max-height: 420px; overflow: auto;
+  background: var(--bg-inset); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: .6rem .8rem;
+}
+
+/* ---- tables ---- */
+table { width: 100%; border-collapse: collapse; margin: .8rem 0; }
+th, td {
+  text-align: left; padding: .45rem .6rem;
+  border-bottom: 1px solid var(--border); vertical-align: top;
+}
+th { color: var(--text-muted); font-weight: 600; font-size: .82rem;
+     text-transform: uppercase; letter-spacing: .04em; }
+tbody tr:hover td { background: rgba(143, 180, 232, .04); }
+tr.disabled td { opacity: .45; }
+tr.hl td { background: #223047; }
+
+/* ---- cards & status ---- */
+.card {
+  background: var(--bg-raised); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: .9rem 1.1rem; margin: .7rem 0;
+}
+.muted { color: var(--text-muted); }
+.ok { color: var(--ok); }
+.warn, .warning { color: var(--warn); }
+.err, .error { color: var(--err); }
+.active { color: var(--active); }
+.stopped { color: var(--text-muted); }
+.danger { background: var(--danger); }
+
+p.error, p.err {
+  background: rgba(224, 122, 122, .08);
+  border: 1px solid rgba(224, 122, 122, .35);
+  border-radius: var(--radius); padding: .5rem .8rem;
+}
+p.warn, p.warning {
+  background: rgba(232, 178, 95, .07);
+  border: 1px solid rgba(232, 178, 95, .3);
+  border-radius: var(--radius); padding: .5rem .8rem;
+}
+
+/* ---- buttons: <button> and <a class="btn"> share one look ---- */
+button, .btn {
+  display: inline-block;
+  background: var(--bg-raised); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  padding: .32rem .85rem; cursor: pointer;
+  font: inherit; font-size: .9rem; text-decoration: none;
+  transition: background .12s, border-color .12s;
+}
+button:hover, .btn:hover {
+  background: #232a35; border-color: #4a5668; color: var(--text);
+}
+button:focus-visible, .btn:focus-visible,
+input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+button:disabled { opacity: .5; cursor: not-allowed; }
+button.btn-primary, .btn.btn-primary {
+  background: var(--accent-strong); border-color: var(--accent-strong);
+  color: #fff;
+}
+button.btn-primary:hover, .btn.btn-primary:hover {
+  background: #366a9f; border-color: #366a9f;
+}
+button.danger, button.btn-danger, .btn.btn-danger {
+  background: var(--danger); border-color: var(--danger); color: #fff;
+}
+button.danger:hover, button.btn-danger:hover, .btn.btn-danger:hover {
+  background: var(--danger-strong); border-color: var(--danger-strong);
+}
+
+/* ---- forms ---- */
+input, select {
+  background: var(--bg-inset); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: .32rem .55rem; font: inherit;
+}
+.form-grid { display: grid; gap: .9rem; max-width: 620px; }
+.field label { display: block; margin-bottom: .25rem; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem 1.5rem; }
+
+/* ---- gauges ---- */
+.gauges { display: flex; gap: 1rem; flex-wrap: wrap; }
+.gauge { min-width: 220px; }
+.bar {
+  background: var(--bg-inset); border-radius: 4px; height: 10px;
+  margin: .4rem 0; overflow: hidden;
+}
+.fill { background: var(--accent); height: 100%; transition: width .3s; }
+
+/* ---- action rows ---- */
+.actions { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; }
+.actions form { display: inline; }
+
+.wizard-row {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: .8rem; padding: .45rem 0; border-bottom: 1px solid var(--border);
+}
+.wizard-row:last-child { border-bottom: 0; }
+
+/* ---- flash messages ---- */
+.flash {
+  background: rgba(111, 206, 133, .1);
+  border: 1px solid rgba(111, 206, 133, .35);
+  border-radius: var(--radius);
+  padding: .5rem .9rem; margin: .6rem 0;
+}
+.flash.flash-warn {
+  background: rgba(232, 178, 95, .08);
+  border-color: rgba(232, 178, 95, .3);
+}
+
+/* ---- loading states ---- */
+.htmx-indicator { display: none; }
+.htmx-request .htmx-indicator, .htmx-request.htmx-indicator {
+  display: inline-block;
+}
+.spinner {
+  display: inline-block; width: 14px; height: 14px;
+  border: 2px solid var(--border-strong); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin .8s linear infinite;
+  vertical-align: -2px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+form.busy button[type="submit"] { opacity: .6; pointer-events: none; }
+
+/* ---- responsive ---- */
+.table-scroll { overflow-x: auto; }
+@media (max-width: 720px) {
+  main { margin: .6rem auto; }
+  table { font-size: .85rem; }
+  th, td { padding: .35rem .4rem; }
+}

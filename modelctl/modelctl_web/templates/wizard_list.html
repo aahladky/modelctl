@@ -7,14 +7,18 @@
 <h2>Active Wizards</h2>
 <div class="card">
 {% for w in wizards %}
-<div style="display:flex;justify-content:space-between;align-items:center;padding:.3rem 0;border-bottom:1px solid var(--border)">
+<div class="wizard-row">
   <div>
-    <strong>{{ w.wizard_id }}</strong> · step: {{ w.step }}
-    {% if w.repo_id %} · {{ w.repo_id }}{% endif %}
-    {% if w.profile_name %} · profile: {{ w.profile_name }}{% endif %}
+    <strong>{{ w.profile_name or w.repo_id or w.local_path or 'new model' }}</strong>
+    · step: {{ w.step }}
+    <span class="muted">· wizard {{ w.wizard_id[:6] }}</span>
   </div>
-  <div>
-    <a href="/add/{{ w.wizard_id }}/{{ w.step }}" class="btn">Resume</a>
+  <div class="actions">
+    <a href="/add/{{ w.wizard_id }}/{{ w.step }}" class="btn btn-primary">Resume</a>
+    <form method="post" action="/add/{{ w.wizard_id }}/delete"
+          onsubmit="return confirm('abandon this wizard?')">
+      <button type="submit" class="btn btn-danger">Abandon</button>
+    </form>
   </div>
 </div>
 {% endfor %}
@@ -30,21 +34,28 @@
   <input name="q" value="{{ q }}" placeholder="search hugging face (e.g. Qwen3.6-27B-GGUF)" style="width:70%">
   <button type="submit" class="btn">search</button>
 </form>
-{% if results %}
+{% if search_error %}
+<p class="error">{{ search_error }}</p>
+{% elif results %}
+{% set gguf_results = results | selectattr('is_gguf') | list %}
+{% if gguf_results %}
 <table>
   <thead><tr><th>repo</th><th>downloads</th><th></th><th></th></tr></thead>
   <tbody>
-  {% for r in results %}
-  {% if r.is_gguf %}
+  {% for r in gguf_results %}
   <tr>
     <td>{{ r.repo_id }}</td>
     <td class="muted">{{ r.downloads }}</td>
     <td>{% if r.has_mtp %}<span class="ok">MTP</span>{% endif %}</td>
     <td><a href="/add/start/{{ r.repo_id }}" class="btn">add this model</a></td>
   </tr>
-  {% endif %}
   {% endfor %}
   </tbody>
 </table>
+{% else %}
+<p class="muted">No GGUF repositories matched "{{ q }}".</p>
+{% endif %}
+{% elif q %}
+<p class="muted">No results for "{{ q }}".</p>
 {% endif %}
 {% endblock %}
