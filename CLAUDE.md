@@ -58,6 +58,8 @@ Session loop:
 2. Work it in a worktree on branch `agent/<item-id>` off `staging`.
 3. Drive it to its stated Gate. Update the item's Status and Log lines in
    BACKLOG.md as you go (in_progress -> done / parked-evidence / blocked).
+   Update BACKLOG.md in the MAIN checkout, not your worktree copy — it is
+   the live board the owner and other sessions read.
 4. Done requires ALL of: the item's Gate is green; evidence written to
    docs/plans/evidence/ (docs/upstream-sync/ style); modelctl unittest
    suite passes; relevant fork tests pass.
@@ -86,6 +88,24 @@ Hard guardrails:
   window (02:00-06:00 local) or when serving is verifiably idle. CPU,
   SYCL1, and offline work run anytime.
 - No destructive operations outside the worktree. No credential handling.
+
+Execution discipline (wall-clock economy):
+- No redundant test loops. Keep an inner/outer split. Inner loop, per
+  edit: incremental build of the touched target only, then ONLY the
+  narrowest relevant tests (`ctest -R <specific>`, a single unittest
+  module) — aim under ~90 seconds. Outer loop, exactly once at gate
+  time: full `unittest discover`, full fork tests, the sanitizer build,
+  and whatever battery the item's Gate names. Never run gate-level
+  batteries per-edit; never re-run anything that passed when no code it
+  covers has changed since.
+- No fire-and-forget launches. Every long-running or backgrounded
+  command gets an active liveness check within ~15 seconds: process
+  alive, first log lines actually read, and for servers the readiness
+  endpoint polled. Something that should print immediately and hasn't
+  is a failure to diagnose NOW, not later. While a long job runs, check
+  its output is growing every minute or two; a silent log on a job that
+  should stream means stop and investigate. Confirm each step's exit
+  status before launching anything that depends on it.
 
 Owner interface: the owner's only jobs are (a) answering
 docs/plans/decisions/ memos when the folder is nonempty — each answer
