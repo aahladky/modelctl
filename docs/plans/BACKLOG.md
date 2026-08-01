@@ -140,6 +140,30 @@ Log:
 
 ---
 
+## P11a — console overhaul: teardown, IA, and design directions
+Status: ready
+Autonomy: memo + mockups only; if Owner inputs in
+docs/plans/console-overhaul-brief.md are TBD, adopt its defaults and
+note that in the memo
+Spec: read the brief, the 2026-07-31/08-01 audit trail in
+docs/upstream-sync/, and modelctl_web/. Deliver everything under "P11a
+deliverables" in the brief, ending in a decision memo with a
+recommended direction.
+Gate: teardown memo + mockups + migration plan committed; decision
+memo filed in docs/plans/decisions/.
+Log:
+
+## P11b — console overhaul phase 1: harness, then backbone
+Status: gated (depends P11a + direction pick)
+Autonomy: auto-merge on gate
+Spec: build the route-walk + wizard-e2e + job-cancel harness against a
+stubbed backend FIRST; then restructure app.py into per-domain routers
+plus a view-model layer with zero intended visual change. Later visual
+and IA phases are authored by P11a's migration plan.
+Gate: harness green before and after; modelctl suite green; rendered-
+page parity snapshots identical.
+Log:
+
 ## needs-hands (owner)
 - NH1: enable the nightly session timer: `systemctl --user enable --now
   claude-backlog.timer` after reviewing systemd/claude-backlog.*.
