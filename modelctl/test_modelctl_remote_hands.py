@@ -677,6 +677,30 @@ class CimdTests(RemoteHandsBase):
             oauth.fetch_cimd(self.CLIENT, opener=fake_cimd(doc))
         self.assertEqual(ctx.exception.code, "invalid_client")
 
+    def test_fetch_sends_a_real_user_agent(self):
+        """urllib's default User-Agent is `Python-urllib/<version>`, and
+        the CDN in front of claude.ai answers that with 403 -- observed
+        2026-08-02 against the live client_id document, where curl got
+        200 and urllib got 403 with nothing else changed. This is the
+        regression that cost a working connector."""
+        req = oauth.cimd_request("https://claude.ai/oauth/x")
+        agent = req.get_header("User-agent") or ""
+        self.assertTrue(agent)
+        self.assertNotIn("Python-urllib", agent)
+        self.assertEqual(req.get_header("Accept"), "application/json")
+
+    def test_fetch_passes_a_request_object_not_a_bare_url(self):
+        """A bare URL string would carry none of those headers."""
+        seen = {}
+
+        def opener(req, timeout=None):
+            seen["req"] = req
+            return fake_cimd({"client_id": self.CLIENT,
+                              "redirect_uris": []})(req, timeout)
+        oauth.fetch_cimd(self.CLIENT, opener=opener)
+        self.assertIsInstance(seen["req"], urllib.request.Request)
+        self.assertEqual(seen["req"].full_url, self.CLIENT)
+
     def test_non_https_client_id_is_refused(self):
         with self.assertRaises(oauth.OAuthError):
             oauth.fetch_cimd("http://claude.ai/x", opener=fake_cimd({}))

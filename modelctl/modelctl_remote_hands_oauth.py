@@ -274,6 +274,23 @@ def redirect_uri_allowed(client_id, redirect_uri, registered):
     return _origin(client_id)[:2] == _origin(redirect_uri)[:2]
 
 
+def cimd_request(client_id):
+    """The GET this server makes for a client_id document.
+
+    The User-Agent is not decoration. urllib's default is
+    `Python-urllib/<version>`, and the CDN in front of claude.ai answers
+    that with 403 Forbidden -- observed 2026-08-02 against
+    https://claude.ai/oauth/mcp-oauth-client-metadata, where curl got
+    200 and urllib got 403 with nothing else changed. Any real
+    User-Agent is accepted; this one names the service so the request is
+    identifiable at the other end. Accept is sent because the document
+    is JSON and asking for it is correct regardless."""
+    req = urllib.request.Request(client_id)
+    req.add_header("User-Agent", f"{__name__.replace('_', '-')}/1.0")
+    req.add_header("Accept", "application/json")
+    return req
+
+
 def fetch_cimd(client_id, opener=None):
     """Resolve a Client ID Metadata Document.
 
@@ -286,7 +303,7 @@ def fetch_cimd(client_id, opener=None):
                          "client_id must be an https URL or a registered id")
     try:
         open_url = opener or urllib.request.urlopen
-        with open_url(client_id, timeout=CIMD_TIMEOUT) as resp:
+        with open_url(cimd_request(client_id), timeout=CIMD_TIMEOUT) as resp:
             raw = resp.read(CIMD_MAX_BYTES + 1)
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise OAuthError("invalid_client",
