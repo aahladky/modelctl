@@ -214,23 +214,6 @@ Ledger schema (`version` 1):
 }
 ```
 
-## Writing orders for parallel lanes
-
-This part lives with whoever writes the orders, not with the tool — the
-tool cannot check it:
-
-* **Parallel orders get disjoint file scopes.** Two lanes editing
-  `modelctl.py` will both land, and the second one's rebase either
-  conflicts (a stop, and a person's afternoon) or replays into a
-  semantic conflict that only the re-run checks catch.
-* **At most one in-flight order may advance the fork pin**, and fork
-  orders are serialized. A pin advance moves the runtime under every
-  other lane at once; two of them in flight cannot be rebased into a
-  sensible order after the fact.
-* **No two lanes benchmark at the same time.** They physically cannot,
-  because of the GPU lock — but an order that assumes it can measure
-  while another lane measures will just block, so write it knowing that.
-
 ## Deliberate limits
 
 * `land` never stashes and never force-pushes; there is no `--force`
