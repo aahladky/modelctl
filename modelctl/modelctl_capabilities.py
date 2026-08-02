@@ -16,7 +16,8 @@ Schema versions:
       flag declarations; one uniform per-GPU cache budget
   3 — adds moe_cache_per_device_budgets: --moe-cache-bytes accepts a
       device map (SYCL0=N,SYCL1=N), so each card gets the budget the
-      planner reserved for it
+      planner reserved for it; and moe_cache_mmap_advise, the mmap-tier
+      madvise management gated at runtime by GGML_MOE_CACHE_MMAP_ADVISE
 
 normalize_capabilities() converts every schema to the current canonical
 form so all consumers see a consistent representation; features absent
@@ -197,6 +198,7 @@ def _classify_probe_failure(binary_path: str, status: str = "unsupported") -> di
             "moe_cache_prefetch": False,
             "moe_offload_threshold_control": False,
             "moe_cache_per_device_budgets": False,
+            "moe_cache_mmap_advise": False,
         },
         "constraints": {
             "moe_cache_backend": "",
@@ -248,6 +250,8 @@ def normalize_capabilities(raw_caps: dict) -> dict:
             # Schema 1/2 backends take a single uniform budget; the
             # per-device map form arrived with schema 3.
             "moe_cache_per_device_budgets": False,
+            # Schema 1 predates the mmap-advise tier entirely.
+            "moe_cache_mmap_advise": False,
         }
 
         # Map schema 1 CLI names to canonical names.
@@ -318,6 +322,13 @@ def normalize_capabilities(raw_caps: dict) -> dict:
         # planner and build_moe_cache_args collapse the map for those.
         "moe_cache_per_device_budgets": bool(
             features.get("moe_cache_per_device_budgets")),
+        # P1's mmap-tier madvise management, gated at runtime by
+        # GGML_MOE_CACHE_MMAP_ADVISE. The binary has emitted this since
+        # f4d390349 and integration-manifest.json lists it supported, but
+        # it was missing from this whitelist -- so every caller asking
+        # modelctl whether the runtime has it was told no, including the
+        # deploy check that is supposed to confirm the feature landed.
+        "moe_cache_mmap_advise": bool(features.get("moe_cache_mmap_advise")),
     }
 
     # Force prefetch false until implemented. Hybrid is allowed through
@@ -611,6 +622,18 @@ def supports_hybrid_miss(caps: dict) -> bool:
 def supports_metrics(caps: dict) -> bool:
     """True if the backend exposes cache hit/miss/eviction metrics."""
     return bool(caps.get("features", {}).get("moe_cache_metrics"))
+
+
+def supports_mmap_advise(caps: dict) -> bool:
+    """True if the backend manages madvise over the mmap tier (P1).
+
+    Runtime-gated by GGML_MOE_CACHE_MMAP_ADVISE, so support here means
+    the knob exists, not that it is on. Shown to be inert on the
+    execution path once the oneDNN reduction order was pinned: with
+    determinism on, advise-on and advise-off produce byte-identical
+    execution fingerprints (2026-08-01 determinism record §6).
+    """
+    return bool(caps.get("features", {}).get("moe_cache_mmap_advise"))
 
 
 def supports_prefetch(caps: dict) -> bool:

@@ -168,6 +168,29 @@ router stats` reads per-model Prometheus metrics; `modelctl router
 load --evict` loads a model, unloading another first if needed. The
 intended pattern is at most one large (15GB+) model loaded at a time.
 
+## Benchmarking
+
+Three pieces sit above the per-run protocol in
+[docs/runtime/moe-cache-testing.md](docs/runtime/moe-cache-testing.md),
+all documented in
+[docs/runtime/benchmarking.md](docs/runtime/benchmarking.md):
+
+- **Paired comparisons** (`modelctl_paired.py`) alternate two conditions
+  back-to-back and compare the delta *within* each pair, so machine
+  drift between blocks cannot land in the answer. Reports every raw run,
+  per-pair deltas with signs, and an exact sign test — never a verdict.
+- **Anchors** (`anchors.json`) store a reference measurement beside the
+  fingerprint of what produced it (build commit, profile hash,
+  environment, driver). A battery re-runs an anchor only when that
+  fingerprint is stale, when the anchor is marked `void`, or when it is
+  the laguna canary, which always runs.
+- **The night lane** (`night-lane.json`) holds pre-registered
+  comparisons — question, criterion and sample size committed *before*
+  any numbers exist. Enabled jobs run unattended on the benchmark lane,
+  but only through a window that requires llama-swap to be holding
+  nothing and the load to be below a ceiling; both halves fail closed.
+  Evidence lands in `docs/evidence/` with one-line summaries.
+
 ## Configuration (environment variables)
 
 | Variable | Purpose |

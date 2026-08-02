@@ -1,0 +1,349 @@
+{
+  "version": 1,
+  "anchors": [
+    {
+      "id": "c1-static-122b",
+      "condition": "C1 static placement, default offload threshold, determinism on (-ot ffn_.*_exps=CPU, no cache flags)",
+      "metric": "generation_tps",
+      "unit": "tok/s",
+      "value": 6.236500189290682,
+      "runs": [
+        5.7147102356175035,
+        6.48098673428091,
+        5.513445419668605,
+        7.530734959136644,
+        5.942623597749751
+      ],
+      "fingerprint": {
+        "build_commit": "85b7e6556",
+        "profile_hash": "",
+        "env_hash": "",
+        "driver": ""
+      },
+      "recorded": "2026-08-01",
+      "source": "modelctl/docs/evidence/2026-08-01-onednn-determinism.md",
+      "load": {
+        "samples": 442,
+        "loadavg_1m": {
+          "min": 2.63,
+          "max": 17.15,
+          "mean": 8.99
+        },
+        "mem_available_gib": {
+          "min": 22.7,
+          "max": 25.2
+        },
+        "note": "battery-wide, not per run -- the gap this registry closes"
+      },
+      "extra": {
+        "sd_tok_s": 0.808741880460431,
+        "prompt_tok_s_per_run": [
+          11.754535380617199,
+          11.391049017237245,
+          9.565048963268255,
+          15.19271964874432,
+          9.828631115167656
+        ],
+        "load_seconds_per_run": [
+          16.03911828994751,
+          16.042094469070435,
+          16.026256561279297,
+          16.036773681640625,
+          18.240530490875244
+        ],
+        "env_overrides_recorded": {
+          "GGML_SYCL_DETERMINISTIC": "1",
+          "GGML_MOE_FINGERPRINT": "/tmp/claude-1000/-home-aaron-workspace-moe-serving/c48f1a94-5752-4490-a2a8-ddd2fc49f391/scratchpad/runs/rail/C1det-r1.fp"
+        },
+        "binary_recorded": "/home/aaron/workspace/moe-fork-det/build-sycl-det/bin/llama-server",
+        "hit_ratio_per_run": null,
+        "effective_cache_budget_bytes_per_run": null,
+        "effective_cache_budget_note": "not recorded by the 2026-08-01 battery: only the requested --moe-cache-bytes is in the argv, never the budget the runtime ended up with"
+      },
+      "void": true,
+      "void_reason": "load-contaminated: taken across a battery whose loadavg(1m) ran 2.63-17.15 (mean 8.99) over 442 samples, so the conditions were not measured under one machine. Re-anchor before reuse.",
+      "always_run": false,
+      "note": "Qwen3.5-122B-A10B-UD-IQ1_M, 128-token measured decode, greedy seed 42, cache_prompt=false, fresh server per run. profile_hash/env_hash/driver were never recorded for these runs, so they read as unrecorded rather than as a match."
+    },
+    {
+      "id": "c2-cache-122b",
+      "condition": "C2 transfer cache on, hybrid off, determinism on (--moe-cache-bytes SYCL0=4294967296 slru, admission-misses 2, prefill-admission off; GGML_OP_OFFLOAD_MOE_MIN_BATCH=1)",
+      "metric": "generation_tps",
+      "unit": "tok/s",
+      "value": 5.0412594026593585,
+      "runs": [
+        4.832727046330485,
+        5.4051851349807745,
+        5.212481090503169,
+        5.285318854202332,
+        4.894596396169856,
+        4.8778785008876975,
+        4.437266395690665,
+        5.313331959338897,
+        5.005471997629909,
+        5.1483366508597985
+      ],
+      "fingerprint": {
+        "build_commit": "85b7e6556",
+        "profile_hash": "",
+        "env_hash": "",
+        "driver": ""
+      },
+      "recorded": "2026-08-01",
+      "source": "modelctl/docs/evidence/2026-08-01-onednn-determinism.md",
+      "load": {
+        "samples": 442,
+        "loadavg_1m": {
+          "min": 2.63,
+          "max": 17.15,
+          "mean": 8.99
+        },
+        "mem_available_gib": {
+          "min": 22.7,
+          "max": 25.2
+        },
+        "note": "battery-wide, not per run -- the gap this registry closes"
+      },
+      "extra": {
+        "sd_tok_s": 0.2914695000433526,
+        "prompt_tok_s_per_run": [
+          9.425292773156766,
+          8.904470813370793,
+          8.43280529917485,
+          8.432519243871331,
+          10.024251854771371,
+          9.22253215519677,
+          8.060450447281722,
+          9.483565950118598,
+          13.20902440547382,
+          9.42009670585641
+        ],
+        "load_seconds_per_run": [
+          19.027483463287354,
+          19.648476362228394,
+          15.021142721176147,
+          15.227376699447632,
+          19.712586879730225,
+          15.136720895767212,
+          19.202811241149902,
+          16.036850690841675,
+          14.14256238937378,
+          19.566251516342163
+        ],
+        "env_overrides_recorded": {
+          "GGML_OP_OFFLOAD_MOE_MIN_BATCH": "1",
+          "GGML_SYCL_DETERMINISTIC": "1",
+          "GGML_MOE_FINGERPRINT": "runs/rail/C2det-r1.fp"
+        },
+        "binary_recorded": "/home/aaron/workspace/moe-fork-det/build-sycl-det/bin/llama-server",
+        "hit_ratio_per_run": [
+          0.502354,
+          0.502354,
+          0.502354,
+          0.502354,
+          0.502354,
+          0.502354,
+          0.502354,
+          0.502354,
+          0.502354,
+          0.502354
+        ],
+        "slots_per_run": [
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0
+        ],
+        "slots_used_per_run": [
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0
+        ],
+        "effective_cache_budget_bytes_per_run": null,
+        "effective_cache_budget_note": "not recorded by the 2026-08-01 battery: only the requested --moe-cache-bytes is in the argv, never the budget the runtime ended up with"
+      },
+      "void": true,
+      "void_reason": "load-contaminated: taken across a battery whose loadavg(1m) ran 2.63-17.15 (mean 8.99) over 442 samples, so the conditions were not measured under one machine. Re-anchor before reuse.",
+      "always_run": false,
+      "note": "Qwen3.5-122B-A10B-UD-IQ1_M, 128-token measured decode, greedy seed 42, cache_prompt=false, fresh server per run. profile_hash/env_hash/driver were never recorded for these runs, so they read as unrecorded rather than as a match."
+    },
+    {
+      "id": "c3-cache-hybrid-122b",
+      "condition": "C3 transfer cache + hybrid CPU miss tier, determinism on (C2 flags + --moe-hybrid-mode on)",
+      "metric": "generation_tps",
+      "unit": "tok/s",
+      "value": 5.164630410422575,
+      "runs": [
+        5.12469196297362,
+        5.934181856433689,
+        4.483699545331849,
+        4.341676509213394,
+        4.607830597715906,
+        5.193765387797971,
+        5.099133732869052,
+        5.713499087893435,
+        5.749570882124768,
+        5.398254541872067
+      ],
+      "fingerprint": {
+        "build_commit": "85b7e6556",
+        "profile_hash": "",
+        "env_hash": "",
+        "driver": ""
+      },
+      "recorded": "2026-08-01",
+      "source": "modelctl/docs/evidence/2026-08-01-onednn-determinism.md",
+      "load": {
+        "samples": 442,
+        "loadavg_1m": {
+          "min": 2.63,
+          "max": 17.15,
+          "mean": 8.99
+        },
+        "mem_available_gib": {
+          "min": 22.7,
+          "max": 25.2
+        },
+        "note": "battery-wide, not per run -- the gap this registry closes"
+      },
+      "extra": {
+        "sd_tok_s": 0.5525578484182817,
+        "prompt_tok_s_per_run": [
+          9.487868574044512,
+          14.830329236679583,
+          7.56520822633865,
+          6.431790351700529,
+          9.062926369490564,
+          10.265258957488298,
+          8.434082279839783,
+          10.23906828201931,
+          10.172587189475996,
+          10.445728741517593
+        ],
+        "load_seconds_per_run": [
+          14.021040201187134,
+          15.189669847488403,
+          16.105016469955444,
+          16.02654218673706,
+          17.210663080215454,
+          16.158915519714355,
+          19.431812286376953,
+          19.784498929977417,
+          15.022975444793701,
+          16.18494725227356
+        ],
+        "env_overrides_recorded": {
+          "GGML_OP_OFFLOAD_MOE_MIN_BATCH": "1",
+          "GGML_SYCL_DETERMINISTIC": "1",
+          "GGML_MOE_FINGERPRINT": "runs/rail/C3det-r1.fp"
+        },
+        "binary_recorded": "/home/aaron/workspace/moe-fork-det/build-sycl-det/bin/llama-server",
+        "hit_ratio_per_run": [
+          0.499163,
+          0.499163,
+          0.499163,
+          0.499163,
+          0.499163,
+          0.499163,
+          0.499163,
+          0.499163,
+          0.499163,
+          0.499163
+        ],
+        "slots_per_run": [
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0
+        ],
+        "slots_used_per_run": [
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0,
+          1765.0
+        ],
+        "effective_cache_budget_bytes_per_run": null,
+        "effective_cache_budget_note": "not recorded by the 2026-08-01 battery: only the requested --moe-cache-bytes is in the argv, never the budget the runtime ended up with"
+      },
+      "void": true,
+      "void_reason": "load-contaminated: taken across a battery whose loadavg(1m) ran 2.63-17.15 (mean 8.99) over 442 samples, so the conditions were not measured under one machine. Re-anchor before reuse.",
+      "always_run": false,
+      "note": "Qwen3.5-122B-A10B-UD-IQ1_M, 128-token measured decode, greedy seed 42, cache_prompt=false, fresh server per run. profile_hash/env_hash/driver were never recorded for these runs, so they read as unrecorded rather than as a match."
+    },
+    {
+      "id": "laguna-s2.1-canary",
+      "condition": "laguna-s2.1 through llama-swap, speed.py laguna-s2.1 256 3, laguna's own pinned binary ~/src/llama.cpp-laguna",
+      "metric": "generation_tps",
+      "unit": "tok/s",
+      "value": 14.2,
+      "runs": [],
+      "fingerprint": {
+        "build_commit": "",
+        "profile_hash": "",
+        "env_hash": "",
+        "driver": ""
+      },
+      "recorded": "2026-07-31",
+      "source": "modelctl/docs/evidence/2026-08-01-p1-madvise-bench.md",
+      "load": {
+        "note": "reference taken 2026-07-31 23:49; load not recorded"
+      },
+      "extra": {
+        "reference_tok_s": 14.2,
+        "last_observed": {
+          "2026-08-01T14:20": {
+            "runs": [
+              12.92,
+              13.81,
+              13.71
+            ],
+            "avg": 13.48,
+            "delta_pct": -5.07,
+            "loadavg": 2.9,
+            "flagged": true
+          },
+          "2026-08-01T14:25": {
+            "runs": [
+              13.39,
+              13.58,
+              14.18
+            ],
+            "avg": 13.71,
+            "delta_pct": -3.45,
+            "loadavg": 3.42,
+            "flagged": false
+          }
+        }
+      },
+      "void": false,
+      "void_reason": "",
+      "always_run": true,
+      "note": "Exempt from fingerprint reuse. It runs a binary this repo does not build and does not carry the determinism fix; its job is to notice the machine moving under everything else, which is exactly the case where a fingerprint still matches."
+    }
+  ]
+}

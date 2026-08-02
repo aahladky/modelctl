@@ -236,7 +236,8 @@ import ast, pathlib, sys
 LEAVES = ['modelctl_paths.py', 'modelctl_fsutil.py', 'modelctl_errors.py',
           'modelctl_profiles.py', 'modelctl_vram.py', 'modelctl_tiers.py',
           'modelctl_capabilities.py', 'modelctl_hardware.py',
-          'modelctl_storage.py', 'modelctl_backends.py']
+          'modelctl_storage.py', 'modelctl_backends.py',
+          'modelctl_load.py', 'modelctl_paired.py', 'modelctl_anchors.py']
 bad = []
 for name in LEAVES:
     path = pathlib.Path(name)

@@ -651,6 +651,59 @@ class TestBuildServerArgsMoeCache(unittest.TestCase):
         self.assertNotIn("--metrics", args)
 
 
+class TestMmapAdviseSurvivesNormalization(unittest.TestCase):
+    """The binary has emitted moe_cache_mmap_advise since f4d390349 and
+    integration-manifest.json lists it supported, but it was missing from
+    normalize_capabilities()' canonical whitelist -- so every caller that
+    asked modelctl whether the runtime had it was told no, including the
+    deploy check whose job is to confirm the feature landed."""
+
+    def test_a_schema3_probe_carries_the_flag_through(self):
+        raw = {"schema": 3, "backend": "llama.cpp",
+               "build": {"commit": "85b7e6556"},
+               "features": {"moe_weight_transfer_cache": True,
+                            "moe_cache_mmap_advise": True}}
+        norm = modelctl_capabilities.normalize_capabilities(raw)
+        self.assertTrue(norm["features"]["moe_cache_mmap_advise"])
+        self.assertTrue(modelctl_capabilities.supports_mmap_advise(norm))
+
+    def test_a_build_without_it_reports_false_not_missing(self):
+        # Fail-closed, and present as a key: a consumer doing
+        # features["moe_cache_mmap_advise"] must not KeyError on an older
+        # build, which is how a gate turns into a crash.
+        raw = {"schema": 3, "backend": "llama.cpp", "build": {"commit": "x"},
+               "features": {"moe_weight_transfer_cache": True}}
+        norm = modelctl_capabilities.normalize_capabilities(raw)
+        self.assertIs(norm["features"]["moe_cache_mmap_advise"], False)
+        self.assertFalse(modelctl_capabilities.supports_mmap_advise(norm))
+
+    def test_schema1_predates_it_entirely(self):
+        raw = {"schema": 1, "features": {"moe_expert_cache": True,
+                                         "moe_cache_sycl": True}}
+        norm = modelctl_capabilities.normalize_capabilities(raw)
+        self.assertIs(norm["features"]["moe_cache_mmap_advise"], False)
+
+    def test_a_failed_probe_reports_it_false(self):
+        caps = modelctl_capabilities._classify_probe_failure("", status="error")
+        self.assertIs(caps["features"]["moe_cache_mmap_advise"], False)
+
+    def test_the_manifest_and_the_whitelist_agree(self):
+        # The drift this bug was: the manifest declared the feature
+        # supported while modelctl could not see it at all.
+        import json
+        from pathlib import Path
+        manifest = json.loads(
+            (Path(__file__).resolve().parent.parent
+             / "integration-manifest.json").read_text())
+        declared = set(manifest["supported_runtime_features"]) | set(
+            manifest["unsupported_runtime_features"])
+        raw = {"schema": 3, "features": {}}
+        known = set(modelctl_capabilities.normalize_capabilities(
+            raw)["features"])
+        self.assertEqual(declared - known, set(),
+                         "manifest names features modelctl cannot represent")
+
+
 class TestNormalizeCapabilities(unittest.TestCase):
     """Test normalize_capabilities() converts schema 0/1 to canonical form."""
 
