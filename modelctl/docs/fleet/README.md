@@ -23,10 +23,20 @@ manifest is how a probe learns which commit a node is running.
 
 Both units are **user** units, not system units: the account has no
 passwordless sudo on that box. Linger is enabled and cgroup v2 delegates
-`cpu`, `memory` and `pids` to the user manager, so `MemoryMax=20G`,
+`cpu`, `memory` and `pids` to the user manager, so `MemoryMax`,
 `CPUQuota=2000%` and `Nice=10` are enforced -- verified by reading them
-back off the running units (`MemoryMax=21474836480`,
-`CPUQuotaPerSecUSec=20s`, `Nice=10`).
+back off the running units (`CPUQuotaPerSecUSec=20s`, `Nice=10`).
+
+`rpc-cpu0`'s `MemoryMax` was raised 20G -> **26G** on 2026-08-02 with
+`systemctl --user set-property`, which applies to the live cgroup
+without restarting the unit: `ExecMainPID` stayed 1472071 and
+`NRestarts=0` across the change, so the node's presence never lapsed.
+The unit file in this directory still reads `MemoryMax=20G` -- the
+runtime drop-in under `~/.config/systemd/user.control/` overrides it,
+and the committed file is the install-time default, not the live value.
+Read the live value with
+`systemctl --user show rpc-cpu0 -p MemoryMax` (currently
+`27917287424`).
 
 ## Security state -- read this before using the node
 
@@ -54,8 +64,9 @@ what the node has:
 
 * `ph16-71-cuda0` / `CUDA0`: 10 GiB declared of 11.6 GiB present.
 * `ph16-71-cpu0` / `CPU`: 16 GiB declared, under the unit's own
-  `MemoryMax=20G` -- a budget above the cgroup ceiling would be admitted
-  by the planner and then OOM-killed by systemd.
+  `MemoryMax` (26G since 2026-08-02) -- a budget above the cgroup
+  ceiling would be admitted by the planner and then OOM-killed by
+  systemd.
 
 ### Changing a budget
 
@@ -69,8 +80,8 @@ reports which profiles' recorded planning inputs the change stales:
 The **ceiling** is not the device total. For a cpu device it is the
 `MemoryMax` recorded for its unit, for a gpu device the reported device
 total, in both cases minus runtime headroom (`max(1 GiB, 5%)`) for the
-RPC server's own resident set and staging buffers. cpu0 today: 20 GiB
-cap -> **19.00 GiB ceiling**; cuda0: 11.6 GiB total -> **10.60 GiB**.
+RPC server's own resident set and staging buffers. cpu0 today: 26 GiB
+cap -> **24.70 GiB ceiling**; cuda0: 11.6 GiB total -> **10.60 GiB**.
 
 The cap is operator-recorded, never probed -- reading it means asking
 another machine's service manager, and no planning path may shell out

@@ -45,61 +45,64 @@ input must not move because a laptop was closed.
 makes no claim and never goes stale; a record that says "no fleet
 budgets" *is* contradicted by a node enrolled afterwards.
 
-## 2. The laptop cap — NOT APPLIED, blocked
+## 2. The laptop cap — APPLIED, unit not restarted
 
-**The `MemoryMax=26G` bump was not applied.** The command the order
-specifies was refused by this session's permission layer:
+The `set-property` was refused by this session's permission layer
+(read-only SSH to the same host worked in the same session, so it was a
+mutation block, not connectivity; nothing was worked around). Aaron ran
+it by hand at ~11:26 EDT. Everything below is the read-back.
 
-```
-$ ssh aaron@192.168.0.76 'systemctl --user set-property rpc-cpu0 MemoryMax=26G'
-Permission ... denied by the Claude Code auto mode classifier.
-```
-
-Read-only SSH to the same host in the same session works, so this is a
-mutation block, not a connectivity problem. Nothing was worked around.
-
-Cap re-read off the live unit (read-only SSH, 2026-08-02), before and
-after the attempt — unchanged:
+Cap re-read off the live unit — **26 GiB, and the unit never restarted**:
 
 ```
 ActiveState=active
+SubState=running
+NRestarts=0
 ExecMainStartTimestamp=Sat 2026-08-01 23:45:48 EDT
 ExecMainPID=1472071
-MemoryMax=21474836480          # 20 GiB
+MemoryMax=27917287424          # 26 GiB
 ```
 
-Post-read probe of both nodes (live registry, real wire):
+PID and start timestamp are identical to the pre-change reading
+(1472071 / Sat 2026-08-01 23:45:48 EDT) and `NRestarts=0`: the process
+serving RPC has been up since the night before and did not blink.
+`set-property` writes a drop-in and applies it to the live cgroup, which
+is why the hard rule holds and presence survived.
+
+Post-bump probe of both nodes (live registry, real wire), immediately
+after:
 
 ```
 ph16-71-cuda0    reachable=True protocol=5.0.0 pin_agrees=True
 ph16-71-cpu0     reachable=True protocol=5.0.0 pin_agrees=True
 ```
 
-What *was* written to the live registry: the true current cap, so the
-ceiling is derived from the cgroup limit instead of falling back to the
-30.57 GiB device total (which would have authorized a budget the unit
-kills):
+Registry. Two writes, in sequence:
 
 ```
-$ modelctl fleet set-cap ph16-71-cpu0 CPU 21474836480
+$ modelctl fleet set-cap ph16-71-cpu0 CPU 21474836480      # 11:06, the pre-bump truth
 ph16-71-cpu0/CPU cap: 0.00 GiB -> 20.00 GiB (ceiling now 19.00 GiB)
+
+$ modelctl fleet set-cap ph16-71-cpu0 CPU 27917287424      # 11:28, after the bump
+ph16-71-cpu0/CPU cap: 20.00 GiB -> 26.00 GiB (ceiling now 24.70 GiB)
 ```
 
-No budget moved. `ph16-71-cpu0` is still 16 GiB declared.
+The `set-cap` line in the hand-run block did not take effect —
+`fleet.json` mtime was still 11:06:33 at 11:28, after the other three
+commands had visibly landed — so it was re-applied here against the
+value read back off the unit. Recording the cap is what moves the
+ceiling: the setter derives it from this number, not from the node.
 
-To finish step 2 by hand, in order:
+State after, and the point of the whole step: **only the cap moved.**
 
 ```
-ssh aaron@192.168.0.76 'systemctl --user set-property rpc-cpu0 MemoryMax=26G'
-ssh aaron@192.168.0.76 'systemctl --user show rpc-cpu0 -p MemoryMax -p ExecMainPID -p ExecMainStartTimestamp'
-modelctl fleet set-cap ph16-71-cpu0 CPU 27917287424      # 26 GiB
+ph16-71-cpu0  / CPU    budget 16.00 GiB  total 30.57 GiB  cap 26.00 GiB  ceiling 24.70 GiB (systemd MemoryMax)
+ph16-71-cuda0 / CUDA0  budget 10.00 GiB  total 11.60 GiB  cap  0.00 GiB  ceiling 10.60 GiB (reported device total)
 ```
 
-`set-property` applies live and does not restart the unit; the middle
-command is the no-restart proof (`ExecMainPID` and the start timestamp
-must be unchanged from 1472071 / Sat 2026-08-01 23:45:48 EDT). With the
-cap at 26 GiB the ceiling becomes **24.70 GiB** (26 GiB − 1.30 GiB
-headroom), which is what makes a budget above 19.00 GiB legal.
+The declared budget is still 16 GiB. What changed is that a budget up to
+24.70 GiB (26 GiB − 1.30 GiB headroom) is now something `set-budget`
+will accept instead of refuse; 19.00 GiB was the old wall.
 
 ## 3-5. Read model, console surface, one mutation path
 
@@ -190,36 +193,47 @@ ph16-71-cuda0          budget  10.00 GiB  cap   0.00 GiB
 ph16-71-cpu0           budget  16.00 GiB  cap  20.00 GiB
 ```
 
-## The authorized console restart — NOT used, blocked
+## The authorized console restart — used, once
 
-The one console restart this order authorizes for the cutover was not
-performed. `modelctl-web.service` runs `python -m modelctl_web` from the
-main checkout with no `--reload`, so it cannot hot-load and the restart
-*was* the cutover; the command was refused by the same permission layer
-that refused the laptop bump:
+`modelctl-web.service` runs `python -m modelctl_web` from the main
+checkout with no `--reload`, so it cannot hot-load and the restart *was*
+the cutover. The command was refused by the same permission layer that
+refused the laptop bump (the process was **not** killed to let
+`Restart=` respawn it — that would circumvent the denial, not adjust to
+it); Aaron ran it by hand.
 
-```
-$ systemctl --user restart modelctl-web.service
-Permission ... denied by the Claude Code auto mode classifier.
-```
-
-Read-only `systemctl --user show` and `is-active` work in the same
-session, so this is a mutation block. Nothing was worked around — in
-particular the process was not killed to let `Restart=` respawn it.
-
-State of the live stack at the end of this pass, unchanged throughout:
+The window, from the service's own record:
 
 ```
-modelctl-web.service   active, MainPID 869250 (started 10:37:00, before this pass)
-console  :9293 /healthz -> 200
-llama-swap :9292        -> 200        (never touched)
+before   MainPID 869250   started Sun 2026-08-02 10:37:00 EDT
+after    MainPID 975412   started Sun 2026-08-02 11:26:17 EDT
 ```
 
-The live console therefore still serves the phase-4 build; `/v2/fleet`
-appears on the next restart of that unit. Nothing about the landed code
-is unverified because of it — the scratch console on port 9500 ran the
-new build end to end (section 6), and no job was in flight at any point
-(`web_jobs.db`: 58 done, 13 failed, 0 running, 0 queued).
+No job was in flight across it (`web_jobs.db` at the time: 58 done, 13
+failed, 0 running, 0 queued), so nothing was marked interrupted. Nothing
+else was restarted: `llama-swap :9292` still answers 200 on the same
+process it has been running on throughout.
+
+The cutover, verified against the live instance on :9293:
+
+```
+GET  /api/v2/fleet   -> 200
+  rig (this machine)     local  PRESENT   SYCL0 budget 28.70 / ceiling 31.89 GiB (editable=False)
+                                          SYCL1 budget 10.74 / ceiling 11.93 GiB (editable=False)
+  ph16-71-cuda0          remote PRESENT   CUDA0 budget 10.00 / ceiling 10.60 GiB (reported device total)
+  ph16-71-cpu0           remote PRESENT   CPU   budget 16.00 / ceiling 24.70 GiB (systemd MemoryMax)
+  night_lane: ornith-rpc-criterion-2026-08-02 (enabled=False),
+              qwen122b-remote-experts-hypothesis-2026-08-02 (enabled=False)
+  stale_profiles: []
+POST /api/v2/fleet/probe -> 200   both nodes reachable, protocol 5.0.0, pin_agrees=True
+GET  /v2/fleet       -> 200   (SPA shell)
+```
+
+The live surface carries the 24.70 GiB ceiling, so step 2's cap and
+step 1's ceiling are joined up end to end. Both remote nodes read STALE
+on the first load — the stored presence record was from 01:15, past the
+900 s TTL — and flipped to PRESENT after the probe route ran, which is
+the tri-state doing its job on live data rather than on fixtures.
 
 ## 7. Tests
 
