@@ -989,17 +989,21 @@ class _Handler(BaseHTTPRequestHandler):
 
     def parse_request(self):
         self._started = time.time()
+        # `malformed` up front and cleared on success, rather than set
+        # afterwards on failure: BaseHTTPRequestHandler answers a bad
+        # request line from inside parse_request, which reaches
+        # end_headers, which flushes and clears the record -- so by the
+        # time it returns False there is nothing left to label. Writing
+        # the label after the fact both lost it and raised on the None.
         self._record = {"method": "?", "path": "?", "auth": "none",
-                        "tool": "-", "digest": None, "outcome": None,
-                        "detail": None}
+                        "tool": "-", "digest": None,
+                        "outcome": "malformed", "detail": None}
         ok = BaseHTTPRequestHandler.parse_request(self)
         if ok:
-            self._record["method"] = self.command
-            self._record["path"] = self.path.split("?")[0][:200]
-            self._record["peer"] = self._peer()
-            self._record["xff"] = self._forwarded_for()
-        else:
-            self._record["outcome"] = "malformed"
+            self._note(method=self.command,
+                       path=self.path.split("?")[0][:200],
+                       peer=self._peer(), xff=self._forwarded_for(),
+                       outcome=None)
         return ok
 
     def handle_one_request(self):

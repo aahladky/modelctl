@@ -1595,6 +1595,40 @@ class RequestAuditTests(ServerFixture):
         self.assertEqual(entry["outcome"], "malformed")
         self.assertEqual(entry["status"], 400)
 
+    def raw_socket(self, blob):
+        """Bytes straight onto the socket, bypassing urllib's insistence
+        on sending something well-formed."""
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        try:
+            sock.sendall(blob)
+            return sock.recv(4096)
+        finally:
+            sock.close()
+
+    def test_a_request_line_that_does_not_parse_is_logged_as_malformed(self):
+        """Found in production, 90 seconds after this shipped: something
+        on the internet sent a garbage request line.
+
+        The label has to be set before the parse, not after it -- the
+        400 goes out from inside BaseHTTPRequestHandler.parse_request, so
+        by the time it returns False the line has already been written
+        and there is nothing left to label."""
+        errors = []
+        with mock.patch.object(self.httpd, "handle_error",
+                               lambda *a: errors.append(a)):
+            for blob in (b"NOT A REQUEST\r\n\r\n",
+                         b"GET / HTTP/9.9\r\n\r\n",
+                         b"\x80\x81\x82\r\n\r\n"):
+                with self.subTest(blob):
+                    self.assertTrue(self.raw_socket(blob))
+        outcomes = [e["outcome"] for e in self.requests_logged()]
+        self.assertEqual(outcomes, ["malformed"] * 3)
+        self.assertEqual(errors, [], "the handler thread raised")
+
+    def test_the_server_keeps_serving_after_a_malformed_request(self):
+        self.raw_socket(b"NOT A REQUEST\r\n\r\n")
+        self.assertEqual(self.rpc("tools/list")[0], 200)
+
     def test_a_verb_with_no_handler_is_logged(self):
         status, _ = self.raw(method="PUT", path="/mcp", body=b"{}")
         self.assertEqual(status, 501)
