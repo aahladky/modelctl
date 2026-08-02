@@ -1,0 +1,22 @@
+[Desktop Entry]
+Type=Application
+Name=Headless mode
+GenericName=Drop the desktop, keep the models serving
+Comment=Switch the rig to a text console, freeing the desktop's VRAM on the B70. llama-swap and the modelctl console keep running. Return with `modelctl headless off` from a VT or over SSH; a reboot always comes back graphical.
+Icon=utilities-terminal
+Categories=System;
+Keywords=headless;console;vram;modelctl;
+Terminal=false
+# One confirmation, then the toggle. bash -lc because the confirmation and
+# the toggle have to be sequenced, and .desktop Exec has no `&&`.
+#
+# Deliberately not `Terminal=true`: a terminal emulator is a child of the
+# graphical session, so the isolate would kill the very window running
+# it, halfway through, with no way to see what happened. `modelctl
+# headless on` writes its state record before it isolates for the same
+# reason.
+# --yes because kdialog IS the confirmation here and there is no stdin to
+# prompt on; `modelctl headless on` refuses a non-interactive caller
+# without it, which is what stops a stray script from dropping the
+# desktop.
+Exec=bash -lc 'kdialog --title "Headless mode" --warningcontinuecancel "Drop to a text console?\n\nThe desktop closes and both displays go dark. llama-swap (:9292) and the modelctl console (:9293) keep running and stay reachable over the network.\n\nTo come back: ctrl-alt-F2, log in, and run\n    modelctl headless off\nor SSH in from the laptop and run the same.\n\nA reboot always comes up graphical." || exit 0; exec /home/aaron/workspace/moe-serving/modelctl/modelctl headless on --yes'

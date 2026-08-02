@@ -3270,10 +3270,15 @@ def resolve_planning_inputs(profile, refresh=False, inventory=None,
             profile.get("binary") or LLAMA_SERVER_BIN)
     except Exception:
         caps = None
+    # The display mode is read from the recorded state file, never probed
+    # here: planning must not shell out to systemd, and a machine that has
+    # never toggled records "unknown", which claims nothing.
+    import modelctl_display
     return modelctl_tiers.make_planning_inputs(
         inventory, defaults["vram_limit_pct"], primary,
         modelctl_vram.system_ram_available(),
-        hw_settings=hw_settings, capabilities=caps), "live"
+        hw_settings=hw_settings, capabilities=caps,
+        display=modelctl_display.planning_input()), "live"
 
 
 def plan_tiers_for_profile(profile, refresh_inputs=False, inventory=None,
@@ -3320,6 +3325,11 @@ def cmd_place_tiers(args, inventory, defaults, primary, names):
         print(f"{name}: planning inputs {source}"
               f" (RAM {_format_size(inputs['ram_available_bytes'])},"
               f" limit {inputs['vram_limit_pct']}%)")
+        import modelctl_display
+        mismatch = modelctl_tiers.display_input_mismatch(
+            inputs, modelctl_display.recorded_mode())
+        if mismatch:
+            print(f"  WARNING: {mismatch}")
         if plan is None:
             print(f"{name}: couldn't analyze model layout "
                   f"({profile.get('model_path')})\n")
@@ -4149,6 +4159,570 @@ def cmd_capabilities(args):
     return 0
 
 
+# --- headless mode ---------------------------------------------------------
+# Dropping the desktop frees the VRAM it holds on the B70 without
+# touching the serving stack: llama-swap and the console are user
+# services and, with linger enabled, outlive the graphical session. The
+# default target is never changed, so a reboot is always the escape
+# hatch back to a desktop.
+
+HEADLESS_VERIFY_SAMPLES = 3
+HEADLESS_VERIFY_TOKENS = 8
+# TEST RULES tripwire: a round-trip that has not finished in ten minutes
+# is wedged, and a wedged verify has left the machine somewhere. The
+# worker gives up and isolates back to graphical rather than sitting
+# there with the desktop gone.
+HEADLESS_VERIFY_DEADLINE = 600
+HEADLESS_VERIFY_PORT = 9411
+TINY_FIXTURE = "/home/aaron/models/fixtures/tiny-rpc-smoke.gguf"
+
+
+def _headless_probe_device(device="SYCL0", samples=HEADLESS_VERIFY_SAMPLES):
+    """Free bytes on one device, sampled with the planner's own probe.
+
+    get_gpu_inventory() is what resolve_planning_inputs() reads, so a
+    freed-VRAM number measured here is comparable with the numbers a
+    plan was built from. Returns the raw samples; no averaging, no
+    judgement."""
+    out = []
+    for _ in range(samples):
+        entry = next((d for d in get_gpu_inventory()
+                      if d.get("device") == device), None)
+        out.append(None if entry is None else int(entry.get("free_bytes") or 0))
+        time.sleep(1)
+    return out
+
+
+def _headless_service_alive(port, timeout=3):
+    """Whether something still answers on a port. The whole design claims
+    the stack survives the toggle; this is how that claim is checked,
+    seconds after the desktop goes away."""
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _headless_verify_run(args):
+    """The detached round-trip. Runs inside a transient systemd --user
+    unit so it survives the desktop dying under it.
+
+    Never called by an interactive session that has not passed the
+    precondition check: without the sudoers drop-in the very first
+    isolate would fail and leave the log claiming a transition that did
+    not happen."""
+    import modelctl_display
+    log = {"started": time.time(), "steps": [], "samples": {},
+           "services": {}, "errors": []}
+
+    def step(name, **fields):
+        entry = {"step": name, "at": time.time(), **fields}
+        log["steps"].append(entry)
+        print(json.dumps(entry), flush=True)
+        return entry
+
+    def deadline_exceeded():
+        return time.time() - log["started"] > HEADLESS_VERIFY_DEADLINE
+
+    device = args.device
+    returned = False
+    try:
+        step("preconditions", refusals=modelctl_display.refusals())
+        if modelctl_display.refusals():
+            log["errors"].append("preconditions not met")
+            return log
+
+        log["samples"]["graphical"] = _headless_probe_device(
+            device, HEADLESS_VERIFY_SAMPLES)
+        step("measured_graphical", device=device,
+             free_bytes=log["samples"]["graphical"])
+
+        res = modelctl_display.set_mode(modelctl_display.HEADLESS)
+        step("isolate_multi_user", ok=res["ok"], rc=res["rc"],
+             stderr=res["stderr"])
+        if not res["ok"]:
+            log["errors"].append(f"isolate multi-user failed: {res['stderr']}")
+            return log
+
+        # Within seconds, not eventually: the failure this catches is the
+        # user manager going down with the session, and that happens
+        # immediately or not at all.
+        time.sleep(3)
+        log["services"]["headless"] = {
+            "llama_swap_9292": _headless_service_alive(9292),
+            "console_9293": _headless_service_alive(9293)}
+        step("services_headless", **log["services"]["headless"])
+
+        log["samples"]["headless"] = _headless_probe_device(
+            device, HEADLESS_VERIFY_SAMPLES)
+        step("measured_headless", device=device,
+             free_bytes=log["samples"]["headless"])
+
+        if not deadline_exceeded():
+            log["generation"] = _headless_tiny_generation()
+            step("tiny_generation", **{
+                k: v for k, v in log["generation"].items() if k != "output"})
+        else:
+            log["errors"].append("deadline passed before the fixture load")
+    except Exception as e:                       # never strand the desktop
+        log["errors"].append(f"{type(e).__name__}: {e}")
+    finally:
+        # Unconditional: whatever happened above, the machine goes back to
+        # a desktop. This is the one thing the round-trip may not skip.
+        back = modelctl_display.set_mode(modelctl_display.GRAPHICAL)
+        returned = back["ok"]
+        step("isolate_graphical", ok=back["ok"], rc=back["rc"],
+             stderr=back["stderr"])
+        time.sleep(3)
+        log["services"]["graphical"] = {
+            "llama_swap_9292": _headless_service_alive(9292),
+            "console_9293": _headless_service_alive(9293)}
+        step("services_graphical", **log["services"]["graphical"])
+
+    log["finished"] = time.time()
+    log["wall_seconds"] = round(log["finished"] - log["started"], 1)
+    log["returned_to_graphical"] = returned
+
+    # The freed-VRAM number the planner will read, measured rather than
+    # estimated. Recorded only: no budget spends it in this change.
+    g = [s for s in log["samples"].get("graphical") or [] if s]
+    h = [s for s in log["samples"].get("headless") or [] if s]
+    if g and h:
+        freed = int(min(h) - max(g))
+        log["freed_bytes"] = freed
+        modelctl_display.write_state(
+            modelctl_display.GRAPHICAL, freed_bytes=freed,
+            measured={"device": device,
+                      "graphical_free_bytes": g, "headless_free_bytes": h})
+    _headless_write_evidence(log)
+    return log
+
+
+def _headless_tiny_generation():
+    """Load the tiny fixture on a scratch port, take 8 greedy tokens, tear
+    it down by PID. Proves the GPU is usable headless, not just that the
+    ports still answer."""
+    import signal
+    out = {"fixture": TINY_FIXTURE, "port": HEADLESS_VERIFY_PORT}
+    if not Path(TINY_FIXTURE).exists():
+        out["error"] = "fixture missing"
+        return out
+
+    env = dict(os.environ)
+    # oneAPI's LD_LIBRARY_PATH is not optional: a SYCL build without it
+    # SIGABRTs on this box before it ever loads a model.
+    ensure_binary_ld_library_path(env, LLAMA_SERVER_BIN)
+    for cand in _probe_env_candidates():
+        if cand and cand.get("LD_LIBRARY_PATH"):
+            env["LD_LIBRARY_PATH"] = (env.get("LD_LIBRARY_PATH", "") + ":"
+                                      + cand["LD_LIBRARY_PATH"])
+            break
+    floor = env.get("GGML_OP_OFFLOAD_MIN_BATCH")
+    if floor is not None and int(floor) < 32:
+        out["error"] = f"refusing to run: GGML_OP_OFFLOAD_MIN_BATCH={floor}"
+        return out
+
+    argv = [LLAMA_SERVER_BIN, "--model", TINY_FIXTURE, "-c", "512",
+            "--no-warmup", "--port", str(HEADLESS_VERIFY_PORT)]
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True,
+                            env=env, start_new_session=True)
+    out["pid"] = proc.pid
+    try:
+        for _ in range(120):
+            if proc.poll() is not None:
+                out["error"] = f"server exited rc={proc.returncode}"
+                return out
+            try:
+                with socket.create_connection(
+                        ("127.0.0.1", HEADLESS_VERIFY_PORT), timeout=1):
+                    break
+            except OSError:
+                time.sleep(1)
+        else:
+            out["error"] = "server never accepted a connection"
+            return out
+
+        body = json.dumps({"prompt": "hello", "n_predict": HEADLESS_VERIFY_TOKENS,
+                           "temperature": 0.0, "top_k": 1, "seed": 42,
+                           "cache_prompt": False}).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{HEADLESS_VERIFY_PORT}/completion", data=body,
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            payload = json.loads(r.read())
+        out["output"] = payload.get("content", "")
+        out["tokens_predicted"] = payload.get("tokens_predicted")
+        out["ok"] = True
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        # Tear down by PID, never by port or name: a pkill pattern here
+        # would be matching against this process's own command line.
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            proc.wait(timeout=30)
+        except Exception:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                pass
+        out["torn_down"] = proc.poll() is not None
+    return out
+
+
+def _headless_write_evidence(log):
+    """File the round-trip's raw log under docs/evidence/, dated. A verify
+    that runs while nobody is watching has no witness but this file."""
+    directory = Path(__file__).resolve().parent / "docs" / "evidence"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{time.strftime('%Y-%m-%d')}-headless-verify.md"
+    body = [
+        f"# headless verify round-trip -- {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        "Raw log from `modelctl headless verify`. Numbers only; the "
+        "reading is Aaron's.",
+        "",
+        f"* wall: {log.get('wall_seconds')}s",
+        f"* returned to graphical: {log.get('returned_to_graphical')}",
+        f"* freed bytes (min headless free - max graphical free): "
+        f"{log.get('freed_bytes')}",
+        "",
+        "```json",
+        json.dumps(log, indent=2),
+        "```",
+        "",
+    ]
+    modelctl_fsutil.atomic_write_text(path, "\n".join(body))
+    print(f"evidence: {path}")
+    return path
+
+
+def cmd_headless(args):
+    """Drop the rig to a text console on demand, and bring it back.
+
+    Refuses loudly rather than half-working: `on` needs linger enabled
+    and the narrow sudoers drop-in in place, both of which are Aaron's
+    one-time root setup."""
+    import modelctl_display
+    action = args.headless_command
+
+    if action == "status":
+        st = modelctl_display.status()
+        print(f"recorded mode : {st['recorded_mode']}")
+        print(f"actual mode   : {st['probed_mode']}")
+        print(f"time in mode  : "
+              f"{modelctl_display.format_duration(st['time_in_mode'])}")
+        measured = st["measured"]
+        if measured.get("freed_bytes"):
+            print(f"measured freed: {_format_size(measured['freed_bytes'])}"
+                  f" on {measured.get('device', 'SYCL0')}")
+            for label in ("graphical_free_bytes", "headless_free_bytes"):
+                if measured.get(label):
+                    print(f"  {label}: "
+                          + ", ".join(_format_size(b)
+                                      for b in measured[label]))
+        else:
+            print("measured freed: never measured "
+                  "(run `modelctl headless verify`)")
+        print(f"linger        : {'yes' if st['linger'] else 'NO'}")
+        print(f"sudoers       : "
+              f"{'ready' if st['sudoers_ready'] else 'NOT INSTALLED'}")
+        print(f"state file    : {st['state_path']}")
+        if st["recorded_mode"] != st["probed_mode"]:
+            print("\nWARNING: the recorded mode is not the machine's actual "
+                  "mode; plans built from the record were built for a "
+                  "different machine state.")
+        return 0
+
+    if action == "verify":
+        blocked = modelctl_display.refusals()
+        if blocked:
+            print("headless verify: refusing to run.", file=sys.stderr)
+            for reason in blocked:
+                print(f"  - {reason}", file=sys.stderr)
+            return 1
+        if args.run:
+            log = _headless_verify_run(args)
+            return 0 if not log.get("errors") else 1
+        if not getattr(args, "force", False):
+            import modelctl_nightlane
+            window = modelctl_nightlane.window_state()
+            if not window.open:
+                print("headless verify: the machine is not quiet enough to "
+                      "measure on.", file=sys.stderr)
+                for reason in window.reasons:
+                    print(f"  - {reason}", file=sys.stderr)
+                print("  re-run with --force to measure anyway.",
+                      file=sys.stderr)
+                return 1
+        # Detached, because the desktop dies under it: a foreground run
+        # from a terminal emulator would be killed by its own first
+        # isolate, halfway through, with the machine left headless.
+        unit = f"modelctl-headless-verify-{int(time.time())}"
+        argv = ["systemd-run", "--user", f"--unit={unit}", "--collect",
+                "--service-type=oneshot", "--property=TimeoutStartSec=1200",
+                sys.executable, str(Path(__file__).resolve()),
+                "headless", "verify", "--run", "--device", args.device]
+        rc = subprocess.run(argv).returncode
+        if rc != 0:
+            print(f"could not start the detached verify unit (rc={rc})",
+                  file=sys.stderr)
+            return rc
+        print(f"detached verify started as {unit}.")
+        print(f"  follow: journalctl --user -u {unit} -f")
+        print("  the desktop will go away and come back; evidence lands in "
+              "modelctl/docs/evidence/.")
+        return 0
+
+    mode = (modelctl_display.HEADLESS if action == "on"
+            else modelctl_display.GRAPHICAL)
+
+    # Preconditions are checked HERE, in the parent, before anything is
+    # spawned. set_mode() checks them again in the child, but that is too
+    # late to be the only check: the detached transition is a real unit
+    # that really isolates, and a parent that spawns first and validates
+    # second has already committed the machine by the time it refuses.
+    if mode == modelctl_display.HEADLESS:
+        blocked = modelctl_display.refusals()
+        if blocked:
+            print("headless on: refusing to switch.", file=sys.stderr)
+            for reason in blocked:
+                print(f"  - {reason}", file=sys.stderr)
+            return 1
+
+    # `on` tears down the graphical session -- including whatever terminal
+    # is running this command. On 2026-08-02 a scripted, non-interactive
+    # `modelctl headless on` did exactly that to a live desktop, because
+    # the preconditions it expected to refuse on (linger, sudoers) were
+    # both already satisfied. Preconditions guard "can this work", not
+    # "did anyone mean it"; this is the second gate. Only `on` is gated:
+    # `off` is the way back, and must never need a terminal it may not
+    # have (a VT after a wedge, an SSH pipe).
+    if mode == modelctl_display.HEADLESS and not getattr(args, "yes", False):
+        if not sys.stdin.isatty():
+            print("headless on: refusing to drop the desktop from a "
+                  "non-interactive caller.", file=sys.stderr)
+            print("  This closes the graphical session and every window in "
+                  "it. Pass --yes if that is what you mean.", file=sys.stderr)
+            return 1
+        print("This closes the graphical session and every window in it. "
+              "llama-swap (:9292) and the console (:9293) keep running.")
+        print("Come back with `modelctl headless off` from a VT "
+              "(ctrl-alt-F2) or over SSH; a reboot always comes up "
+              "graphical.")
+        if input("Drop to a text console? [y/N] ").strip().lower() not in (
+                "y", "yes"):
+            print("Cancelled.")
+            return 0
+
+    # Going headless is two steps -- isolate, then stop the desktop's
+    # lingering user units -- and the caller does not survive the first
+    # one when it is the desktop entry or a GUI terminal. Run the pair
+    # detached, under the lingering user manager, so step two always
+    # happens. (`off` needs no such thing: it runs from a VT or SSH,
+    # which the graphical target never owned.)
+    if mode == modelctl_display.HEADLESS and not getattr(args, "run", False):
+        unit = f"modelctl-headless-on-{int(time.time())}"
+        rc = subprocess.run(
+            ["systemd-run", "--user", f"--unit={unit}", "--collect",
+             "--service-type=oneshot", "--property=TimeoutStartSec=180",
+             sys.executable, str(Path(__file__).resolve()),
+             "headless", "on", "--yes", "--run"]).returncode
+        if rc != 0:
+            print(f"could not start the detached transition (rc={rc})",
+                  file=sys.stderr)
+            return rc
+        print("dropping to a text console...")
+        print("return with `modelctl headless off` from a VT (ctrl-alt-F2) "
+              "or over SSH; a reboot always comes up graphical.")
+        print(f"  if the screen does not come back: journalctl --user -u {unit}")
+        return 0
+
+    res = modelctl_display.set_mode(mode)
+    if res["refusals"]:
+        print(f"headless {action}: refusing to switch.", file=sys.stderr)
+        for reason in res["refusals"]:
+            print(f"  - {reason}", file=sys.stderr)
+        return 1
+    if not res["ok"]:
+        print(f"headless {action}: `{' '.join(res['argv'])}` failed "
+              f"(rc={res['rc']}): {res['stderr']}", file=sys.stderr)
+        return 1
+    print(f"display mode: {mode}")
+    if res["stopped_units"]:
+        print("stopped the desktop's surviving user units (the isolate does "
+              "not: linger keeps them): " + ", ".join(res["stopped_units"]))
+    if not res["stop_ok"]:
+        print(f"WARNING: some desktop units would not stop "
+              f"({res['stop_error']}); they may still hold VRAM, and the "
+              f"next login can wedge against them.", file=sys.stderr)
+    if mode == modelctl_display.HEADLESS:
+        print("return with `modelctl headless off` from a VT (ctrl-alt-F2) "
+              "or over SSH; a reboot always comes up graphical.")
+    return 0
+
+
+# --- remote hands ----------------------------------------------------------
+# An MCP server that claude.ai reaches as a custom connector, so a chat
+# in a browser or on a phone gets the rig's files and shell without the
+# desktop app. Three separate things have to be true before anything is
+# reachable from outside, and `on` is the only one that flips any of
+# them: the unit is not enabled, the listener is on loopback, and the
+# funnel is not configured.
+
+
+def _remote_hands_summary(rh, st):
+    """The shared body of `status` and the tail of `on`/`off`."""
+    print(f"exposure: {st['exposure']}")
+    if st["public_url"]:
+        print(f"  url:    {st['public_url']}")
+    for target in st["funnel_targets"]:
+        print(f"  funnel: -> {target}")
+    print(f"service:  {st['service']} "
+          f"{'active' if st['service_active'] else 'inactive'}"
+          + (f", up {rh.format_duration(st['uptime_seconds'])}"
+             if st["service_active"] else ""))
+    print(f"listener: {st['bind']} "
+          f"{'listening' if st['listening'] else 'not listening'}")
+    print(f"token:    {'present' if st['token_present'] else 'MISSING'} "
+          f"({st['token_path']})")
+    print(f"allowlist: {', '.join(st['allow_roots'])}")
+    print(f"audit:    {st['audit_path']}")
+    recent = st["recent"]
+    print(f"last {len(recent)} audit entries:"
+          if recent else "no audit entries yet")
+    for entry in recent:
+        print("  " + json.dumps(entry, sort_keys=True))
+
+
+def cmd_remote_hands(args):
+    import modelctl_remote_hands as rh
+
+    action = args.remote_hands_command
+    port = getattr(args, "port", None) or rh.DEFAULT_PORT
+
+    if action == "serve":
+        # The unit's ExecStart runs the module directly; this is the same
+        # thing by hand, for smoke tests and for a machine where systemd
+        # is not the way the operator wants to run it.
+        try:
+            return rh.serve(getattr(args, "host", rh.DEFAULT_HOST), port)
+        except rh.RemoteHandsError as e:
+            print(f"remote-hands serve: {e}", file=sys.stderr)
+            return 1
+
+    if action == "install":
+        token, created = rh.create_token(force=args.rotate_token)
+        unit = rh.render_unit(port=port)
+        path = rh.unit_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists() or path.read_text() != unit:
+            modelctl_fsutil.atomic_write_text(path, unit)
+            print(f"wrote {path}")
+        else:
+            print(f"{path} already up to date")
+        rc, _, err = rh._systemctl("daemon-reload")
+        if rc != 0:
+            print(f"WARNING: systemctl --user daemon-reload failed: {err}",
+                  file=sys.stderr)
+        print(f"token file: {rh.token_path()} (0600)")
+        if created:
+            print()
+            print("Paste this into the connector's Authorization header, "
+                  "including the word Bearer. It is printed once:")
+            print()
+            print(f"  Bearer {token}")
+            print()
+        else:
+            print("token already existed and was left alone "
+                  "(--rotate-token to replace it)")
+        print("The service is installed but NOT enabled and NOT started, "
+              "and nothing is exposed.")
+        print("Turn it on for a session with `modelctl remote-hands on`.")
+        return 0
+
+    if action == "status":
+        _remote_hands_summary(rh, rh.status(port=port))
+        return 0
+
+    if action == "on":
+        if not rh.read_token():
+            print(f"remote-hands on: no token at {rh.token_path()}. Run "
+                  f"`modelctl remote-hands install` first.", file=sys.stderr)
+            return 1
+        if not rh.unit_path().exists():
+            print(f"remote-hands on: {rh.unit_path()} is missing. Run "
+                  f"`modelctl remote-hands install` first.", file=sys.stderr)
+            return 1
+        rc, _, err = rh._systemctl("start", rh.SERVICE_NAME)
+        if rc != 0:
+            print(f"remote-hands on: starting {rh.SERVICE_NAME} failed: "
+                  f"{err}", file=sys.stderr)
+            return 1
+        # Liveness-check before exposing: publishing a port that nothing
+        # is listening on gives the connector a public URL that 502s, and
+        # the failure would look like a connector problem.
+        deadline = time.time() + 15
+        while time.time() < deadline and not rh.port_listening(port=port):
+            time.sleep(0.5)
+        if not rh.port_listening(port=port):
+            print(f"remote-hands on: nothing is listening on {port} after "
+                  f"15s; not exposing. Check "
+                  f"`journalctl --user -u {rh.SERVICE_NAME}`.",
+                  file=sys.stderr)
+            return 1
+        ok, detail = rh.funnel_on(port=port)
+        if not ok:
+            print(f"remote-hands on: funnel failed: {detail}", file=sys.stderr)
+            print("the service is running but is NOT exposed; "
+                  "`modelctl remote-hands off` to stop it.", file=sys.stderr)
+            return 1
+        print()
+        _remote_hands_summary(rh, rh.status(port=port))
+        print()
+        print("This is now reachable from the public internet. "
+              "`modelctl remote-hands off` takes it down.")
+        return 0
+
+    if action == "off":
+        # Funnel first, always: stopping the service first would leave a
+        # public URL pointing at a dead port, which is a worse state than
+        # either end of the toggle.
+        ok, detail = rh.funnel_off(port=port, force=args.force)
+        if not ok:
+            print(f"remote-hands off: {detail}", file=sys.stderr)
+            print("the service was left running -- taking it down while the "
+                  "funnel is still up would publish a dead port.",
+                  file=sys.stderr)
+            return 1
+        print(f"funnel: {detail}")
+        rc, _, err = rh._systemctl("stop", rh.SERVICE_NAME)
+        if rc != 0:
+            print(f"remote-hands off: stopping {rh.SERVICE_NAME} failed: "
+                  f"{err}", file=sys.stderr)
+            return 1
+        print(f"service: {rh.SERVICE_NAME} stopped")
+        return 0
+
+    print(f"unknown remote-hands command: {action}", file=sys.stderr)
+    return 2
+
+
+def _cmd_headless_cli(args):
+    """argparse entry point for `headless`.
+
+    main() calls the command and drops its return value, so every
+    command's exit status is 0 today. For this one that is not
+    survivable: a refusal that exits 0 tells `modelctl headless on ||
+    <fallback>` that the desktop went down when it did not, and the
+    caller acts on a machine state that never happened. Only this
+    command's status is corrected here -- changing main() would move
+    every other command's exit code at the same time."""
+    sys.exit(cmd_headless(args) or 0)
+
+
 def cmd_doctor(args):
     """Print readiness, the integration manifest, and backend capabilities;
     optionally write a support bundle.
@@ -4711,6 +5285,74 @@ def build_arg_parser():
     p_router_unload = router_sub.add_parser("unload", help="unload a model now to free its GPU memory")
     p_router_unload.add_argument("name")
     p_router_unload.set_defaults(func=cmd_router_unload)
+
+    p_headless = sub.add_parser(
+        "headless",
+        help="drop the rig to a text console on demand (frees the desktop's "
+             "VRAM) and bring the desktop back")
+    headless_sub = p_headless.add_subparsers(dest="headless_command",
+                                             required=True)
+    p_headless_on = headless_sub.add_parser(
+        "on", help="isolate multi-user.target (needs the one-time root setup)")
+    p_headless_on.add_argument(
+        "--yes", action="store_true",
+        help="skip the confirmation; required when stdin is not a terminal, "
+             "because this closes the graphical session and every window in it")
+    p_headless_on.add_argument(
+        "--run", action="store_true",
+        help=argparse.SUPPRESS)   # the detached transition's own entry point
+    headless_sub.add_parser("off", help="isolate graphical.target")
+    headless_sub.add_parser(
+        "status", help="current mode, time in mode, last measured freed VRAM")
+    p_headless_verify = headless_sub.add_parser(
+        "verify",
+        help="detached round-trip self-test (measure, isolate, check the "
+             "stack, load the tiny fixture, come back) -- files evidence")
+    p_headless_verify.add_argument(
+        "--device", default="SYCL0",
+        help="device to measure free VRAM on (default: SYCL0, the B70)")
+    p_headless_verify.add_argument(
+        "--force", action="store_true",
+        help="measure even when llama-swap is holding a model or the load "
+             "is above the lane's ceiling")
+    p_headless_verify.add_argument(
+        "--run", action="store_true",
+        help=argparse.SUPPRESS)   # the detached worker's own entry point
+    p_headless.set_defaults(func=_cmd_headless_cli)
+
+    p_rh = sub.add_parser(
+        "remote-hands",
+        help="expose the rig's files and shell to claude.ai as a custom "
+             "connector (default-off; nothing is reachable until `on`)")
+    rh_sub = p_rh.add_subparsers(dest="remote_hands_command", required=True)
+    p_rh_install = rh_sub.add_parser(
+        "install",
+        help="generate the token and write the (disabled) systemd unit; "
+             "prints the token once")
+    p_rh_install.add_argument(
+        "--rotate-token", action="store_true",
+        help="replace an existing token (breaks a configured connector)")
+    p_rh_on = rh_sub.add_parser(
+        "on", help="start the service and funnel it; prints the public URL")
+    p_rh_off = rh_sub.add_parser(
+        "off", help="tear the funnel down, then stop the service")
+    p_rh_off.add_argument(
+        "--force", action="store_true",
+        help="reset the funnel even when it publishes something else too")
+    p_rh_status = rh_sub.add_parser(
+        "status",
+        help="exposed/hidden, uptime, and the last 5 audit entries")
+    p_rh_serve = rh_sub.add_parser(
+        "serve", help="run the server in the foreground (what the unit runs)")
+    p_rh_serve.add_argument("--host", default="127.0.0.1")
+    # The port belongs on every subcommand: it decides which loopback port
+    # is started, funneled, torn down and reported, and a default that
+    # only some of them honoured would expose one port and tear down
+    # another.
+    for parser_ in (p_rh_install, p_rh_on, p_rh_off, p_rh_status, p_rh_serve):
+        parser_.add_argument("--port", type=int, default=9294,
+                             help="loopback port (default 9294)")
+    p_rh.set_defaults(func=cmd_remote_hands)
 
     p_caps = sub.add_parser(
         "capabilities",

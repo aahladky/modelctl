@@ -318,6 +318,21 @@ def build_launch_command(
             elif msg.startswith("WARNING:"):
                 warnings.append(msg[len("WARNING:"):].strip())
 
+    # A plan built with the desktop up saw less free VRAM on the B70 than
+    # one built headless. Say so here rather than anywhere closer to the
+    # planner: this is the one object every launch surface derives from,
+    # so preview, worker, plan test and llama-swap entry all carry the
+    # same sentence. It is a warning, never an error -- the plan is still
+    # launchable, and the operator decides whether to replan.
+    import modelctl_tiers
+    import modelctl_display
+    stored = modelctl_tiers.stored_planning_inputs(profile)
+    if modelctl_tiers.planning_input_display_mode(stored) != "unknown":
+        mismatch = modelctl_tiers.display_input_mismatch(
+            stored, modelctl_display.recorded_mode())
+        if mismatch:
+            warnings.append(mismatch)
+
     # Build the command argv.
     from modelctl_backends import get_backend
     adapter = get_backend(backend.name)

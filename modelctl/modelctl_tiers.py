@@ -289,11 +289,19 @@ def stored_planning_inputs(profile):
 
 
 def make_planning_inputs(inventory, limit_pct, primary, ram_available_bytes,
-                         hw_settings=None, capabilities=None):
+                         hw_settings=None, capabilities=None, display=None):
     """Canonicalize live machine values into the recorded-input schema.
 
-    Only what plan_tiers actually reads is recorded; anything else would
-    be dead weight that still forces a diff when it drifts."""
+    Only what plan_tiers actually reads is recorded -- with one stated
+    exception -- because anything else is dead weight that still forces a
+    diff when it drifts.
+
+    `display` is that exception: the desktop-up/headless mode the plan
+    was built under (modelctl_display.planning_input()). plan_tiers does
+    not read it and no budget spends it; it is recorded so a launch can
+    tell the operator that the machine is not the one the plan was built
+    for. A profile planned before this field existed simply has no
+    display block, which reads as "no claim"."""
     return {
         "version": PLANNING_INPUTS_VERSION,
         "ram_available_bytes": int(ram_available_bytes or 0),
@@ -307,7 +315,39 @@ def make_planning_inputs(inventory, limit_pct, primary, ram_available_bytes,
             "moe_cache_per_device_budgets": bool(
                 ((capabilities or {}).get("features") or {})
                 .get("moe_cache_per_device_budgets"))}},
+        "display": {
+            "mode": str((display or {}).get("mode") or "unknown"),
+            "freed_bytes": int((display or {}).get("freed_bytes") or 0),
+        },
     }
+
+
+def planning_input_display_mode(inputs):
+    """The display mode recorded with one profile's planner inputs, or
+    "unknown" (legacy record, or a machine that never toggled)."""
+    mode = ((inputs or {}).get("display") or {}).get("mode")
+    return mode if mode in ("graphical", "headless") else "unknown"
+
+
+def display_input_mismatch(inputs, live_mode):
+    """One operator-readable line when a plan's recorded display mode is
+    not the mode the machine is in now, else None.
+
+    Both sides must make a claim: "unknown" on either side is silence,
+    not a mismatch, so profiles planned before display was recorded --
+    and machines that have never toggled -- say nothing. This is a
+    statement about the recorded inputs, never a block: the plan still
+    launches, and the operator decides whether to replan."""
+    recorded = planning_input_display_mode(inputs)
+    live = live_mode if live_mode in ("graphical", "headless") else "unknown"
+    if recorded == "unknown" or live == "unknown" or recorded == live:
+        return None
+    freed = int(((inputs or {}).get("display") or {}).get("freed_bytes") or 0)
+    detail = f" (~{_gib(freed):.2f} GiB measured)" if freed else ""
+    return (f"planning inputs were recorded with the display {recorded}, "
+            f"but the machine is {live} now{detail}; free VRAM differs from "
+            f"what this plan was built against -- replan with "
+            f"--refresh-inputs to rebuild it for this mode")
 
 
 def record_planning_inputs(profile, inputs, recorded_at=None):
