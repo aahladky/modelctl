@@ -264,3 +264,21 @@ One reporting bug fixed in passing: pytest's ANSI codes land between
 half and the PASS line under-reported every run. `--color=no` makes it
 whole again — a check whose label misstates its own measurement is the
 same class of defect as everything else in this record.
+
+## Addendum — 2026-08-02 ~05:50, chat-session audit
+
+- The 01:32 deletion is closed as **deliberate operator action** — Aaron
+  confirmed in chat. Not the disk, not the harness; the nearby
+  `systemd-tmpfiles-clean` entry was coincidence.
+- The 01:10:49 reboot was a **clean, orderly shutdown**: the previous
+  boot's journal ends with a normal systemd-shutdown sequence (SIGTERM,
+  filesystem sync), not a crash or power loss.
+- Post-boot service census, verified 05:45: llama-swap (:9292) and the
+  console (:9293) returned via autostart. **OVMS did not** — no process,
+  no unit file, no container, no autostart path. Down since the reboot;
+  flagged to Aaron, his to start.
+- Interpretation (chat session, labeled as such — Aaron judges): the 122B
+  4a batteries ran post-boot on a cold page cache with load climbing to
+  6.6, n = 4–5, opposite signs, p = .375/.125 — no policy weight. The 35B
+  batteries ran on a quiet machine and sit at zero within noise (p = 1.0
+  twice) with the manipulation check passing. Determinism default stays ON.
