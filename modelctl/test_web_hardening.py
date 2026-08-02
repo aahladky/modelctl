@@ -5,6 +5,7 @@ input), the reflected `back` parameter, profile-name validation at the
 filesystem/YAML boundary, lane routing, and asset vendoring.
 """
 import json
+import re
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -98,18 +99,25 @@ class TestProfileNameValidation(unittest.TestCase):
                     modelctl.load_profile("../defaults")
 
 
-class TestSafeBack(unittest.TestCase):
+class TestSafeNext(unittest.TestCase):
+    """`next` is reflected into the login form and followed on success.
+
+    Phase 3 retired `_safe_back` with the job pages that used it; the same
+    escaping rule now guards login's `next`, and the fallback is the SPA
+    root rather than the demolished dashboard.
+    """
+
     def test_javascript_url_is_neutralized(self):
-        self.assertEqual(web_app._safe_back("javascript:fetch('/x')"), "/")
+        self.assertEqual(web_app._safe_next("javascript:fetch('/x')"), "/v2/")
 
     def test_protocol_relative_is_neutralized(self):
-        self.assertEqual(web_app._safe_back("//evil.example/x"), "/")
+        self.assertEqual(web_app._safe_next("//evil.example/x"), "/v2/")
 
     def test_internal_path_is_kept(self):
-        self.assertEqual(web_app._safe_back("/profiles/m1"), "/profiles/m1")
+        self.assertEqual(web_app._safe_next("/v2/models/m1"), "/v2/models/m1")
 
-    def test_empty_defaults_to_root(self):
-        self.assertEqual(web_app._safe_back(""), "/")
+    def test_empty_defaults_to_the_console_root(self):
+        self.assertEqual(web_app._safe_next(""), "/v2/")
 
 
 class TestLaneRouting(unittest.TestCase):
@@ -156,10 +164,35 @@ class TestVendoredAssets(unittest.TestCase):
                          "has to work offline, and a script tag with no "
                          "integrity is code execution in the console origin")
 
-    def test_htmx_is_vendored(self):
-        static = Path(web_app.__file__).parent / "static"
-        self.assertTrue(list(static.glob("htmx-*.min.js")),
-                        "htmx is referenced by base.html but not vendored")
+    def test_no_htmx_surface_survives(self):
+        """Phase 3 demolished the server-rendered console.
+
+        htmx, the shared /static mount and every page template went with
+        it; the console is the compiled SPA under console/dist. A stray
+        vendored copy would mean a route somewhere still serves the old
+        surface.
+        """
+        web_dir = Path(web_app.__file__).parent
+        self.assertFalse((web_dir / "static").exists(),
+                         "the /static mount was removed with the old console")
+        self.assertEqual(
+            sorted(p.name for p in (web_dir / "templates").glob("*.html")),
+            ["base.html", "error.html", "login.html"],
+            "only login and the last-resort error page are still rendered "
+            "server-side")
+        for path in (web_dir / "templates").glob("*.html"):
+            # Jinja comments cannot load anything; scan the markup only, so
+            # a comment that mentions htmx is not a false positive.
+            text = re.sub(r"\{#.*?#\}", "", path.read_text(), flags=re.S)
+            self.assertNotIn("htmx", text, f"{path.name} still loads htmx")
+            self.assertNotIn("/static/", text,
+                             f"{path.name} references the removed /static mount")
+            # Self-contained: no external script/style at all, so these two
+            # pages keep working with the SPA bundle absent.
+            self.assertNotIn("<script src", text,
+                             f"{path.name} loads an external script")
+            self.assertNotIn("<link rel=\"stylesheet\"", text,
+                             f"{path.name} loads an external stylesheet")
 
 
 class TestJobLaneCancellationRecordsPgid(unittest.TestCase):

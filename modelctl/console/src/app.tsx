@@ -3,6 +3,7 @@ import type { ComponentChildren } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { effectiveTheme, onSystemThemeChange, toggleTheme } from "./theme";
 import { useStream } from "./lib/stream";
+import { fmtClock } from "./lib/api";
 import { ToastHost } from "./lib/toasts";
 import { Operate } from "./pages/operate";
 import { Jobs } from "./pages/jobs";
@@ -10,6 +11,7 @@ import { Models } from "./pages/models";
 import { Model } from "./pages/model";
 import { Add } from "./pages/add";
 import { Wizard } from "./pages/wizard";
+import { Settings } from "./pages/settings";
 
 function ThemeButton() {
   const [, bump] = useState(0);
@@ -44,8 +46,7 @@ function Side() {
         ≡ jobs{running > 0 && <span class="badge">{running}</span>}
       </a>
       <span class="spacer"></span>
-      {/* settings lands in phase 3 -- a plain href into the old console */}
-      <a class="item" href="/settings">⚙ settings</a>
+      <a class={here("/v2/settings")} href="/v2/settings">⚙ settings</a>
       <a class="item" href="/logout">← logout</a>
     </aside>
   );
@@ -60,8 +61,9 @@ export function LiveBadge({ label }: { label: string }) {
   }
   return (
     <span class="live stale"><span class="dot"></span>
-      stream dropped{retryIn != null ? ` · retrying in ${retryIn}s` : " · reconnecting…"}
-      {lastAt != null && ""}
+      stream dropped
+      {lastAt != null ? ` · last known ${fmtClock(lastAt)}` : ""}
+      {retryIn != null ? ` · retrying in ${retryIn}s` : " · reconnecting…"}
     </span>
   );
 }
@@ -121,6 +123,9 @@ export function App() {
           <Shell title="add model" live="wizard live"><Add /></Shell>
         )} />
         <Route path="/v2/add/:id" component={WizardShell} />
+        <Route path="/v2/settings" component={() => (
+          <Shell title="settings" live="telemetry live"><Settings /></Shell>
+        )} />
         <Route default component={() => (
           <Shell title="not found" live="">
             <div class="widget">

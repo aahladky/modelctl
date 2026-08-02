@@ -20,8 +20,8 @@ modelctl web install
 
 Installs and starts the console as a systemd user service, then prints
 its URL and token. Open that URL — everything below is reachable from
-it, and the console's `/setup` page tells you what (if anything) this
-machine is still missing.
+it, and the settings page's readiness section tells you what (if anything)
+this machine is still missing.
 
 The browser is the primary workflow, because placement decisions are
 comparisons and comparisons want a screen. The CLI remains fully
@@ -54,37 +54,41 @@ Run `modelctl ...` normally afterward. Tests:
 
 ## The web console
 
-FastAPI + HTMX on `:9293` (`modelctl web` foreground, or the installed
-`modelctl-web.service`).
+FastAPI on `:9293` (`modelctl web` foreground, or the installed
+`modelctl-web.service`) serving a compiled Preact SPA from
+`console/dist`. One service, one port, one token. Everything operational
+streams over a single SSE tick at `/api/v2/events` — there is no manual
+refresh anywhere. Five pages:
 
-- **Add model (`/add`)**: the acquisition workflow — HF search or local
-  file, verification, quant inspection, download, analysis, plan
-  selection, measured testing, registration.
-- **Dashboard**: all profiles with live state (llama-swap
-  loaded/registered), per-GPU VRAM and RAM gauges.
-- **Profile edit**: every config field with a rendered command preview;
-  saves regenerate artifacts and re-sync.
-- **Tier planner**: the `place --tiers` dry-run per profile (layout
-  table, warnings, config diff) with one-click apply.
-- **Runtime (`/runtime`)**: MoE-cache metrics scraped from the server,
-  cache reset.
-- **Benchmarks**: speed runs as jobs with persistent history.
-- **Jobs**: long-running work runs as background jobs in lanes (SQLite
-  at `~/.local/share/modelctl/web_jobs.db`); profile and config
+- **Operate (`/v2/`)**: service chips, per-GPU VRAM and RAM meters with
+  sparklines, MoE-cache hit ratios, resident models with live tok/s, and
+  load/unload. Each region degrades on its own and says which probe
+  failed rather than rendering a zero as fact.
+- **Model hub (`/v2/models`, `/v2/models/<name>`)**: per-model overview
+  and placement, compiled launch plans joined with the measurement store
+  (measured vs estimated, always tagged), full plan-run history with the
+  bottleneck judgement, log tail, and a typed configure form whose save
+  shows the planner's admission preview and gates structural changes
+  behind an explicit confirm.
+- **Add (`/v2/add`, `/v2/add/<id>`)**: the acquisition workflow — HF
+  search or local file, verification, quant inspection, download,
+  analysis, plan selection, measured testing, registration — as a
+  stepper with inline job progress, visible blocked-advance reasons and
+  single-shot retry.
+- **Jobs (`/v2/jobs`)**: running / queued / history across the lanes
+  (SQLite at `~/.local/share/modelctl/web_jobs.db`); profile and config
   mutations serialize on a single-worker lane because profiles and the
-  llama-swap config are plain files.
-- **Launch plans (`/profiles/<name>/plans`)**: candidate plans with
-  evidence, select/disable/test/tune actions.
-- **History (`/profiles/<name>/history`)**: past plan runs with
-  bottleneck classification.
-- **Hardware (`/hardware`)**: per-device reserves/roles/bandwidth,
-  storage calibration.
-- **Settings (`/settings`)**: persisted defaults, diagnostics, support
-  bundle download.
-- **Routing (`/runtime/routing`)**: the managed llama-swap routing
-  matrix with preview, apply, rollback.
-- A JSON API mirrors most of this under `/api/*`, and job progress
-  streams over SSE at `/events/jobs/<id>`.
+  llama-swap config are plain files. Cancel is optimistic and un-happens
+  loudly on refusal.
+- **Settings (`/v2/settings`)**: readiness checklist, typed profile
+  defaults, hardware policy (per-device reserves/roles/bandwidth, RAM
+  reserve, storage calibration), access and state paths, integration
+  manifest and capability report, support bundle. No JSON anywhere in
+  the UI; the files on disk stay hand-editable.
+
+The typed surface lives under `/api/v2/*`; a legacy JSON API remains
+under `/api/*`. Every URL the old server-rendered console published
+301s to its `/v2` equivalent.
 
 Beyond the console: `modelctl ovms-add`/`ovms-convert` manage OpenVINO
 Model Server profiles (a second backend), `modelctl test --evals` runs
@@ -98,7 +102,8 @@ are rejected), stored at `~/.local/share/modelctl/web_token`.
 Binds `MODELCTL_WEB_BIND` (default `0.0.0.0:9293`, i.e. LAN-accessible).
 This is a trusted-user control plane that can launch processes and change
 runtime configuration, so its reach is always shown explicitly: `modelctl
-web`, `modelctl web url`, and the `/setup` page all report whether the
+web`, `modelctl web url`, and the settings page's readiness section all
+report whether the
 console is loopback-only or LAN-accessible and on which address. LAN
 access uses plain HTTP — the token travels unencrypted — which is an
 acceptable personal default on a trusted home LAN. **Exposure to

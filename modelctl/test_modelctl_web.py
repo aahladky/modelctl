@@ -72,10 +72,11 @@ class WebTestBase(unittest.TestCase):
             self.addCleanup(p.stop)
 
     def resolvable_backend(self):
-        """Make the setup probe see a runnable llama-server, so first_run
-        stays False and the dashboard renders profiles. Without this the
-        dashboard tests only passed on machines that happened to have a
-        real llama.cpp build for the candidate sweep to find."""
+        """Make the setup probe see a runnable llama-server, so readiness
+        resolves the same way on every machine. Without this the tests that
+        reach the setup probe (now folded into /api/v2/settings) only
+        behaved consistently on machines that happened to have a real
+        llama.cpp build for the candidate sweep to find."""
         binary = Path(self.tmp.name) / "llama-server"
         binary.write_text("#!/bin/sh\nexit 1\n")
         binary.chmod(0o755)
@@ -131,18 +132,32 @@ class TestAuth(WebTestBase):
 
 
 class TestProfilesApi(WebTestBase):
+    # Phase-3 cutover: profile *deletion* left the console with the old
+    # server-rendered pages. POST /profiles/{name}/delete was the only
+    # caller of modelctl.cmd_remove from the web, and no /api/v2 endpoint
+    # replaced it -- removing a model is a CLI-only operation now. The
+    # confirm-flow test that guarded it went with the route.
+
     def test_list_profiles(self):
         resp = self.client.get("/api/profiles", headers=self.auth)
         self.assertEqual(resp.status_code, 200)
         self.assertEqual([p["name"] for p in resp.json()], ["m1"])
 
-    def test_dashboard_renders(self):
+    def test_models_api_lists_profiles(self):
+        """The dashboard's model table is now the operate page fed by
+        GET /api/v2/models; a saved profile has to appear in it whether or
+        not llama-swap knows about the model yet."""
         with mock.patch.object(modelctl, "get_gpu_inventory", return_value=[]), \
-             mock.patch("modelctl_web.app._fetch_json", return_value=None), \
+             mock.patch("modelctl_web.swap.LlamaSwapClient.runtime_state",
+                        return_value={}), \
              self.resolvable_backend():
-            resp = self.client.get("/", headers=self.auth)
+            resp = self.client.get("/api/v2/models", headers=self.auth)
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("m1", resp.text)
+        rows = {r["name"]: r for r in resp.json()}
+        self.assertIn("m1", rows)
+        # Unknown to llama-swap, but still the profile's own facts.
+        self.assertEqual(rows["m1"]["file"], "m-Q4_K_M")
+        self.assertFalse(rows["m1"]["running"])
 
     def test_edit_submits_job_and_applies(self):
         with mock.patch.object(modelctl, "update_profile_config",
@@ -156,13 +171,6 @@ class TestProfilesApi(WebTestBase):
         self.assertEqual(job["status"], "done")
         upd.assert_called_once()
         self.assertEqual(upd.call_args[0][1]["ctx"], 65536)
-
-    def test_delete_requires_confirm_flow(self):
-        with mock.patch.object(modelctl, "cmd_remove") as rm:
-            self.client.post("/profiles/m1/delete", headers=self.auth,
-                             follow_redirects=False)
-            time.sleep(1)
-        rm.assert_called_once()
 
 
 class TestTiersApi(WebTestBase):
@@ -199,15 +207,23 @@ class TestTiersApi(WebTestBase):
 
 
 class TestJobsApi(WebTestBase):
-    def test_job_lifecycle_records(self):
+    def test_smoke_test_job_lifecycle_records(self):
+        """The smoke test's measured throughput has to reach the job log.
+
+        Its only remaining trigger is the wizard's test step with no plan
+        selected (POST /api/v2/wizard/{id}/test/run -> submit_smoke_test);
+        the old POST /profiles/{name}/test went with the console."""
+        from modelctl_web.wizard import WizardState, WizardStore
+        state = WizardState(step="test", profile_name="m1")
+        WizardStore().save(state)
         with mock.patch.object(modelctl, "smoke_test_profile",
                                return_value={"ok": True, "stage": "done",
                                              "messages": ["fine"],
                                              "tok_per_s": 42.0}):
-            resp = self.client.post("/profiles/m1/test", headers=self.auth,
-                                    follow_redirects=False)
-            job_id = resp.headers["location"].split("/jobs/")[1].split("?")[0]
-            job = self.wait_job(job_id)
+            resp = self.client.post(
+                f"/api/v2/wizard/{state.wizard_id}/test/run", headers=self.auth)
+            self.assertEqual(resp.status_code, 200)
+            job = self.wait_job(resp.json()["test_job_id"])
         self.assertEqual(job["status"], "done")
         self.assertIn("42.0 tok/s", job["result"])
 
@@ -220,7 +236,17 @@ class TestJobsApi(WebTestBase):
 class TestWizardAcquisition(WebTestBase):
     """HTTP-level coverage of the add-model wizard. The inspect step
     500'd in production twice (total_bytes vs total_size, then unguarded
-    HF fetches) because nothing rendered these pages in tests."""
+    HF fetches) because nothing served these steps in tests.
+
+    Re-homed onto /api/v2/wizard/* at the phase-3 cutover. Two things the
+    old form routes owned have no successor and were dropped here:
+    the malformed-repo-id rejection (identical coverage now lives in
+    test_console_phase2.py TestWizardApiFlow.
+    test_bad_repo_id_is_a_422_with_the_reason), and POST
+    /profiles/{name}/bench -- the console has no benchmark trigger at all
+    any more, so submit_bench's max_tokens/runs parsing is unreachable
+    from the web.
+    """
 
     REPO_CONTENTS = {
         "quant_groups": [
@@ -238,126 +264,117 @@ class TestWizardAcquisition(WebTestBase):
         WizardStore().save(state)
         return state
 
-    def test_inspect_renders_real_producer_shape(self):
-        """The page renders what get_repo_contents() actually returns --
-        including a group whose total_size is None (missing HF sizes)."""
+    def test_inspect_returns_real_producer_shape(self):
+        """The endpoint carries what get_repo_contents() actually returns
+        -- including a group whose total_size is None (missing HF sizes),
+        which must stay None rather than being faked into a number."""
         w = self._wizard(step="inspect", repo_id="org/model",
                          source_type="hf_repo")
         with mock.patch.object(modelctl, "get_repo_contents",
                                return_value=self.REPO_CONTENTS):
-            resp = self.client.get(f"/add/{w.wizard_id}/inspect",
+            resp = self.client.get(f"/api/v2/wizard/{w.wizard_id}/inspect",
                                    headers=self.auth)
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("50.0 GiB", resp.text)
-        self.assertIn("size unknown", resp.text)
+        groups = {g["label"]: g for g in resp.json()["contents"]["quant_groups"]}
+        self.assertEqual(groups["m-Q4_K_M"]["total_size"], 50 << 30)
+        self.assertIsNone(groups["m-Q8_0"]["total_size"])
+        self.assertEqual(resp.json()["error"], "")
 
-    def test_inspect_bad_repo_shows_error_not_500(self):
+    def test_inspect_bad_repo_reports_error_not_500(self):
         w = self._wizard(step="inspect", repo_id="org/nonexistent",
                          source_type="hf_repo")
         with mock.patch.object(modelctl, "get_repo_contents",
                                side_effect=RuntimeError("404 not found")):
-            resp = self.client.get(f"/add/{w.wizard_id}/inspect",
+            resp = self.client.get(f"/api/v2/wizard/{w.wizard_id}/inspect",
                                    headers=self.auth)
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("Could not fetch repository contents", resp.text)
-        self.assertIn("404 not found", resp.text)
+        self.assertIsNone(resp.json()["contents"])
+        self.assertIn("org/nonexistent", resp.json()["error"])
+        self.assertIn("404 not found", resp.json()["error"])
 
     def test_source_submit_requires_repo_id(self):
         w = self._wizard()
-        resp = self.client.post(f"/add/{w.wizard_id}/source",
+        resp = self.client.post(f"/api/v2/wizard/{w.wizard_id}/source",
                                 headers=self.auth,
-                                data={"source_type": "hf_repo", "repo_id": ""},
-                                follow_redirects=False)
-        self.assertEqual(resp.status_code, 303)
-        self.assertTrue(resp.headers["location"].endswith("/source"))
+                                json={"source_type": "hf_repo", "repo_id": ""})
+        self.assertEqual(resp.status_code, 422)
+        self.assertIn("repo id", resp.json()["error"])
+        self.assertEqual(resp.json()["state"]["step"], "source")
         from modelctl_web.wizard import WizardStore
         state = WizardStore().load(w.wizard_id)
         self.assertEqual(state.step, "source")
         self.assertTrue(state.errors)
 
-    def test_source_submit_rejects_malformed_repo_id(self):
-        w = self._wizard()
-        resp = self.client.post(f"/add/{w.wizard_id}/source",
-                                headers=self.auth,
-                                data={"source_type": "hf_repo",
-                                      "repo_id": "no-slash-here"},
-                                follow_redirects=False)
-        self.assertTrue(resp.headers["location"].endswith("/source"))
-        from modelctl_web.wizard import WizardStore
-        self.assertEqual(WizardStore().load(w.wizard_id).step, "source")
-
-    def test_inspect_without_repo_returns_to_source_not_add(self):
+    def test_inspect_without_repo_is_refused_not_bounced(self):
         """A repo-less wizard on inspect used to bounce Resume -> /add
-        forever with no error shown."""
+        forever with no error shown; the endpoint now names the gap."""
         w = self._wizard(step="inspect")
-        resp = self.client.get(f"/add/{w.wizard_id}/inspect",
-                               headers=self.auth, follow_redirects=False)
-        self.assertEqual(resp.status_code, 303)
-        self.assertTrue(resp.headers["location"].endswith("/source"))
-        from modelctl_web.wizard import WizardStore
-        state = WizardStore().load(w.wizard_id)
-        self.assertEqual(state.step, "source")
-        self.assertTrue(state.errors)
+        resp = self.client.get(f"/api/v2/wizard/{w.wizard_id}/inspect",
+                               headers=self.auth)
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn("no repository selected", resp.json()["error"])
 
-    def test_partial_profile_post_does_not_disable(self):
-        """A programmatic POST setting one field used to read the absent
-        checkbox as 'disable', which unregistered the model on sync."""
+    def test_partial_config_save_does_not_disable(self):
+        """A programmatic save setting one field used to read the absent
+        checkbox as 'disable', which unregistered the model on sync. The
+        typed body has no checkbox: an absent `enabled` stays absent, and
+        only an explicit false disables.
+
+        An `extra` edit is a structural change, so both saves carry the
+        confirm -- the gate itself is test_console_phase3.py's subject,
+        not this one's."""
         with mock.patch("modelctl_web.mutate.submit_edit",
                         return_value="job-edit-1") as sub:
-            self.client.post("/profiles/m1", headers=self.auth,
-                             data={"extra": "--foo"}, follow_redirects=False)
+            resp = self.client.post(
+                "/api/v2/models/m1/config", headers=self.auth,
+                json={"updates": {"extra": "--foo"},
+                      "accept_structural": True})
+        self.assertEqual(resp.status_code, 200)
         self.assertNotIn("enabled", sub.call_args[0][2])
         with mock.patch("modelctl_web.mutate.submit_edit",
                         return_value="job-edit-2") as sub:
-            self.client.post("/profiles/m1", headers=self.auth,
-                             data={"extra": "--foo", "_full_form": "1"},
-                             follow_redirects=False)
+            resp = self.client.post(
+                "/api/v2/models/m1/config", headers=self.auth,
+                json={"updates": {"extra": "--foo", "enabled": False},
+                      "accept_structural": True})
+        self.assertEqual(resp.status_code, 200)
         self.assertFalse(sub.call_args[0][2]["enabled"])
-
-    def test_bench_route_accepts_token_budget(self):
-        with mock.patch("modelctl_web.mutate.submit_bench",
-                        return_value="job-bench-1") as sub:
-            self.client.post("/profiles/m1/bench", headers=self.auth,
-                             data={"max_tokens": "64", "runs": "2"},
-                             follow_redirects=False)
-        sub.assert_called_once()
-        self.assertEqual(sub.call_args.kwargs["max_tokens"], 64)
-        self.assertEqual(sub.call_args.kwargs["runs"], 2)
 
     def test_wizard_delete_removes_it(self):
         w = self._wizard(step="inspect", repo_id="org/model")
-        resp = self.client.post(f"/add/{w.wizard_id}/delete",
-                                headers=self.auth, follow_redirects=False)
-        self.assertEqual(resp.status_code, 303)
+        resp = self.client.post(f"/api/v2/wizard/{w.wizard_id}/delete",
+                                headers=self.auth)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["deleted"], w.wizard_id)
         from modelctl_web.wizard import WizardStore
         self.assertIsNone(WizardStore().load(w.wizard_id))
 
-    def test_download_get_is_render_only(self):
-        """GET /download used to submit the job as a side effect; two tabs
-        raced the guard into duplicate concurrent pulls."""
+    def test_wizard_read_is_render_only(self):
+        """The download GET used to submit the job as a side effect; two
+        tabs raced the guard into duplicate concurrent pulls. Reading the
+        wizard must never start one -- only POST /inspect does."""
         w = self._wizard(step="download", repo_id="org/model",
                          source_type="hf_repo")
         with mock.patch("modelctl_web.mutate.submit_pull") as sub:
-            resp = self.client.get(f"/add/{w.wizard_id}/download",
+            resp = self.client.get(f"/api/v2/wizard/{w.wizard_id}",
                                    headers=self.auth)
         self.assertEqual(resp.status_code, 200)
         sub.assert_not_called()
-        self.assertIn("Start download", resp.text)
+        # Still parked on download with nothing started: the client can
+        # offer "start download" and the state backs that up.
+        self.assertEqual(resp.json()["step"], "download")
+        self.assertEqual(resp.json()["download_job_id"], "")
 
     def test_inspect_submit_starts_download_once(self):
         w = self._wizard(step="inspect", repo_id="org/model",
                          source_type="hf_repo")
         with mock.patch("modelctl_web.mutate.submit_pull",
                         return_value="job-pull-1") as sub:
-            self.client.post(f"/add/{w.wizard_id}/inspect",
-                             headers=self.auth,
-                             data={"quant": "m-Q4_K_M"},
-                             follow_redirects=False)
+            self.client.post(f"/api/v2/wizard/{w.wizard_id}/inspect",
+                             headers=self.auth, json={"quant": "m-Q4_K_M"})
             # A double-click / resubmission must not start a second pull.
-            self.client.post(f"/add/{w.wizard_id}/inspect",
-                             headers=self.auth,
-                             data={"quant": "m-Q4_K_M"},
-                             follow_redirects=False)
+            self.client.post(f"/api/v2/wizard/{w.wizard_id}/inspect",
+                             headers=self.auth, json={"quant": "m-Q4_K_M"})
         sub.assert_called_once()
         from modelctl_web.wizard import WizardStore
         self.assertEqual(WizardStore().load(w.wizard_id).download_job_id,
@@ -375,27 +392,30 @@ class TestWizardAcquisition(WebTestBase):
         self.assertTrue(resp.json()["deduplicated"])
 
     def test_register_blocked_while_test_job_live(self):
-        """Direct navigation to the register POST while the plan-test's
-        llama-server is still running used to slip past the gate and race
-        it for VRAM."""
+        """A register POST issued while the plan-test's llama-server is
+        still running used to slip past the gate and race it for VRAM.
+
+        The 409 is also asserted in test_console_phase2.py; what is only
+        checked here is that apply_plan never fired -- the gate has to
+        stop the write, not just report one."""
         job_id = self.store.create("benchmark", "plan test m1/p1",
                                    lane="benchmark")
         self.store.update(job_id, status="running")
         w = self._wizard(step="register", profile_name="m1",
                          selected_plan_id="p1", test_job_id=job_id)
         with mock.patch("modelctl_services.plan_service.apply_plan") as ap:
-            resp = self.client.post(f"/add/{w.wizard_id}/register",
-                                    headers=self.auth, follow_redirects=False)
-        self.assertTrue(resp.headers["location"].endswith("/register"))
+            resp = self.client.post(f"/api/v2/wizard/{w.wizard_id}/register",
+                                    headers=self.auth, json={})
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn("still running", resp.json()["error"])
         ap.assert_not_called()
         from modelctl_web.wizard import WizardStore
         state = WizardStore().load(w.wizard_id)
         self.assertFalse(state.registration_complete)
-        self.assertTrue(state.errors)
 
-    def test_measured_results_reach_done_page(self):
+    def test_measured_results_reach_the_wizard_state(self):
         """The plan-test job records generation_tps etc., but nothing
-        folded them into wizard state -- the done page called every
+        folded them into wizard state -- the done step called every
         tested registration 'not measured'."""
         run = {"success": True, "generation_tps": 12.3, "prompt_tps": 456.7,
                "load_seconds": 41.5, "cache_state": "cold"}
@@ -404,34 +424,45 @@ class TestWizardAcquisition(WebTestBase):
         self.store.update(job_id, status="done", outcome=json.dumps(run))
         w = self._wizard(step="test", profile_name="m1",
                          selected_plan_id="p1", test_job_id=job_id)
-        resp = self.client.post(f"/add/{w.wizard_id}/test",
-                                headers=self.auth, follow_redirects=False)
-        self.assertTrue(resp.headers["location"].endswith("/register"))
+        resp = self.client.post(f"/api/v2/wizard/{w.wizard_id}/test/next",
+                                headers=self.auth)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["step"], "register")
         from modelctl_web.wizard import WizardStore
         state = WizardStore().load(w.wizard_id)
         self.assertEqual(state.measured.get("generation_tps"), 12.3)
         self.assertEqual(state.test_observations["p1"]["cache_state"], "cold")
-        state.advance("done")
-        WizardStore().save(state)
-        page = self.client.get(f"/add/{w.wizard_id}/done", headers=self.auth)
-        self.assertEqual(page.status_code, 200)
-        self.assertIn("12.3", page.text)
-        self.assertNotIn("not measured", page.text)
+        # And the numbers come back out on the read the done step uses,
+        # rather than living only in the file.
+        detail = self.client.get(f"/api/v2/wizard/{w.wizard_id}",
+                                 headers=self.auth).json()
+        self.assertEqual(detail["measured"]["generation_tps"], 12.3)
+        self.assertEqual(detail["measured"]["prompt_tps"], 456.7)
 
     def test_analyze_tolerates_legacy_scalar_outcome(self):
         """Legacy job rows can hold a JSON scalar in outcome; the analyze
-        page 500'd on .get() (seen live Jul 30)."""
+        step 500'd on .get() (seen live Jul 30)."""
         job_id = self.store.create("pull", "pull org/model", lane="download")
         self.store.update(job_id, status="done",
                           outcome=json.dumps("a bare string"))
         w = self._wizard(step="analyze", repo_id="org/model",
                          source_type="hf_repo", download_job_id=job_id)
-        resp = self.client.get(f"/add/{w.wizard_id}/analyze",
+        resp = self.client.get(f"/api/v2/wizard/{w.wizard_id}/analyze",
                                headers=self.auth)
         self.assertEqual(resp.status_code, 200)
+        # A scalar outcome carries no profile name, so the step degrades
+        # to "nothing analysed yet" instead of raising.
+        self.assertIsNone(resp.json()["profile"])
 
 
 class TestRuntimeApi(WebTestBase):
+    # Phase-3 cutover: POST /models/{name}/restart and POST
+    # /runtime/unload-all had no /api/v2 successor, so restart-in-place
+    # and unload-everything are gone from the console (mutate.submit_restart
+    # / submit_unload_all survive but nothing calls them). The route tests
+    # that covered them went with the routes; load and unload are covered
+    # by test_console_phase3.py TestModelActionsRehomed.
+
     def _mock_runtime(self, state=None):
         if state is None:
             state = {
@@ -442,12 +473,18 @@ class TestRuntimeApi(WebTestBase):
         return mock.patch("modelctl_web.swap.LlamaSwapClient.runtime_state",
                           return_value=state)
 
-    def test_runtime_page_renders(self):
+    def test_model_detail_api_carries_runtime_identity(self):
+        """The per-model page's header: the worker's pid and port, not
+        just its state name."""
         with self._mock_runtime():
-            resp = self.client.get("/runtime", headers=self.auth)
+            resp = self.client.get("/api/v2/models/m1", headers=self.auth)
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("m1", resp.text)
-        self.assertIn("1234", resp.text)
+        body = resp.json()
+        self.assertEqual(body["name"], "m1")
+        self.assertEqual(body["runtime"]["state"], "ready")
+        self.assertEqual(body["runtime"]["pid"], 1234)
+        self.assertEqual(body["runtime"]["port"], 5000)
+        self.assertTrue(body["runtime"]["running"])
 
     def test_runtime_api_returns_json(self):
         with self._mock_runtime():
@@ -471,19 +508,27 @@ class TestRuntimeApi(WebTestBase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["state"], "stopped")
 
-    def test_runtime_logs_page(self):
+    def test_logtail_api_and_its_page_header(self):
         with mock.patch("modelctl_web.swap.LlamaSwapClient.logs",
                         return_value="line1\nline2\n"), \
              self._mock_runtime():
-            resp = self.client.get("/runtime/logs/m1", headers=self.auth)
+            resp = self.client.get("/api/v2/models/m1/logtail",
+                                   headers=self.auth)
+            # Same page, one fetch over: pid and port come from
+            # runtime_state(), not model_state()'s {state, worker} shape,
+            # which is why they used to be missing from this view.
+            header = self.client.get("/api/v2/models/m1",
+                                     headers=self.auth).json()
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("line1", resp.text)
-        # Running model: pid and port are shown (the page used to be fed
-        # model_state()'s {state, worker} shape, so they never rendered).
-        self.assertIn("pid 1234", resp.text)
-        self.assertIn("port 5000", resp.text)
+        self.assertEqual(resp.json()["source"], "llama-swap")
+        self.assertIn("line1", resp.json()["tail"])
+        self.assertEqual(header["runtime"]["pid"], 1234)
+        self.assertEqual(header["runtime"]["port"], 5000)
 
-    def test_runtime_logs_page_offers_load_for_stopped_model(self):
+    def test_stopped_model_is_reported_loadable(self):
+        """The logs view offered a Load button for a registered but
+        stopped model; the SPA derives that button from these two flags,
+        so they have to survive the join."""
         stopped = {"m1": {"model_id": "m1", "state": "stopped",
                           "registered": True, "running": False, "pid": None,
                           "port": None, "started": None,
@@ -491,9 +536,17 @@ class TestRuntimeApi(WebTestBase):
         with mock.patch("modelctl_web.swap.LlamaSwapClient.logs",
                         return_value=""), \
              self._mock_runtime(state=stopped):
-            resp = self.client.get("/runtime/logs/m1", headers=self.auth)
+            resp = self.client.get("/api/v2/models/m1", headers=self.auth)
         self.assertEqual(resp.status_code, 200)
-        self.assertIn(f"/models/m1/load", resp.text)
+        rt = resp.json()["runtime"]
+        self.assertEqual(rt["state"], "stopped")
+        self.assertTrue(rt["registered"])
+        self.assertFalse(rt["running"])
+        with mock.patch("modelctl_web.mutate.submit_load",
+                        return_value="job-load") as sub:
+            load = self.client.post("/api/v2/models/m1/load", headers=self.auth)
+        self.assertEqual(load.json(), {"job_id": "job-load"})
+        sub.assert_called_once()
 
     def test_runtime_logs_api(self):
         with mock.patch("modelctl_web.swap.LlamaSwapClient.logs",
@@ -509,43 +562,29 @@ class TestRuntimeApi(WebTestBase):
             resp = self.client.get("/api/runtime/logs/m1", headers=self.auth)
         self.assertEqual(resp.status_code, 502)
 
-    def test_dashboard_shows_runtime_state(self):
+    def test_models_api_joins_runtime_state(self):
+        """The operate table's rows are the profile joined with what
+        llama-swap reports, so a running model reads as running there."""
         with mock.patch.object(modelctl, "get_gpu_inventory", return_value=[]), \
-             mock.patch("modelctl_web.app._fetch_json", return_value=None), \
+             mock.patch("modelctl_web.telemetry.fetch_metrics_text",
+                        return_value=None), \
              self._mock_runtime(), self.resolvable_backend():
-            resp = self.client.get("/", headers=self.auth)
+            resp = self.client.get("/api/v2/models", headers=self.auth)
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("m1", resp.text)
-
-    def test_load_unload_restart_routes_exist(self):
-        from modelctl_web.swap import ModelctlSwapError
-        with mock.patch("modelctl_web.mutate.submit_load", return_value="job1"):
-            resp = self.client.post("/models/m1/load", headers=self.auth,
-                                    follow_redirects=False)
-        self.assertEqual(resp.status_code, 303)
-        self.assertIn("jobs/job1", resp.headers["location"])
-
-        with mock.patch("modelctl_web.mutate.submit_unload", return_value="job2"):
-            resp = self.client.post("/models/m1/unload", headers=self.auth,
-                                    follow_redirects=False)
-        self.assertEqual(resp.status_code, 303)
-
-        with mock.patch("modelctl_web.mutate.submit_restart", return_value="job3"):
-            resp = self.client.post("/models/m1/restart", headers=self.auth,
-                                    follow_redirects=False)
-        self.assertEqual(resp.status_code, 303)
-
-    def test_unload_all_route(self):
-        with mock.patch("modelctl_web.mutate.submit_unload_all", return_value="job4"):
-            resp = self.client.post("/runtime/unload-all", headers=self.auth,
-                                    follow_redirects=False)
-        self.assertEqual(resp.status_code, 303)
+        rows = {r["name"]: r for r in resp.json()}
+        self.assertIn("m1", rows)
+        self.assertEqual(rows["m1"]["state"], "ready")
+        self.assertTrue(rows["m1"]["running"])
+        self.assertEqual(rows["m1"]["port"], 5000)
 
     def test_model_id_simple_names_work(self):
+        # The load route takes {name:path} so llama-swap ids can hold a
+        # slash; a plain name must not pick up one on the way through.
         with mock.patch("modelctl_web.mutate.submit_load", return_value="job5") as sub:
-            resp = self.client.post("/models/my-model/load", headers=self.auth,
-                                    follow_redirects=False)
-        self.assertEqual(resp.status_code, 303)
+            resp = self.client.post("/api/v2/models/my-model/load",
+                                    headers=self.auth)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"job_id": "job5"})
         sub.assert_called_once()
         self.assertEqual(sub.call_args[0][1], "my-model")
 
@@ -897,7 +936,10 @@ class TestHardware(WebTestBase):
         self.assertNotEqual(fp1, fp2)
         self.assertEqual(fp1, fp3)
 
-    def test_hardware_page_renders(self):
+    def test_settings_api_carries_device_policy(self):
+        """The hardware page folded into /v2/settings; its device rows are
+        the `hardware` section of GET /api/v2/settings -- machine facts
+        (device id, name, total) beside the reserve being edited."""
         import modelctl_hardware
         fake_snap = modelctl_hardware.HardwareSnapshot(
             captured_at=time.time(), fingerprint="abc123",
@@ -909,11 +951,18 @@ class TestHardware(WebTestBase):
         with mock.patch("modelctl_hardware.capture_hardware_snapshot",
                         return_value=fake_snap), \
              mock.patch("modelctl_hardware.load_settings",
-                        return_value={"version": 1, "devices": {}, "ram": {}, "storage": {}}):
-            resp = self.client.get("/hardware", headers=self.auth)
+                        return_value={"version": 1, "devices": {}, "ram": {}, "storage": {}}), \
+             self.resolvable_backend():
+            resp = self.client.get("/api/v2/settings", headers=self.auth)
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("SYCL0", resp.text)
-        self.assertIn("B70", resp.text)
+        hw = resp.json()["hardware"]
+        self.assertEqual(hw["error"], "")
+        devices = {d["device"]: d for d in hw["devices"]}
+        self.assertIn("SYCL0", devices)
+        self.assertEqual(devices["SYCL0"]["name"], "B70")
+        self.assertEqual(devices["SYCL0"]["total_bytes"], 32 << 30)
+        self.assertEqual(devices["SYCL0"]["reserve_bytes"], 2 << 30)
+        self.assertEqual(hw["ram"]["reserve_bytes"], 4 << 30)
 
     def test_hardware_api(self):
         import modelctl_hardware
@@ -930,7 +979,7 @@ class TestHardware(WebTestBase):
         self.assertEqual(resp.json()["fingerprint"], "abc123")
         self.assertEqual(len(resp.json()["gpus"]), 1)
 
-    def test_hardware_page_shows_storage(self):
+    def test_settings_api_shows_storage(self):
         import modelctl_hardware
         storage = (modelctl_hardware.StorageSnapshot(
             path="/home/x/models", kind="ext4", allow_mmap=True,
@@ -945,12 +994,17 @@ class TestHardware(WebTestBase):
         with mock.patch("modelctl_hardware.capture_hardware_snapshot",
                         return_value=fake_snap), \
              mock.patch("modelctl_hardware.load_settings",
-                        return_value={"version": 1, "devices": {}, "ram": {}, "storage": {}}):
-            resp = self.client.get("/hardware", headers=self.auth)
+                        return_value={"version": 1, "devices": {}, "ram": {}, "storage": {}}), \
+             self.resolvable_backend():
+            resp = self.client.get("/api/v2/settings", headers=self.auth)
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("/home", resp.text)
-        self.assertIn("nvme", resp.text)
-        self.assertIn("not calibrated", resp.text)
+        rows = resp.json()["hardware"]["storage"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["mount_point"], "/home")
+        self.assertEqual(rows[0]["transport"], "nvme")
+        # An uncalibrated mount has no measurement; the page rendered that
+        # as "not calibrated" and must never show it as a zero rate.
+        self.assertIsNone(rows[0]["measured_sequential_read_bps"])
 
         with mock.patch("modelctl_hardware.capture_hardware_snapshot",
                         return_value=fake_snap):
@@ -958,22 +1012,22 @@ class TestHardware(WebTestBase):
         self.assertEqual(len(resp.json()["storage"]), 1)
         self.assertEqual(resp.json()["storage"][0]["transport"], "nvme")
 
-    def test_calibrate_route_submits_job(self):
+    def test_calibrate_endpoint_submits_job(self):
         with mock.patch("modelctl_web.mutate.submit_calibrate_storage",
                         return_value="job-cal") as sub:
-            resp = self.client.post("/hardware/calibrate", headers=self.auth,
-                                    follow_redirects=False)
-        self.assertEqual(resp.status_code, 303)
-        self.assertIn("job-cal", resp.headers["location"])
+            resp = self.client.post("/api/v2/settings/hardware/calibrate",
+                                    headers=self.auth)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"job_id": "job-cal"})
         sub.assert_called_once()
 
     def test_calibrate_job_runs_end_to_end(self):
         from modelctl_services import hardware_service
         with mock.patch.object(hardware_service, "pick_calibration_file",
                                return_value="/nonexistent/model.gguf"):
-            resp = self.client.post("/hardware/calibrate", headers=self.auth,
-                                    follow_redirects=False)
-            job = self.wait_job(resp.headers["location"].split("/jobs/")[1].split("?")[0])
+            resp = self.client.post("/api/v2/settings/hardware/calibrate",
+                                    headers=self.auth)
+            job = self.wait_job(resp.json()["job_id"])
         # No real model file in this test env -- calibration fails cleanly,
         # it doesn't crash the job.
         self.assertEqual(job["status"], "failed")
@@ -1189,73 +1243,44 @@ if __name__ == "__main__":
 
 
 class TestRuntimePolicy(WebTestBase):
+    # Phase-3 cutover: the managed-runtime editor is gone. POST
+    # /profiles/{name}/runtime-policy (write the runtime section) and
+    # POST /profiles/{name}/plans/{id}/{select,disable} (pin / disable a
+    # plan) had no /api/v2 successor -- mutate.submit_runtime_policy and
+    # submit_plan_select survive but nothing calls them, so managed mode
+    # can only be configured by editing the profile JSON or via the CLI.
+    # The three write tests that covered them went with the routes; the
+    # read below is the only part of the surface that survived.
+
     def test_policy_defaults_to_fixed(self):
         resp = self.client.get("/api/profiles/m1/runtime-policy", headers=self.auth)
         self.assertEqual(resp.json(), {"mode": "fixed"})
 
-    def test_save_managed_policy(self):
-        with mock.patch.object(modelctl, "generate_artifacts"), \
-             mock.patch.object(modelctl, "sync_all_backends"):
-            resp = self.client.post("/profiles/m1/runtime-policy", headers=self.auth,
-                                    data={"mode": "managed", "objective": "fastest_generation",
-                                          "allow_fallback": "on", "minimum_context": "32768"},
-                                    follow_redirects=False)
-            job = self.wait_job(resp.headers["location"].split("/jobs/")[1].split("?")[0])
-        self.assertEqual(job["status"], "done")
-        saved = json.loads((self.profiles_dir / "m1.json").read_text())
-        self.assertEqual(saved["runtime"]["mode"], "managed")
-        self.assertEqual(saved["runtime"]["objective"], "fastest_generation")
-        self.assertEqual(saved["runtime"]["minimum_context"], 32768)
-        self.assertTrue(saved["runtime"]["allow_fallback"])
-        self.assertFalse(saved["runtime"]["allow_untested"])
-
-    def test_fixed_mode_clears_section(self):
-        p = dict(PROFILE)
-        p["runtime"] = {"mode": "managed", "objective": "balanced"}
-        (self.profiles_dir / "m1.json").write_text(json.dumps(p))
-        with mock.patch.object(modelctl, "generate_artifacts"), \
-             mock.patch.object(modelctl, "sync_all_backends"):
-            resp = self.client.post("/profiles/m1/runtime-policy", headers=self.auth,
-                                    data={"mode": "fixed"}, follow_redirects=False)
-            self.wait_job(resp.headers["location"].split("/jobs/")[1].split("?")[0])
-        saved = json.loads((self.profiles_dir / "m1.json").read_text())
-        self.assertNotIn("runtime", saved)
-
-    def test_plan_select_and_disable(self):
-        with mock.patch.object(modelctl, "generate_artifacts"), \
-             mock.patch.object(modelctl, "sync_all_backends"):
-            r1 = self.client.post("/profiles/m1/plans/plan-aaa/select", headers=self.auth,
-                                  follow_redirects=False)
-            self.wait_job(r1.headers["location"].split("/jobs/")[1].split("?")[0])
-            r2 = self.client.post("/profiles/m1/plans/plan-bbb/disable", headers=self.auth,
-                                  follow_redirects=False)
-            self.wait_job(r2.headers["location"].split("/jobs/")[1].split("?")[0])
-        saved = json.loads((self.profiles_dir / "m1.json").read_text())
-        self.assertEqual(saved["runtime"]["pinned_plan_id"], "plan-aaa")
-        self.assertIn("plan-bbb", saved["runtime"]["disabled_plan_ids"])
-
 
 class TestPlanTesting(WebTestBase):
+    # Phase-3 cutover: autotune has no /api/v2 successor. POST
+    # /profiles/{name}/tune was mutate.submit_autotune's only caller, so
+    # sweeping every candidate plan in one job is CLI-only now; its route
+    # test went with the route.
+
     def test_plan_test_job_and_history(self):
+        """A selected plan is measured through the wizard's test step,
+        which is where submit_plan_test is reachable from now."""
+        from modelctl_web.wizard import WizardState, WizardStore
         fake_run = {"profile_name": "m1", "plan_id": "p1", "success": True,
                     "generation_tps": 42.0, "prompt_tps": 100.0,
                     "load_seconds": 3.2, "log_path": "/x/log"}
+        state = WizardState(step="test", profile_name="m1",
+                            selected_plan_id="p1")
+        WizardStore().save(state)
         with mock.patch("modelctl_tune.test_launch_plan", return_value=fake_run) as tlp:
-            resp = self.client.post("/profiles/m1/plans/p1/test", headers=self.auth,
-                                    follow_redirects=False)
-            job = self.wait_job(resp.headers["location"].split("/jobs/")[1].split("?")[0])
+            resp = self.client.post(
+                f"/api/v2/wizard/{state.wizard_id}/test/run", headers=self.auth)
+            self.assertEqual(resp.status_code, 200)
+            job = self.wait_job(resp.json()["test_job_id"])
         self.assertEqual(job["status"], "done")
         tlp.assert_called_once()
-
-    def test_autotune_job(self):
-        fake = {"tested": 2, "skipped_validated": 1, "results": [], "best": "p1"}
-        with mock.patch("modelctl_tune.autotune_profile", return_value=fake) as at:
-            resp = self.client.post("/profiles/m1/tune", headers=self.auth,
-                                    data={"objective": "fastest_generation"},
-                                    follow_redirects=False)
-            job = self.wait_job(resp.headers["location"].split("/jobs/")[1].split("?")[0])
-        self.assertEqual(job["status"], "done")
-        at.assert_called_once()
+        self.assertEqual(tlp.call_args[0][:2], ("m1", "p1"))
 
     def test_history_endpoint(self):
         # WebTestBase redirects default RuntimeDB() paths into self.tmp,
@@ -1612,11 +1637,17 @@ class TestMoeCacheMetrics(WebTestBase):
                           "gpu": {"budgets_bytes": {"SYCL0": 8 << 30}}}
         (self.profiles_dir / "m1.json").write_text(json.dumps(p))
 
+    # Phase-3 cutover: POST /models/{name}/cache/reset is gone and has no
+    # /api/v2 successor, so clearing a live server's MoE cache from the
+    # console is no longer possible (it was the only caller; the two
+    # tests that covered the port-present and port-absent paths went with
+    # the route). The scrape itself moved to modelctl.scrape_moe_cache_metrics,
+    # which the web app no longer wraps.
+
     def test_scrape_parses_metrics_label_agnostic(self):
-        from modelctl_web.app import _scrape_moe_cache_metrics
         with mock.patch("urllib.request.urlopen",
                         return_value=_FakeTextResp(self.METRICS)):
-            stats = _scrape_moe_cache_metrics(5000)
+            stats = modelctl.scrape_moe_cache_metrics(5000)
         self.assertEqual(stats["0"]["hits_total"], "42")
         self.assertEqual(stats["0"]["misses_total"], "7")
         # extra labels beyond device= still parse
@@ -1629,44 +1660,33 @@ class TestMoeCacheMetrics(WebTestBase):
                          [k for dev in stats.values() for k in dev])
 
     def test_scrape_returns_none_on_error(self):
-        from modelctl_web.app import _scrape_moe_cache_metrics
         with mock.patch("urllib.request.urlopen", side_effect=OSError("down")):
-            self.assertIsNone(_scrape_moe_cache_metrics(5000))
+            self.assertIsNone(modelctl.scrape_moe_cache_metrics(5000))
 
     def test_scrape_returns_none_without_moe_metrics(self):
-        from modelctl_web.app import _scrape_moe_cache_metrics
         with mock.patch("urllib.request.urlopen",
                         return_value=_FakeTextResp("llamacpp:prompt_tokens_total 9\n")):
-            self.assertIsNone(_scrape_moe_cache_metrics(5000))
+            self.assertIsNone(modelctl.scrape_moe_cache_metrics(5000))
 
-    def test_runtime_page_renders_cache_stats(self):
+    def test_models_api_reports_cache_stats(self):
+        """The runtime page's per-model cache line is now the operate
+        row's `cache` summary, scraped from the running worker's own
+        /metrics port."""
         self._enable_moe_cache()
         with self._runtime_state(), \
              mock.patch("urllib.request.urlopen",
                         return_value=_FakeTextResp(self.METRICS)):
-            resp = self.client.get("/runtime", headers=self.auth)
+            resp = self.client.get("/api/v2/models", headers=self.auth)
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("hit 0.75", resp.text)
-        self.assertIn("/models/m1/cache/reset", resp.text)
-
-    def test_cache_reset_posts_to_server(self):
-        with self._runtime_state(port=5000), \
-             mock.patch("urllib.request.urlopen") as uo:
-            resp = self.client.post("/models/m1/cache/reset",
-                                    headers=self.auth, follow_redirects=False)
-        self.assertEqual(resp.status_code, 303)
-        uo.assert_called_once()
-        req = uo.call_args[0][0]
-        self.assertEqual(req.full_url, "http://127.0.0.1:5000/cache/reset")
-        self.assertEqual(req.get_method(), "POST")
-
-    def test_cache_reset_without_port_skips_request(self):
-        with self._runtime_state(port=None), \
-             mock.patch("urllib.request.urlopen") as uo:
-            resp = self.client.post("/models/m1/cache/reset",
-                                    headers=self.auth, follow_redirects=False)
-        self.assertEqual(resp.status_code, 303)
-        uo.assert_not_called()
+        row = next(r for r in resp.json() if r["name"] == "m1")
+        self.assertEqual(row["moe_cache_mode"], "auto")
+        # Aggregate ratio from the raw counters, not the server's own
+        # hit_ratio gauge: 42 hits / 49 lookups.
+        self.assertAlmostEqual(row["cache"]["hit_ratio"], 42 / 49)
+        self.assertEqual(row["cache"]["hits"], 42)
+        self.assertEqual(row["cache"]["misses"], 7)
+        # Both labelled devices survive the parse.
+        self.assertEqual(row["cache"]["devices"], ["0", "1"])
 
 
 class TestCacheVariants(WebTestBase):
@@ -1847,7 +1867,23 @@ class TestTierApplyCacheWriteback(WebTestBase):
 
 class TestMoeCacheRouteValidation(WebTestBase):
     """submit_moe_cache validates against probed capabilities (fail closed)
-    before saving the profile."""
+    before saving the profile.
+
+    Re-homed onto POST /api/v2/models/{name}/config: flipping the cache
+    mode is a structural change, so it also has to carry the explicit
+    accept before the job is even submitted."""
+
+    def _post_mode(self, mode, accept=True):
+        return self.client.post(
+            "/api/v2/models/m1/config", headers=self.auth,
+            json={"moe_mode": mode, "accept_structural": accept})
+
+    def test_mode_change_needs_the_structural_confirm(self):
+        resp = self._post_mode("manual", accept=False)
+        self.assertEqual(resp.status_code, 409)
+        self.assertTrue(resp.json()["gate"]["requires_accept"])
+        self.assertTrue(any("moe_cache mode" in c
+                            for c in resp.json()["gate"]["changes"]))
 
     def test_manual_cache_rejected_on_incapable_backend(self):
         with mock.patch("modelctl_capabilities.probe_backend",
@@ -1855,11 +1891,9 @@ class TestMoeCacheRouteValidation(WebTestBase):
              mock.patch.object(modelctl, "save_profile") as save, \
              mock.patch.object(modelctl, "generate_artifacts"), \
              mock.patch.object(modelctl, "sync_all_backends"):
-            resp = self.client.post("/profiles/m1/moe-cache", headers=self.auth,
-                                    data={"mode": "manual"},
-                                    follow_redirects=False)
-            job_id = resp.headers["location"].split("/jobs/")[1].split("?")[0]
-            job = self.wait_job(job_id)
+            resp = self._post_mode("manual")
+            self.assertEqual(resp.status_code, 200)
+            job = self.wait_job(resp.json()["jobs"]["moe_cache"])
         self.assertEqual(job["status"], "failed")
         save.assert_not_called()
 
@@ -1870,11 +1904,9 @@ class TestMoeCacheRouteValidation(WebTestBase):
              mock.patch.object(modelctl, "save_profile") as save, \
              mock.patch.object(modelctl, "generate_artifacts"), \
              mock.patch.object(modelctl, "sync_all_backends"):
-            resp = self.client.post("/profiles/m1/moe-cache", headers=self.auth,
-                                    data={"mode": "auto"},
-                                    follow_redirects=False)
-            job_id = resp.headers["location"].split("/jobs/")[1].split("?")[0]
-            job = self.wait_job(job_id)
+            resp = self._post_mode("auto")
+            self.assertEqual(resp.status_code, 200)
+            job = self.wait_job(resp.json()["jobs"]["moe_cache"])
         self.assertEqual(job["status"], "done")
         save.assert_called_once()
 
@@ -1919,20 +1951,19 @@ class TestBaselinePlanCapabilities(WebTestBase):
         self.assertEqual(list(base.argv).count("--moe-cache-bytes"), 1)
 
 
-class TestPlansPageDecisionTrace(unittest.TestCase):
-    """Task H3: the trace has to survive template rendering, not just
-    dataclass construction -- a field the template never reads explains
-    nothing."""
+class TestPlansPageDecisionTrace(WebTestBase):
+    """Task H3: the justification has to survive the transport, not just
+    dataclass construction -- a field the client never receives explains
+    nothing.
 
-    def setUp(self):
-        from fastapi.testclient import TestClient
-        from modelctl_web.app import create_app
-        self.app = create_app(token="t", store=mock.MagicMock(),
-                              runner=mock.MagicMock())
-        self.client = TestClient(self.app)
-        self.auth = {"Authorization": "Bearer t"}
+    The old plans page rendered the whole DecisionTrace; nothing on the
+    /api/v2 surface carries one (modelctl_evidence.build_decision_trace
+    is now only exercised directly, in test_release_a.py). What replaced
+    it is the per-plan `reason` on GET /api/v2/models/{name}/plans, which
+    is what this asserts.
+    """
 
-    def test_plans_page_renders_the_decision_trace(self):
+    def test_plans_api_carries_the_per_plan_justification(self):
         import modelctl_hardware
         profile = {"name": "m1", "backend": "llama-cpp", "model_path": "",
                    "config": {"device": "SYCL0", "split_mode": "",
@@ -1950,9 +1981,16 @@ class TestPlansPageDecisionTrace(unittest.TestCase):
              mock.patch.object(modelctl, "load_profile", return_value=profile), \
              mock.patch.object(modelctl, "build_server_args",
                                return_value=["llama-server"]):
-            resp = self.client.get("/profiles/m1/plans", headers=self.auth)
+            resp = self.client.get("/api/v2/models/m1/plans", headers=self.auth)
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("why this plan", resp.text)
+        rows = resp.json()
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertTrue(row["reason"],
+                            f"plan {row['id']} carries no justification")
         # An unmeasured profile must say so rather than showing a blank
         # reason or an invented one.
-        self.assertIn("nothing has been measured", resp.text)
+        baseline = next(r for r in rows if r["category"] == "baseline")
+        self.assertFalse(baseline["tested"])
+        self.assertIsNone(baseline["measured"])
+        self.assertIn("the profile as saved", baseline["reason"])

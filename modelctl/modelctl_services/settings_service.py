@@ -12,11 +12,14 @@ from .result import ServiceResult
 # Keys the console is allowed to write, and how to coerce them. Anything
 # outside this map is rejected rather than stored, so a typo'd field name
 # cannot quietly become a permanent entry in defaults.json.
-_STRING_KEYS = ("device", "split_mode", "tensor_split", "cache_type_k",
-                "cache_type_v", "flash_attn", "mtp", "primary_gpu")
-_INT_KEYS = ("ctx", "ttl", "vram_limit_pct")
+# Public because the /v2 settings form is generated from them: the min/max
+# on a number input is then provably the same bound the write validates
+# against, instead of a second copy that drifts.
+STRING_KEYS = ("device", "split_mode", "tensor_split", "cache_type_k",
+               "cache_type_v", "flash_attn", "mtp", "primary_gpu")
+INT_KEYS = ("ctx", "ttl", "vram_limit_pct")
 
-_BOUNDS = {
+BOUNDS = {
     "ctx": (512, 1 << 22),
     "ttl": (0, 86400 * 7),
     "vram_limit_pct": (10, 100),
@@ -39,15 +42,15 @@ def update_defaults(updates: dict) -> ServiceResult:
     applied = {}
 
     for key, raw in (updates or {}).items():
-        if key in _STRING_KEYS:
+        if key in STRING_KEYS:
             applied[key] = str(raw)
-        elif key in _INT_KEYS:
+        elif key in INT_KEYS:
             try:
                 value = int(raw)
             except (TypeError, ValueError):
                 result.add_warning(f"{key}: '{raw}' is not a number — unchanged")
                 continue
-            low, high = _BOUNDS.get(key, (None, None))
+            low, high = BOUNDS.get(key, (None, None))
             if low is not None and not (low <= value <= high):
                 result.add_warning(
                     f"{key}: {value} is outside {low}–{high} — unchanged")

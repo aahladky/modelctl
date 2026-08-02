@@ -350,7 +350,17 @@ class TestSupportBundle(unittest.TestCase):
         self.assertTrue(zipfile.ZipFile(out).namelist())
 
 
-class TestSettingsPage(unittest.TestCase):
+class TestSettingsAPI(unittest.TestCase):
+    """The diagnostics the demolished /settings page used to render.
+
+    Console phase 3 replaced the server-rendered page with the SPA reading
+    GET /api/v2/settings, so these assert on that payload instead of on
+    HTML. The page's four sections map onto it as: "integration manifest"
+    and "runtime builds and capabilities" -> diagnostics.manifest /
+    .capabilities, "oneAPI environment" -> diagnostics.environment, and
+    the support-bundle link -> the download asserted below.
+    """
+
     def setUp(self):
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -366,13 +376,77 @@ class TestSettingsPage(unittest.TestCase):
         self.client = TestClient(create_app(token=TOKEN, store=store, runner=runner))
         self.auth = {"Authorization": f"Bearer {TOKEN}"}
 
-    def test_settings_shows_manifest_and_capabilities(self):
-        resp = self.client.get("/settings", headers=self.auth)
+    def test_settings_api_reports_manifest_and_capabilities(self):
+        """One read has to answer "what is this install running?".
+
+        /api/diagnostics is not a substitute: it predates the validated
+        pair and omits validated_modelctl_commit / validated_llama_commit
+        / upstream_base / newer_than_validated, which is exactly the set a
+        rollback is chosen from. Fixtures are pinned so the assertions are
+        on values, not on the shape of whatever this machine happens to
+        have installed.
+        """
+        repo = self.root / "repo"
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "config", "user.email", "t@example.com"],
+                       cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+        (repo / diag.MANIFEST_NAME).write_text(json.dumps({
+            "validated_modelctl_commit": "1" * 40,
+            "validated_llama_commit": "b" * 40,
+            "upstream_base": "c" * 9,
+            # Drifted on purpose: the page rendered the mismatch list in
+            # red, so the payload has to carry it.
+            "capability_schema":
+                modelctl_capabilities.CAPABILITY_SCHEMA_VERSION + 1,
+        }))
+        subprocess.run(["git", "add", "."], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "manifest"], cwd=repo, check=True)
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                              capture_output=True, text=True).stdout.strip()
+        (self.root / "sycl-env.sh").write_text("export LD_LIBRARY_PATH=/opt/lib")
+        for p in (mock.patch.object(diag, "REPO_ROOT", repo),
+                  mock.patch.object(modelctl, "LLAMA_SERVER_BIN",
+                                    str(self.root / "absent" / "llama-server")),
+                  mock.patch.object(modelctl, "COMMON_LLAMA_SERVER_GLOBS",
+                                    [str(self.root / "absent" / "*")]),
+                  mock.patch.object(modelctl, "COMMON_ENV_SCRIPT_GLOBS",
+                                    [str(self.root / "*env*.sh")])):
+            p.start()
+            self.addCleanup(p.stop)
+
+        resp = self.client.get("/api/v2/settings", headers=self.auth)
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("integration manifest", resp.text)
-        self.assertIn("runtime builds and capabilities", resp.text)
-        self.assertIn("oneAPI environment", resp.text)
-        self.assertIn("support bundle", resp.text)
+        diagnostics = resp.json()["diagnostics"]
+
+        # "integration manifest": the validated pair, its rollback target
+        # and the drift against this checkout.
+        manifest = diagnostics["manifest"]
+        self.assertTrue(manifest["present"])
+        self.assertEqual(manifest["validated_modelctl_commit"], "1" * 40)
+        self.assertEqual(manifest["validated_llama_commit"], "b" * 40)
+        self.assertEqual(manifest["upstream_base"], "c" * 9)
+        self.assertEqual(manifest["modelctl_commit"], head)
+        self.assertTrue(manifest["newer_than_validated"])
+        self.assertTrue(any("rollback target" in n for n in manifest["notes"]),
+                        manifest["notes"])
+        self.assertFalse(manifest["ok"])
+        self.assertTrue(any("capability_schema" in m
+                            for m in manifest["mismatches"]),
+                        manifest["mismatches"])
+
+        # "runtime builds and capabilities": which binary was selected out
+        # of which candidates, and why there is none here.
+        capabilities = diagnostics["capabilities"]
+        self.assertEqual(capabilities["binary"], "")
+        self.assertEqual(capabilities["candidates"], [])
+        self.assertIn("no executable llama-server", capabilities["error"])
+
+        # "oneAPI environment": the scripts a SYCL profile with no saved
+        # LD_LIBRARY_PATH falls back to.
+        self.assertEqual(diagnostics["environment"]["oneapi_env_scripts"],
+                         [str(self.root / "sycl-env.sh")])
+        self.assertEqual(diagnostics["errors"], [])
 
     def test_api_diagnostics_returns_structured_state(self):
         body = self.client.get("/api/diagnostics", headers=self.auth).json()

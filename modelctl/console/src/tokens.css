@@ -234,6 +234,15 @@ fieldset {
 legend { font-size: .8rem; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; padding: 0 .4rem; }
 .field { display: grid; gap: .25rem; min-width: 0; }
 .field > label { font-weight: 600; font-size: .85rem; }
+/* label + summoned-help row: the i affordance is a sibling of <label>,
+   never a child, so a `for` association cannot swallow its clicks.
+   Standalone (not `.field > .lbl`) because the same pairing is used
+   inside .check rows too. */
+.lbl { display: flex; align-items: center; gap: .35em; flex-wrap: wrap; }
+.lbl > label { font-weight: 600; font-size: .85rem; }
+.check .lbl { display: block; }
+.check .lbl > label { display: inline; }
+.check .lbl > .info { vertical-align: middle; margin-left: .35em; }
 .field .help { color: var(--muted); font-size: .8rem; }
 .field .msg { font-size: .8rem; display: flex; gap: .4em; align-items: baseline; }
 .field .msg.error { color: var(--err); font-weight: 600; }
@@ -278,12 +287,18 @@ input[type=number] { font-family: var(--mono); }
 .info > button[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); }
 .info .popover {
   position: absolute; z-index: 20; top: calc(100% + .4rem); left: 0;
-  min-width: 240px; max-width: 320px;
+  /* clamp to the viewport: these live inside narrow flex columns and
+     right-aligned cells, where a fixed 320px box would overflow its
+     widget -- help you cannot read is not summonable */
+  min-width: min(240px, 78vw); max-width: min(320px, 82vw);
   background: var(--bg-raised); border: 1px solid var(--border-strong);
   border-radius: var(--radius); box-shadow: var(--shadow);
   padding: .6rem .8rem; font-size: .8rem; color: var(--text);
   font-weight: 400; text-transform: none; letter-spacing: normal;
 }
+
+/* right-anchored popover, for affordances near the right edge */
+.info .popover.flip { left: auto; right: 0; }
 
 /* stream-drop treatment on whole-page content (operate/jobs live regions) */
 .stale-note { color: var(--warn); }

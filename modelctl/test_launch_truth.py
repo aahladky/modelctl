@@ -228,20 +228,35 @@ class TestStockBinaryNeverGetsCacheFlags(LaunchTruthBase):
         self.assertNoCacheFlags(entry, "llama-swap entry")
         self.assertFalse(ok, "llama-swap entry reported a blocked profile as resolved")
 
-    def test_browser_preview_has_no_cache_flags(self):
+    def test_web_plan_api_has_no_cache_flags(self):
+        # Was the /profiles/{name}/run.sh preview page, demolished with the
+        # server-rendered console; /api/profiles/{name}/plans is the web
+        # surface that still publishes argv. Checking every published plan,
+        # not just one, because a cache flag on any of them is launchable
+        # from the console's plan table.
         client, auth = self.web_client()
-        resp = client.get("/profiles/m1/run.sh", headers=auth)
+        resp = client.get("/api/profiles/m1/plans", headers=auth)
         self.assertEqual(resp.status_code, 200)
-        self.assertNoCacheFlags(resp.text, "browser run.sh preview")
+        rows = resp.json()
+        self.assertTrue(rows, "web plan API published no plans at all")
+        for row in rows:
+            self.assertNoCacheFlags(" ".join(row["argv"]),
+                                    f"web plan API ({row['id']})")
 
-    def test_browser_shows_why_the_command_is_blocked(self):
+    def test_plans_api_says_why_the_command_is_blocked(self):
         # Task B2: validation messages must be visible where the user makes
-        # the decision, not only in a job log.
+        # the decision, not only in a job log. The decision now happens on
+        # the /v2 per-model page, which reads this endpoint: a plan the
+        # resolved backend cannot run comes back in the "unavailable"
+        # bucket, naming the capability that is missing.
         client, auth = self.web_client()
-        resp = client.get("/profiles/m1", headers=auth)
+        resp = client.get("/api/v2/models/m1/plans", headers=auth)
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("moe_weight_transfer_cache", resp.text)
-        self.assertIn("blocked", resp.text)
+        rows = [r for r in resp.json() if r["source"] == "current-profile"]
+        self.assertEqual(len(rows), 1,
+                         "per-model plan API dropped the profile as saved")
+        self.assertEqual(rows[0]["category"], "unavailable")
+        self.assertIn("moe_weight_transfer_cache", rows[0]["reason"])
 
     def test_plan_argv_has_no_cache_flags(self):
         # Plans feed the worker and the plan test; a cache flag surviving
@@ -277,12 +292,21 @@ class TestCommandEqualityAcrossSurfaces(LaunchTruthBase):
 
         fingerprints = {}
 
-        # 1. browser preview (web route)
+        # 1. web surface (the console's plan API)
+        # Was the /profiles/{name}/run.sh preview page. That page rendered
+        # the whole canonical argv; the API publishes the plan's option
+        # vector without argv[0], because the binary is whatever
+        # resolve_backend() picks at launch -- frequently not the one the
+        # profile names. argv[0] is put back below from the binary this
+        # fixture actually pinned, never from the row itself, so a surface
+        # that quietly resolved a different binary still fails here.
         client, auth = self.web_client()
-        resp = client.get("/profiles/m1/run.sh", headers=auth)
+        resp = client.get("/api/profiles/m1/plans", headers=auth)
         self.assertEqual(resp.status_code, 200)
-        browser_argv = tuple(
-            tok for tok in resp.text.replace("\\\n", " ").split() if tok)
+        rows = [r for r in resp.json() if r["source"] == "current-profile"]
+        self.assertEqual(len(rows), 1,
+                         "web plan API dropped the profile exactly as saved")
+        browser_argv = tuple(rows[0]["argv"])
 
         # 2. CLI preview / rendering entry point
         cli_cmd, _ok, _msgs = self.canonical()
@@ -308,11 +332,12 @@ class TestCommandEqualityAcrossSurfaces(LaunchTruthBase):
         self.assertEqual(len(set(fingerprints.values())), 1,
                          f"surfaces disagree on command identity: {fingerprints}")
 
-        # The two rendered surfaces are shell text, so compare them by
-        # re-tokenizing rather than by fingerprint.
+        # The web surface publishes argv as JSON; the two rendered
+        # surfaces are shell text, so compare those by re-tokenizing
+        # rather than by fingerprint.
         expected = list(cli_cmd.argv)
-        self.assertEqual(list(browser_argv), expected,
-                         "browser preview differs from the canonical command")
+        self.assertEqual([str(self.binary)] + list(browser_argv), expected,
+                         "web plan API differs from the canonical command")
         self.assertEqual(self._argv_from_run_sh(run_sh), expected,
                          "generated run.sh differs from the canonical command")
         self.assertEqual(self._argv_from_swap_entry(entry), expected,

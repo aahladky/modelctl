@@ -324,11 +324,18 @@ class TelemetryCollector:
         return [job_row(j) for j in self.store.list(limit)]
 
     def snapshot(self):
+        # Every section degrades on its own, and says so. An empty `gpus`
+        # or a zeroed `ram` is indistinguishable from the truth of a
+        # machine with no GPUs / no memory reading, so a section that
+        # threw records why: the page marks that region stale instead of
+        # rendering the fallback as fact.
+        errors = {}
         try:
             services = self._swap_probe()
-        except Exception:
+        except Exception as e:
             services = {"swap": {"ok": False, "latency_ms": None, "detail": "probe failed"},
                         "api": {"ok": False, "latency_ms": None, "detail": "probe failed"}}
+            errors["services"] = str(e) or "probe failed"
         services["console_started"] = self.started
         try:
             gpus = [{"device": g["device"], "name": g["name"],
@@ -336,26 +343,31 @@ class TelemetryCollector:
                      "free_bytes": g["free_bytes"],
                      "used_bytes": max(0, g["total_bytes"] - g["free_bytes"])}
                     for g in self._inventory()]
-        except Exception:
+        except Exception as e:
             gpus = []
+            errors["gpus"] = str(e) or "device inventory failed"
         try:
             ram = self._meminfo_fn()
-        except Exception:
+        except Exception as e:
             ram = {"total_bytes": 0, "available_bytes": 0, "used_bytes": 0}
+            errors["ram"] = str(e) or "meminfo read failed"
         try:
             runtime = self._runtime()
-        except Exception:
+        except Exception as e:
             runtime = {}
+            errors["runtime"] = str(e) or "runtime probe failed"
         try:
             models = self._model_rows(runtime)
-        except Exception:
+        except Exception as e:
             models = []
+            errors["models"] = str(e) or "profile read failed"
         try:
             jobs = self.job_rows()
-        except Exception:
+        except Exception as e:
             jobs = []
+            errors["jobs"] = str(e) or "job store read failed"
         return {"ts": time.time(), "services": services, "gpus": gpus,
-                "ram": ram, "models": models, "jobs": jobs}
+                "ram": ram, "models": models, "jobs": jobs, "errors": errors}
 
 
 def sse_stream(collector, interval=2.0, max_seconds=3600, stop=None):

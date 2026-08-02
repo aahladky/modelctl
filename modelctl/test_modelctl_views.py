@@ -102,13 +102,28 @@ class TestBottleneckClassification(unittest.TestCase):
                 self.assertIn(label, ("storage", "cpu", "h2d", "gpu", "unknown"))
 
 
-class TestHistoryPage(unittest.TestCase):
+class TestHistoryAPI(unittest.TestCase):
+    """The history questions, now asked of the API instead of the page.
+
+    The server-rendered /profiles/{name}/history page was demolished with
+    the rest of the old console (console phase 3); the same run rows are
+    served by GET /api/profiles/{name}/history (every recorded column) and
+    GET /api/v2/models/{name}/history (the console's view, which adds the
+    bottleneck verdict). The page's job was to answer the RAM/SSD
+    questions, so the payloads have to carry the facts it stated -- a
+    number the API drops is a question nothing can answer any more.
+    """
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         profiles = self.root / "profiles"
         profiles.mkdir()
+        # /api/v2/models/{name}/history gates on load_profile so an unknown
+        # model 404s instead of answering []; the profile only has to exist.
+        (profiles / "m1.json").write_text(json.dumps(
+            {"name": "m1", "config": {}}))
         p = mock.patch.object(modelctl, "PROFILES_DIR", profiles)
         p.start()
         self.addCleanup(p.stop)
@@ -146,47 +161,80 @@ class TestHistoryPage(unittest.TestCase):
         payload.update(kw)
         self.db.record_plan_run(payload)
 
-    def page(self):
-        resp = self.client.get("/profiles/m1/history", headers=self.auth)
+    def rows(self):
+        """Every recorded column, from the surviving legacy JSON API."""
+        resp = self.client.get("/api/profiles/m1/history", headers=self.auth)
         self.assertEqual(resp.status_code, 200)
-        return resp.text
+        return resp.json()
 
-    def test_page_answers_every_required_question(self):
+    def console_rows(self):
+        """What the /v2 console reads: the same runs plus the verdict."""
+        resp = self.client.get("/api/v2/models/m1/history", headers=self.auth)
+        self.assertEqual(resp.status_code, 200)
+        return resp.json()
+
+    def test_api_answers_every_required_question(self):
         self.record()
-        page = self.page()
+        row = self.rows()[0]
         # how much is in VRAM / how much RAM is resident
-        self.assertIn("peak", page)
-        self.assertIn("PSS", page)
+        self.assertEqual(json.loads(row["peak_vram_json"]),
+                         {"SYCL0": 12 * GB})
+        self.assertEqual(row["peak_ram_bytes"], 8 * GB)
+        self.assertEqual(row["peak_pss_bytes"], 6 * GB)
         # is the process taking major faults
-        self.assertIn("55000", page)
-        self.assertIn("major", page)
-        # bytes read during load and during generation
-        self.assertIn("during generation", page)
-        self.assertIn("load/warmup", page)
+        self.assertEqual(row["major_faults"], 55_000)
+        self.assertEqual(row["minor_faults"], 900)
+        # bytes read during load and during generation, kept apart: the
+        # split is the whole point, a total cannot answer either question
+        self.assertEqual(row["read_bytes_warmup"], 28 * GB)
+        self.assertEqual(row["read_bytes_generation"], 2 * GB)
+        self.assertEqual(row["read_bytes"], 30 * GB)
         # which cache state this result is
-        self.assertIn("warm cache", page)
-        # what limited it
-        self.assertIn("limited by storage", page)
+        self.assertEqual(row["cache_state"], "warm")
+        # what limited it -- the judgement itself, not the raw counters
+        verdict = self.console_rows()[0]
+        self.assertEqual(verdict["cache_state"], "warm")
+        self.assertEqual(verdict["bottleneck"], "storage")
+        self.assertIn("during generation", verdict["bottleneck_why"])
 
-    def test_unmeasured_fields_say_so_rather_than_showing_zero(self):
-        # "not measured" and "zero" are different claims.
+    def test_unmeasured_fields_are_null_rather_than_zero(self):
+        # "not measured" and "zero" are different claims, and JSON has to
+        # keep them apart: null is the absent counter, 0 is a real reading.
         self.record(peak_ram_bytes=None, peak_pss_bytes=None,
                     read_bytes=None, major_faults=None,
                     peak_vram_bytes={}, storage_activity="",
                     storage_activity_detail="")
-        page = self.page()
-        self.assertIn("not measured", page)
+        row = self.rows()[0]
+        for field in ("peak_ram_bytes", "peak_pss_bytes", "read_bytes",
+                      "major_faults"):
+            with self.subTest(field=field):
+                self.assertIsNone(row[field])
+        self.assertEqual(json.loads(row["peak_vram_json"]), {})
+        self.assertEqual(row["storage_activity"], "")
+        self.assertEqual(row["storage_activity_detail"], "")
 
-    def test_unreleased_vram_is_flagged(self):
-        self.record(final_vram_bytes={"SYCL0": 4 * GB})
-        self.assertIn("not fully released", self.page())
+    def test_unreleased_vram_is_visible_in_the_row(self):
+        # The page turned a non-zero final VRAM reading into a "not fully
+        # released" flag. Nothing judges it server-side now, so the rows
+        # have to carry the leftover bytes distinctly from a clean
+        # release -- collapse the two and a leak becomes invisible.
+        self.record(started_at=1.0)                       # released cleanly
+        self.record(started_at=2.0, final_vram_bytes={"SYCL0": 4 * GB})
+        leaked, clean = self.rows()  # newest first
+        self.assertEqual(json.loads(leaked["final_vram_json"]),
+                         {"SYCL0": 4 * GB})
+        self.assertEqual(json.loads(clean["final_vram_json"]), {"SYCL0": 0})
 
-    def test_empty_history_is_explained(self):
-        self.assertIn("No measurements recorded yet", self.page())
+    def test_empty_history_is_an_empty_list_not_an_error(self):
+        # The page said "No measurements recorded yet"; the API has to say
+        # the same thing as data -- 200 with [], never a 404 or a 500 the
+        # console would have to render as "history unavailable".
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(self.console_rows(), [])
 
     def test_storage_device_is_named(self):
         self.record()
-        self.assertIn("nvme0n1", self.page())
+        self.assertEqual(self.rows()[0]["storage_device"], "nvme0n1")
 
 
 if __name__ == "__main__":

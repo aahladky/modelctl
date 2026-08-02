@@ -87,15 +87,26 @@ class TestJobLaneSurvivesSystemExit(unittest.TestCase):
 
 class TestMissingProfileRoutes(WebTestBase):
     """Routes for a deleted/never-existing profile must 404, not
-    propagate SystemExit past Starlette as a 500 with a traceback."""
+    propagate SystemExit past Starlette as a 500 with a traceback.
 
-    def test_profile_page_404(self):
-        r = self.client.get("/profiles/ghost", headers=self.auth)
-        self.assertEqual(r.status_code, 404)
+    The two HTML pages that used to carry this (/profiles/{name} and
+    /profiles/{name}/tiers) were demolished in console phase 3; the
+    detail and tier-preview data now come from the endpoints below,
+    which reach load_profile the same way and so pin the same defect."""
 
-    def test_tiers_preview_404(self):
-        r = self.client.get("/profiles/ghost/tiers", headers=self.auth)
+    def test_model_detail_api_404(self):
+        # Was the /profiles/{name} page. The SPA loads a stale bookmark
+        # through here, so this is where the missing profile now surfaces.
+        r = self.client.get("/api/v2/models/ghost", headers=self.auth)
         self.assertEqual(r.status_code, 404)
+        self.assertIn("ghost", r.json()["error"])
+
+    def test_tiers_preview_api_404(self):
+        # Was the /profiles/{name}/tiers preview page; _plan_for() still
+        # calls load_profile() first, so SystemExit would land here.
+        r = self.client.get("/api/tiers/ghost", headers=self.auth)
+        self.assertEqual(r.status_code, 404)
+        self.assertIn("ghost", r.json()["error"])
 
     def test_api_route_404_json(self):
         r = self.client.get("/api/profiles/ghost/plans", headers=self.auth)

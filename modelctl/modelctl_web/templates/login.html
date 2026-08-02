@@ -1,11 +1,16 @@
 {% extends "base.html" %}
+{% block title %}sign in - modelctl{% endblock %}
 {% block content %}
-<h1>login</h1>
-<form method="post" action="/login" class="card" style="max-width:24rem">
+<h1>sign in</h1>
+<form method="post" action="/login" class="card">
   {% if error %}<p class="err">{{ error }}</p>{% endif %}
   <input type="hidden" name="next" value="{{ next }}">
-  <label>token<br><input type="password" name="token_field" autofocus style="width:100%"></label>
-  <p class="muted">stored at ~/.local/share/modelctl/web_token</p>
+  <label for="token_field">console token
+    <input id="token_field" type="password" name="token_field" autofocus
+           autocomplete="current-password">
+  </label>
+  <p class="muted">stored at <code>{{ token_path }}</code> — print it with
+    <code>modelctl web url</code></p>
   <button type="submit">sign in</button>
 </form>
 {% endblock %}

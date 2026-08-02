@@ -4,6 +4,11 @@
 
 interface Props {
   data: number[];
+  /* Absolute bounds the series can never leave (0..total VRAM, 0..100%).
+     They clamp the auto-range; they are NOT the drawn window. Passing the
+     full range as the window compressed a +-0.5 GiB fluctuation on a
+     32 GiB card into well under one pixel, and every meter drew a flat
+     line -- the mockup scales each spark to a margin around its own data. */
   min?: number;
   max?: number;
   height?: number;
@@ -13,8 +18,15 @@ interface Props {
 export function Spark({ data, min, max, height, label }: Props) {
   const W = 200, H = 34, P = 2;
   if (data.length < 2) return <svg class="spark" style={height ? { height } : undefined} aria-label={label} />;
-  let lo = min ?? Math.min(...data);
-  let hi = max ?? Math.max(...data);
+  const dLo = Math.min(...data);
+  const dHi = Math.max(...data);
+  // 15% headroom either side of the observed window, then clamped into
+  // whatever absolute bounds the caller declared.
+  const pad = Math.max((dHi - dLo) * 0.15, Math.abs(dHi) * 0.002, 1e-6);
+  let lo = dLo - pad;
+  let hi = dHi + pad;
+  if (min != null) lo = Math.max(min, lo);
+  if (max != null) hi = Math.min(max, hi);
   if (hi - lo < 1e-9) hi = lo + 1;
   const pts = data.map((v, i) => {
     const x = P + (i / (data.length - 1)) * (W - 2 * P);

@@ -172,16 +172,21 @@ class TestReleaseAWebRoutes(unittest.TestCase):
 
     def test_import_redirects_into_the_add_workflow(self):
         # P1 consolidation: /import is a compatibility shim, not a second
-        # acquisition path.
+        # acquisition path. The phase-3 cutover moved the workflow itself
+        # to /v2/add and made the shim a permanent 301, so the requirement
+        # is now that both entry points land on the same single workflow.
         from fastapi.testclient import TestClient
         from modelctl_web.app import create_app
         app = create_app(token="test-token", store=mock.MagicMock(),
                         runner=mock.MagicMock())
         client = TestClient(app)
-        r = client.get("/import", headers={"Authorization": "Bearer test-token"},
-                       follow_redirects=False)
-        self.assertEqual(r.status_code, 303)
-        self.assertEqual(r.headers["location"], "/add")
+        auth = {"Authorization": "Bearer test-token"}
+        r = client.get("/import", headers=auth, follow_redirects=False)
+        self.assertEqual(r.status_code, 301)
+        self.assertEqual(r.headers["location"], "/v2/add")
+        # Still one acquisition path: the old wizard URL lands there too.
+        r = client.get("/add", headers=auth, follow_redirects=False)
+        self.assertEqual(r.headers["location"], "/v2/add")
 
     def test_settings_page_accessible(self):
         from fastapi.testclient import TestClient

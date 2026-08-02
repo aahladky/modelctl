@@ -69,7 +69,8 @@ export function Models() {
           </table>
         )}
       <p class="sub" style="margin:.5rem 0 0">
-        rows update in place over SSE · click a row for the model page
+        rows update in place over SSE · click a row for the model hub
+        (overview · plans · measurements · logs · configure)
       </p>
     </div>
   );

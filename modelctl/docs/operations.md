@@ -25,7 +25,8 @@ ln -sfn "$PWD/modelctl" ~/.local/bin/modelctl
 modelctl web install         # installs + starts the console, prints URL/token
 ```
 
-The console's `/setup` page reports what the machine is still missing
+The console's readiness section (settings) reports what the machine is
+still missing
 (model directory, runnable llama.cpp build, GPUs, llama-swap).
 
 Build the fork (SYCL needs the oneAPI env; `llama-sycl-env.sh` exits a

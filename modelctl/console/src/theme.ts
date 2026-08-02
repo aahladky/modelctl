@@ -21,6 +21,17 @@ export function toggleTheme(): Theme {
   return next;
 }
 
+/* The stored override, or null when the theme is still following the
+   system. Settings reports which of the two is in force. */
+export function storedTheme(): Theme | null {
+  try {
+    const t = localStorage.getItem("mc-theme");
+    return t === "light" || t === "dark" ? t : null;
+  } catch {
+    return null;
+  }
+}
+
 /* Re-render hook for the toggle button: system preference changes flip the
    effective theme only while no explicit override is stamped. */
 export function onSystemThemeChange(fn: () => void): () => void {

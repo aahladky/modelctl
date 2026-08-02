@@ -8,7 +8,8 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { useStream } from "../lib/stream";
 import {
   ApiError, fetchAdmission, fetchLogTail, fetchModelDetail,
-  fetchModelHistory, fetchModelPlans, fmtAgo, fmtGiB, saveModelConfig,
+  fetchModelHistory, fetchModelPlans, fmtAgo, fmtClock, fmtGiB,
+  saveModelConfig,
 } from "../lib/api";
 import { Info } from "../lib/info";
 import { toast } from "../lib/toasts";
@@ -23,16 +24,30 @@ function MeasuredTag({ measured }: { measured: boolean }) {
     : <span class="tag estimated">estimated</span>;
 }
 
-function Overview({ d, live }: { d: ModelDetail; live: ModelRow | null }) {
+function Overview({ d, live, stale, lastAt, retryIn }: {
+  d: ModelDetail; live: ModelRow | null; stale: boolean;
+  lastAt: number | null; retryIn: number | null;
+}) {
   const rt = live ?? null;
   const state = rt ? rt.state : d.runtime.state;
   const cls = (rt ? rt.state_class : d.runtime.state_class) || "stopped";
   return (
-    <div class="widget">
+    <div class={stale ? "widget stale" : "widget"}>
       <div class="label">
         <span>overview</span>
-        {rt && <span class="live"><span class="dot"></span>live</span>}
+        {/* the mark used to say "live" whenever a runtime row existed, so a
+            dropped stream showed frozen numbers under a pulsing green dot */}
+        {rt && (stale
+          ? <span class="live stale"><span class="dot"></span>stale</span>
+          : <span class="live"><span class="dot"></span>live</span>)}
       </div>
+      {stale && (
+        <div class="sub stale-note">
+          stream dropped — showing the last reading
+          {lastAt != null ? ` from ${fmtClock(lastAt)}` : ""}
+          {retryIn != null ? ` · retrying in ${retryIn}s` : " · reconnecting…"}
+        </div>
+      )}
       <table>
         <tbody>
           <tr><td class="sub">state</td>
@@ -68,12 +83,12 @@ function Overview({ d, live }: { d: ModelDetail; live: ModelRow | null }) {
   );
 }
 
-function Plans({ name }: { name: string }) {
+function Plans({ name, revision }: { name: string; revision: number }) {
   const [plans, setPlans] = useState<PlanRow[] | null>(null);
   const [err, setErr] = useState("");
   useEffect(() => {
     fetchModelPlans(name).then(setPlans).catch((e) => setErr(String(e)));
-  }, [name]);
+  }, [name, revision]);
   return (
     <div class="widget">
       <div class="label">
@@ -134,12 +149,12 @@ function Plans({ name }: { name: string }) {
   );
 }
 
-function History({ name }: { name: string }) {
+function History({ name, revision }: { name: string; revision: number }) {
   const [rows, setRows] = useState<HistoryRow[] | null>(null);
   const [err, setErr] = useState("");
   useEffect(() => {
     fetchModelHistory(name).then(setRows).catch((e) => setErr(String(e)));
-  }, [name]);
+  }, [name, revision]);
   return (
     <div class="widget">
       <div class="label"><span>measurement history{" "}
@@ -171,7 +186,17 @@ function History({ name }: { name: string }) {
                 </td>
                 <td class="num">{r.generation_tps != null ? r.generation_tps.toFixed(1) : "—"}</td>
                 <td class="num">{r.load_seconds != null ? `${r.load_seconds.toFixed(0)}s` : "—"}</td>
-                <td class="sub" title={r.bottleneck_why}>{r.bottleneck}</td>
+                <td class="sub">
+                  {r.bottleneck}
+                  {/* the evidence behind the verdict was in a title
+                      attribute -- unreachable by keyboard and invisible on
+                      touch. Summoned help is the spec's affordance. */}
+                  {r.bottleneck_why && (
+                    <>{" "}<Info label={`why ${r.bottleneck}`}>
+                      {r.bottleneck_why}
+                    </Info></>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -183,12 +208,22 @@ function History({ name }: { name: string }) {
 
 function Logs({ name }: { name: string }) {
   const [log, setLog] = useState<LogTailT | null>(null);
+  // A polling region that hides its own failures is the worst kind of
+  // live surface: the tail simply stops moving. Track the last success
+  // and mark the region when polling starts failing.
+  const [lastAt, setLastAt] = useState<number | null>(null);
+  const [pollErr, setPollErr] = useState("");
   const ref = useRef<HTMLPreElement>(null);
   useEffect(() => {
     let alive = true;
     const pull = () => fetchLogTail(name)
-      .then((l) => { if (alive) setLog(l); })
-      .catch(() => { /* transient; keep last tail */ });
+      .then((l) => {
+        if (!alive) return;
+        setLog(l);
+        setLastAt(Date.now());
+        setPollErr("");
+      })
+      .catch((e) => { if (alive) setPollErr(String(e)); });
     pull();
     const t = setInterval(pull, 5000);
     return () => { alive = false; clearInterval(t); };
@@ -196,12 +231,19 @@ function Logs({ name }: { name: string }) {
   useEffect(() => {
     if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
   }, [log?.tail]);
+  const stale = !!pollErr;
   return (
-    <div class="widget">
+    <div class={stale ? "widget stale" : "widget"}>
       <div class="label"><span>log tail</span>
-        {log?.source && <span class="sub">from {log.source} · refreshes every 5 s</span>}
+        {stale
+          ? <span class="live stale"><span class="dot"></span>
+              polling failed{lastAt != null ? ` · last ${fmtClock(lastAt)}` : ""}
+            </span>
+          : <span class="live"><span class="dot"></span>live · every 5 s</span>}
       </div>
-      {!log && <p class="sub">fetching logs…</p>}
+      {log?.source && <div class="sub">from {log.source}</div>}
+      {pollErr && <div class="sub stale-note">{pollErr}</div>}
+      {!log && !pollErr && <p class="sub">fetching logs…</p>}
       {log && log.error && !log.tail && <p class="sub">{log.error}</p>}
       {log && log.tail && (
         <pre class="log" style="max-height:300px" ref={ref}>{log.tail}</pre>
@@ -344,25 +386,27 @@ export function Configure({ d, onSaved }:
           <legend>profile</legend>
           <div class="frow">
             <div class="field">
-              <label>context length <span class="sub">tokens</span>{" "}
+              <div class="lbl">
+                <label for="cfg-ctx">context length <span class="sub">tokens</span></label>
                 <Info label="about context length">
                   KV cache grows linearly with this; it is the biggest
                   single VRAM lever. The planner sizes KV at exactly this
                   value during admission.
                 </Info>
-              </label>
-              <input type="number" min={512} step={1024} value={draft.ctx}
+              </div>
+              <input id="cfg-ctx" type="number" min={512} step={1024} value={draft.ctx}
                      onInput={(e) => set({ ctx: (e.target as HTMLInputElement).value })} />
               {kvNote && <div class="msg" style="color:var(--ok)">✓ {kvNote}</div>}
             </div>
             <div class="field">
-              <label>TTL <span class="sub">seconds</span>{" "}
+              <div class="lbl">
+                <label for="cfg-ttl">TTL <span class="sub">seconds</span></label>
                 <Info label="about TTL">
                   How long llama-swap keeps the model resident after its
                   last request before unloading it.
                 </Info>
-              </label>
-              <input type="number" min={0} value={draft.ttl}
+              </div>
+              <input id="cfg-ttl" type="number" min={0} value={draft.ttl}
                      onInput={(e) => set({ ttl: (e.target as HTMLInputElement).value })} />
             </div>
             <div class="check" style="align-self:end">
@@ -380,13 +424,13 @@ export function Configure({ d, onSaved }:
           <legend>attention + KV cache</legend>
           <div class="frow">
             <div class="field">
-              <label>flash attention{" "}
+              <div class="lbl"><label for="cfg-fa">flash attention</label>
                 <Info label="about flash attention">
                   Faster prompt processing on SYCL. "auto" lets the backend
                   decide from its probed capabilities.
                 </Info>
-              </label>
-              <select value={draft.flash_attn}
+              </div>
+              <select id="cfg-fa" value={draft.flash_attn}
                       onChange={(e) => set({ flash_attn: (e.target as HTMLSelectElement).value })}>
                 <option value="auto">auto</option>
                 <option value="on">on</option>
@@ -394,16 +438,30 @@ export function Configure({ d, onSaved }:
               </select>
             </div>
             <div class="field">
-              <label>KV cache type (K)</label>
-              <select value={draft.cache_type_k}
+              <div class="lbl"><label for="cfg-ctk">KV cache type (K)</label>
+                <Info label="about the K cache type">
+                  Quantization for the K half of the KV cache. It multiplies
+                  straight into the KV size the context length implies —
+                  q8_0 is roughly half of f16 — so it is the second-biggest
+                  VRAM lever after context.
+                </Info>
+              </div>
+              <select id="cfg-ctk" value={draft.cache_type_k}
                       onChange={(e) => set({ cache_type_k: (e.target as HTMLSelectElement).value })}>
                 {["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0"].map((t) =>
                   <option key={t} value={t}>{t}</option>)}
               </select>
             </div>
             <div class="field">
-              <label>KV cache type (V)</label>
-              <select value={draft.cache_type_v}
+              <div class="lbl"><label for="cfg-ctv">KV cache type (V)</label>
+                <Info label="about the V cache type">
+                  Quantization for the V half. Some backends tolerate a
+                  quantized K better than a quantized V; if generation
+                  quality drops after changing this, put V back to f16
+                  first.
+                </Info>
+              </div>
+              <select id="cfg-ctv" value={draft.cache_type_v}
                       onChange={(e) => set({ cache_type_v: (e.target as HTMLSelectElement).value })}>
                 {["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0"].map((t) =>
                   <option key={t} value={t}>{t}</option>)}
@@ -416,14 +474,14 @@ export function Configure({ d, onSaved }:
           <legend>MoE expert cache</legend>
           <div class="frow">
             <div class="field" style="max-width:220px">
-              <label>mode{" "}
+              <div class="lbl"><label for="cfg-moe">mode</label>
                 <Info label="about the MoE cache">
                   Reserves a VRAM budget per GPU for hot experts. Learning
                   starts at load; watch the hit-ratio meter on operate.
                   Off means experts run where the placement puts them.
                 </Info>
-              </label>
-              <select value={draft.moe_mode}
+              </div>
+              <select id="cfg-moe" value={draft.moe_mode}
                       onChange={(e) => set({ moe_mode: (e.target as HTMLSelectElement).value })}>
                 <option value="off">off</option>
                 <option value="auto">auto</option>
@@ -441,8 +499,10 @@ export function Configure({ d, onSaved }:
                 && wanted > Math.max(0, headroom);
               return (
                 <div class={over ? "field warning" : "field"} key={g.device}>
-                  <label>{g.device} budget <span class="sub">GiB</span></label>
-                  <input type="number" min={0} step={0.5} value={bytesTxt}
+                  <label for={`cfg-budget-${g.device}`}>{g.device} budget{" "}
+                    <span class="sub">GiB</span></label>
+                  <input id={`cfg-budget-${g.device}`} type="number" min={0}
+                         step={0.5} value={bytesTxt}
                          disabled={draft.moe_mode === "off"}
                          onInput={(e) => set({
                            budgets: { ...draft.budgets,
@@ -557,7 +617,7 @@ function fmtBudgetMap(v: unknown): string {
 }
 
 export function Model({ name }: { name: string }) {
-  const { tick } = useStream();
+  const { tick, stale, lastAt, retryIn } = useStream();
   const [detail, setDetail] = useState<ModelDetail | null>(null);
   const [err, setErr] = useState("");
   const [reloadN, setReloadN] = useState(0);
@@ -565,6 +625,15 @@ export function Model({ name }: { name: string }) {
   useEffect(() => {
     fetchModelDetail(name).then(setDetail).catch((e) => setErr(String(e)));
   }, [name, reloadN]);
+
+  /* Plans and measurement history are the page's evidence, and they only
+     change when a job finishes. Counting finished jobs off the shared tick
+     gives them a refresh trigger without polling: bench a model from
+     anywhere and this page updates in place, per "no manual refresh
+     anywhere operational state is shown". */
+  const finishedJobs = tick
+    ? tick.jobs.filter((j) => !["running", "queued"].includes(j.status)).length
+    : 0;
 
   const live = tick?.models.find((m) => m.name === name) ?? null;
 
@@ -581,9 +650,10 @@ export function Model({ name }: { name: string }) {
   }
   return (
     <>
-      <Overview d={detail} live={live} />
-      <Plans name={name} />
-      <History name={name} />
+      <Overview d={detail} live={live} stale={stale} lastAt={lastAt}
+                retryIn={retryIn} />
+      <Plans name={name} revision={finishedJobs} />
+      <History name={name} revision={finishedJobs} />
       <Logs name={name} />
       <Configure d={detail} onSaved={() => setReloadN((n) => n + 1)} />
     </>

@@ -7,7 +7,8 @@ import { useStream } from "../lib/stream";
 import { Spark, push } from "../lib/spark";
 import { Info } from "../lib/info";
 import { toast } from "../lib/toasts";
-import { fmtClock, fmtGiB, fmtUp } from "../lib/api";
+import { ApiError, fmtClock, fmtGiB, fmtUp, loadModel, unloadModel }
+  from "../lib/api";
 import type { ModelRow, Tick } from "../lib/types";
 
 type Series = Record<string, number[]>;
@@ -48,24 +49,23 @@ function StaleSub({ lastAt, retryIn }: { lastAt: number | null; retryIn: number 
   );
 }
 
-/* Mutations POST to the existing console endpoints (they answer with a
-   redirect into the old job page; the job itself shows up in the stream,
-   so the SPA just toasts and lets the jobs badge/page track it). */
-async function submitAction(path: string, label: string) {
+/* Mutations go through the typed /api/v2 lane and answer with the job id;
+   the job itself shows up in the stream, so the SPA toasts and lets the
+   jobs badge/page track it. (Phase 3: these used to POST to the old
+   console's /models/{name}/{verb} routes, which the cutover removed.) */
+async function submitAction(fn: () => Promise<{ job_id: string }>,
+                            label: string) {
   try {
-    const r = await fetch(path, { method: "POST", redirect: "manual" });
-    if (r.status === 401) {
-      location.href = "/login?next=/v2/";
-      return;
-    }
-    // 303 (opaque redirect in manual mode) = the job was submitted.
-    if (r.ok || r.type === "opaqueredirect" || r.status === 0 || r.status === 303) {
-      toast("ok", `${label} submitted`, "queued as a job · watch it on the jobs page");
-    } else {
-      toast("err", `✗ ${label} failed`, `server answered ${r.status}`, 9000);
-    }
+    const { job_id } = await fn();
+    toast("ok", `${label} submitted`,
+          `job ${job_id} · watch it on the jobs page`);
   } catch (e) {
-    toast("err", `✗ ${label} failed`, String(e), 9000);
+    if (e instanceof ApiError && e.status === 405) {
+      toast("err", `✗ ${label} refused`,
+            String(e.body.reason ?? e.message), 9000);
+    } else {
+      toast("err", `✗ ${label} failed`, String(e), 9000);
+    }
   }
 }
 
@@ -75,7 +75,7 @@ function ModelRowView({ m, spark, stale }:
   const chipClass = m.state_class ? `chip ${m.state_class}` : "chip";
   const act = (verb: "load" | "unload") => {
     setBusy(true);
-    submitAction(`/models/${encodeURIComponent(m.name)}/${verb}`,
+    submitAction(() => (verb === "load" ? loadModel : unloadModel)(m.name),
                  `${verb} ${m.name}`).finally(() => setBusy(false));
   };
   return (
@@ -105,9 +105,11 @@ function ModelRowView({ m, spark, stale }:
       </td>
       <td class="actions">
         {m.running
-          ? <button disabled={busy || stale} onClick={() => act("unload")}>unload</button>
+          ? <button class={busy ? "busy" : undefined} disabled={busy || stale}
+                    onClick={() => act("unload")}>unload</button>
           : m.registered && m.enabled
-            ? <button disabled={busy || stale} onClick={() => act("load")}>load</button>
+            ? <button class={busy ? "busy" : undefined} disabled={busy || stale}
+                      onClick={() => act("load")}>load</button>
             : null}
       </td>
     </tr>
@@ -133,7 +135,21 @@ export function Operate() {
   const { services, gpus, ram, models, jobs } = tick;
   const runningJobs = jobs.filter((j) => j.status === "running").length;
   const cacheModels = models.filter((m) => m.cache != null);
-  const wcls = stale ? "widget stale" : "widget";
+  /* Per-region degradation. The stream can be perfectly healthy while one
+     server-side probe throws: `gpus` then arrives empty and `ram` arrives
+     zeroed, both indistinguishable from fact. tick.errors names the
+     section that failed, so the region marks itself instead of quietly
+     lying. */
+  const err = tick.errors ?? {};
+  const bad = (section: string) => stale || section in err;
+  const cls = (section: string) => (bad(section) ? "widget stale" : "widget");
+  const sectionNote = (section: string) =>
+    err[section]
+      ? <div class="sub stale-note">last reading is stale — {section} probe
+          failed: {err[section]}</div>
+      : stale
+        ? <StaleSub lastAt={lastAt} retryIn={retryIn} />
+        : null;
 
   return (
     <>
@@ -151,6 +167,11 @@ export function Operate() {
         {stale && (
           <span class="chip warn"><span class="dot"></span>telemetry · stream dropped</span>
         )}
+        {Object.keys(err).map((section) => (
+          <span class="chip warn" key={section}><span class="dot"></span>
+            {section} · probe failed
+          </span>
+        ))}
         <span class="sub num">console up {fmtUp(services.console_started)}</span>
         <span class="grow" style="flex:1"></span>
         <a href="/v2/jobs" class="sub">
@@ -159,14 +180,25 @@ export function Operate() {
       </div>
 
       <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
+        {gpus.length === 0 && (
+          <div class={cls("gpus")}>
+            <div class="label"><span>GPUs</span><LiveMark stale={bad("gpus")} /></div>
+            <div class="sub" style="margin-top:.4rem">
+              {err["gpus"]
+                ? <span class="stale-note">device inventory unavailable —
+                    the numbers that were here are gone, not zero</span>
+                : "no GPUs reported by the backend"}
+            </div>
+          </div>
+        )}
         {gpus.map((g) => {
           const used = g.used_bytes / 2 ** 30;
           const total = g.total_bytes / 2 ** 30;
           return (
-            <div class={wcls} key={g.device}>
+            <div class={cls("gpus")} key={g.device}>
               <div class="label">
                 <span>{g.device} · {g.name}</span>
-                <LiveMark stale={stale} />
+                <LiveMark stale={bad("gpus")} />
               </div>
               <div class="meterbar">
                 <div class="fill" style={`width:${total ? Math.min(100, (used / total) * 100) : 0}%`}></div>
@@ -174,32 +206,35 @@ export function Operate() {
               <div class="big">{used.toFixed(1)}<span class="sub"> / {total.toFixed(0)} GiB VRAM</span></div>
               <Spark data={series[`gpu:${g.device}`] ?? []} min={0} max={total}
                      label={`${g.device} VRAM used`} />
-              {stale && <StaleSub lastAt={lastAt} retryIn={retryIn} />}
+              {sectionNote("gpus")}
             </div>
           );
         })}
 
-        <div class={wcls}>
+        <div class={cls("ram")}>
           <div class="label">
             <span>system RAM</span>
-            <LiveMark stale={stale} />
+            <LiveMark stale={bad("ram")} />
           </div>
           <div class="meterbar">
             <div class="fill" style={`width:${ram.total_bytes ? Math.min(100, (ram.used_bytes / ram.total_bytes) * 100) : 0}%`}></div>
           </div>
           <div class="big">
-            {fmtGiB(ram.used_bytes)}<span class="sub"> / {fmtGiB(ram.total_bytes, 0)} GiB</span>
+            {/* a failed meminfo read yields 0/0; print an em dash rather
+                than a number that reads as a measurement */}
+            {err["ram"] ? "—" : fmtGiB(ram.used_bytes)}
+            <span class="sub"> / {err["ram"] ? "—" : fmtGiB(ram.total_bytes, 0)} GiB</span>
           </div>
           <Spark data={series["ram"] ?? []} min={0} max={ram.total_bytes / 2 ** 30}
                  label="RAM used" />
-          {stale && <StaleSub lastAt={lastAt} retryIn={retryIn} />}
+          {sectionNote("ram")}
         </div>
 
         {cacheModels.map((m) => {
           const c = m.cache!;
           const pct = c.hit_ratio != null ? c.hit_ratio * 100 : null;
           return (
-            <div class={wcls} key={`cache-${m.name}`}>
+            <div class={cls("models")} key={`cache-${m.name}`}>
               <div class="label">
                 <span>
                   {m.name} · MoE cache{" "}
@@ -210,18 +245,20 @@ export function Operate() {
                     means placement has settled.
                   </Info>
                 </span>
-                <LiveMark stale={stale} />
+                <LiveMark stale={bad("models")} />
               </div>
               <div class="meterbar">
                 <div class="fill" style={`width:${pct ?? 0}%`}></div>
               </div>
               <div class="big">
                 {pct != null ? pct.toFixed(1) : "—"}
-                <span class="sub"> % hit · learning {c.learning === null ? "?" : c.learning ? "…" : "done"}</span>
+                <span class="sub"> % hit · {c.learning === null
+                  ? "learning state unknown"
+                  : c.learning ? "still learning" : "learning done"}</span>
               </div>
               <Spark data={series[`hit:${m.name}`] ?? []} min={0} max={100}
                      label={`${m.name} cache hit ratio`} />
-              {stale && <StaleSub lastAt={lastAt} retryIn={retryIn} />}
+              {sectionNote("models")}
             </div>
           );
         })}
@@ -235,10 +272,13 @@ export function Operate() {
         )}
       </div>
 
-      <div class={wcls}>
+      <div class={cls("models")}>
         <h2>resident models</h2>
         {models.length === 0
-          ? <p class="sub">no profiles registered yet — <a href="/v2/add">add a model</a></p>
+          ? (err["models"]
+              ? <p class="sub stale-note">could not read the profile store —
+                  {" "}{err["models"]}. This is not an empty install.</p>
+              : <p class="sub">no profiles registered yet — <a href="/v2/add">add a model</a></p>)
           : (
             <table>
               <thead>
@@ -256,9 +296,10 @@ export function Operate() {
             </table>
           )}
         <p class="sub" style="margin:.5rem 0 0">
-          rows update in place over SSE · click a row for the model page
+          rows update in place over SSE · click a row for the model hub
+          (overview · plans · measurements · logs · configure)
         </p>
-        {stale && <StaleSub lastAt={lastAt} retryIn={retryIn} />}
+        {sectionNote("models")}
       </div>
     </>
   );

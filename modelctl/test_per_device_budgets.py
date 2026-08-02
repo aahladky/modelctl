@@ -162,9 +162,14 @@ class TestClaimCharging(unittest.TestCase):
 class TestCacheEditorRoundTrip(unittest.TestCase):
     """The console's per-GPU budget editor was a no-op: the add-device
     input had no value field and was explicitly skipped, and every save
-    rebuilt moe_cache from scratch, dropping CLI-set sections."""
+    rebuilt moe_cache from scratch, dropping CLI-set sections.
 
-    def test_handler_adds_new_device_and_preserves_other_sections(self):
+    The form moved to POST /api/v2/models/{name}/config (console phase 3);
+    the same two defects are still reachable there -- it takes a
+    budgets_bytes map and a mode and must merge them into the stored
+    moe_cache, not replace it."""
+
+    def test_config_save_adds_new_device_and_preserves_other_sections(self):
         from modelctl_web.app import create_app
         from modelctl_web.jobs import JobStore, JobRunner
         from fastapi.testclient import TestClient
@@ -176,38 +181,51 @@ class TestCacheEditorRoundTrip(unittest.TestCase):
                 "name": "m1", "model_path": "/x/m.gguf",
                 "config": {"device": "SYCL0", "ctx": 8192, "ttl": 3600,
                            "flash_attn": "auto", "extra": ""},
+                # Every section here but gpu.budgets_bytes and mode is one
+                # the typed save never writes -- i.e. CLI-set state it can
+                # only ever destroy.
                 "moe_cache": {"mode": "manual",
-                              "gpu": {"budgets_bytes": {}},
+                              "gpu": {"budgets_bytes": {},
+                                      "policy": "lru",
+                                      "admission_misses": 5},
                               "prefetch": {"enabled": True},
-                              "ram": {"budget_bytes": 123}},
+                              "ram": {"budget_bytes": 123},
+                              "decode": {"miss_execution": "cpu"},
+                              "prefill": {"admit_to_gpu_cache": True},
+                              "storage": {"mode": "direct"}},
                 "enabled": True,
             }))
             store = JobStore(Path(tmp) / "jobs.db")
             runner = JobRunner(store)
             client = TestClient(create_app(token="t", store=store, runner=runner))
-            captured = {}
-
-            def fake_submit(runner_, name, mc):
-                captured["mc"] = mc
-                return "job1"
 
             with mock.patch.object(modelctl, "PROFILES_DIR", profiles), \
                  mock.patch("modelctl_web.mutate.submit_moe_cache",
-                            side_effect=fake_submit):
-                client.post("/profiles/m1/moe-cache",
-                            data={"mode": "manual",
-                                  "gpu.budgets_bytes._new_device": "SYCL2",
-                                  "gpu.budgets_bytes._new_budget": str(4 * GIB)},
-                            headers={"Authorization": "Bearer t"},
-                            follow_redirects=False)
+                            return_value="job1") as submit:
+                r = client.post(
+                    "/api/v2/models/m1/config",
+                    json={"moe_mode": "manual",
+                          "budgets_bytes": {"SYCL2": 4 * GIB},
+                          # A budget edit on a placed profile is structural.
+                          "accept_structural": True},
+                    headers={"Authorization": "Bearer t"})
 
-        mc = captured.get("mc", {})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["jobs"]["moe_cache"], "job1")
+        mc = submit.call_args.args[2]
         self.assertEqual(mc.get("gpu", {}).get("budgets_bytes"),
                          {"SYCL2": 4 * GIB},
-                         "the add-device row still cannot set a budget")
+                         "a device named only in the request still cannot "
+                         "get a budget")
         self.assertTrue(mc.get("prefetch", {}).get("enabled"),
                         "save dropped a section the form does not render")
         self.assertEqual(mc.get("ram", {}).get("budget_bytes"), 123)
+        self.assertEqual(mc.get("decode", {}).get("miss_execution"), "cpu")
+        self.assertTrue(mc.get("prefill", {}).get("admit_to_gpu_cache"))
+        self.assertEqual(mc.get("storage", {}).get("mode"), "direct")
+        # Siblings of the one gpu key the save owns have to survive too.
+        self.assertEqual(mc["gpu"]["policy"], "lru")
+        self.assertEqual(mc["gpu"]["admission_misses"], 5)
 
 
 if __name__ == "__main__":

@@ -85,6 +85,11 @@ export interface Tick {
   ram: RamRow;
   models: ModelRow[];
   jobs: JobRow[];
+  /* section -> why it is missing. A section that threw server-side yields
+     its empty shape, which is indistinguishable from the truth of a
+     machine with no GPUs; this is how a region tells the two apart and
+     degrades itself instead of rendering the fallback as fact. */
+  errors?: Record<string, string>;
 }
 
 export interface CancelResult {
@@ -335,4 +340,147 @@ export interface RegisterData {
   measured: Record<string, number | string>;
   selected_plan_id: string;
   test_gate: { blocking_reason: string; outcome: Partial<StepOutcome> };
+}
+
+/* ---- settings (phase 3) ---- */
+
+export interface DefaultField {
+  name: string;
+  kind: "int" | "text" | "choice";
+  min: number | null;
+  max: number | null;
+  unit: string;
+  choices: string[];
+}
+
+export interface DefaultsSection {
+  values: Record<string, string | number>;
+  fields: DefaultField[];
+  /* field -> the MODELCTL_DEFAULT_* var that overrides it in the running
+     service, so the form can say why a save would not take effect */
+  shadowed: Record<string, string>;
+  error: string;
+}
+
+export interface HwDevice {
+  device: string;
+  name: string;
+  total_bytes: number;
+  free_bytes: number;
+  reserve_bytes: number;
+  enabled: boolean;
+  role: string;
+  bandwidth_gbs: number | null;
+  bandwidth_overridden: boolean;
+  pci_address: string;
+  pcie_width: number | null;
+}
+
+export interface HwStorage {
+  path: string;
+  kind: string;
+  mount_point: string;
+  filesystem: string;
+  transport: string;
+  allow_mmap: boolean;
+  total_bytes: number;
+  free_bytes: number;
+  measured_sequential_read_bps: number | null;
+  measured_random_read_bps: number | null;
+  measurement_age_seconds: number | null;
+}
+
+export interface HardwareSection {
+  devices: HwDevice[];
+  ram: { total_bytes: number; available_bytes: number; reserve_bytes: number };
+  storage: HwStorage[];
+  roles: string[];
+  fingerprint: string;
+  error: string;
+}
+
+export interface AccessSection {
+  bind: string;
+  bind_source: string;
+  bind_editable: boolean;
+  token_path: string;
+  token_source: string;
+  token_rotatable: boolean;
+  secure_cookie: boolean;
+}
+
+export interface PathRow {
+  label: string;
+  value: string;
+  source: string;
+  overridden: boolean;
+}
+
+export interface DiagnosticsSection {
+  manifest: {
+    path?: string;
+    present?: boolean;
+    ok?: boolean;
+    error?: string;
+    modelctl_commit?: string;
+    validated_modelctl_commit?: string;
+    validated_llama_commit?: string;
+    upstream_base?: string;
+    validation_report?: string;
+    newer_than_validated?: boolean;
+    submodule_pinned?: string;
+    submodule_checked_out?: string;
+    working_tree_dirty?: boolean;
+    mismatches?: string[];
+    notes?: string[];
+  };
+  capabilities: {
+    binary?: string;
+    candidates?: string[];
+    probe?: Record<string, unknown> | null;
+    error?: string;
+    capability_fingerprint?: string;
+  };
+  environment: {
+    platform?: Record<string, string>;
+    paths?: Record<string, string>;
+    oneapi_env_scripts?: string[];
+    benchmark_modes?: string[];
+    modelctl_env?: Record<string, string>;
+  };
+  errors: string[];
+}
+
+export interface ReadinessCheck {
+  id: string;
+  title: string;
+  severity: "ok" | "warning" | "error";
+  detail: string;
+  fix: string;
+  fix_url: string;
+  fix_command: string;
+}
+
+export interface ReadinessSection {
+  ready: boolean;
+  first_run: boolean;
+  checks: ReadinessCheck[];
+  error: string;
+}
+
+export interface SettingsOverview {
+  readiness: ReadinessSection;
+  defaults: DefaultsSection;
+  hardware: HardwareSection;
+  access: AccessSection;
+  paths: PathRow[];
+  diagnostics: DiagnosticsSection;
+}
+
+export interface SaveResult {
+  ok: boolean;
+  applied: Record<string, unknown> | number;
+  values?: Record<string, string | number>;
+  warnings: string[];
+  messages: string[];
 }

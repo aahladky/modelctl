@@ -80,21 +80,21 @@ def _check_models_dir() -> SetupCheck:
             id="models_dir", title="model directory", severity="error",
             detail=f"{path} does not exist",
             fix="Create it, or point MODELCTL_MODELS_DIR at your model store.",
-            fix_url="/settings",
+            fix_url="/v2/settings",
             fix_command=f"mkdir -p {path}")
     if not os.access(path, os.W_OK):
         return SetupCheck(
             id="models_dir", title="model directory", severity="error",
             detail=f"{path} is not writable",
             fix="Downloads and imports need write access here.",
-            fix_url="/settings")
+            fix_url="/v2/settings")
     free = shutil.disk_usage(path).free
     if free < LOW_SPACE_BYTES:
         return SetupCheck(
             id="models_dir", title="model directory", severity="warning",
             detail=f"{path} — only {modelctl._format_size(free)} free",
             fix="Most quantized MoE checkpoints are larger than this.",
-            fix_url="/settings")
+            fix_url="/v2/settings")
     return SetupCheck(
         id="models_dir", title="model directory", severity="ok",
         detail=f"{path} — {modelctl._format_size(free)} free")
@@ -142,7 +142,7 @@ def _check_backend(probe=False) -> SetupCheck:
             detail="no llama-server build found",
             fix="Build the pinned runtime, or set MODELCTL_LLAMA_SERVER to an "
                 "existing llama-server binary.",
-            fix_url="/settings",
+            fix_url="/v2/settings",
             fix_command="export MODELCTL_LLAMA_SERVER=/path/to/llama-server")
 
     # Several builds side by side (build-sycl, build-vulkan, a fork) is the
@@ -168,7 +168,7 @@ def _check_backend(probe=False) -> SetupCheck:
             detail=f"{binary} — capability probe failed: {e}",
             fix="Experimental cache features stay disabled until the probe "
                 "succeeds.",
-            fix_url="/settings")
+            fix_url="/v2/settings")
     status = caps.get("_probe_status", "unknown")
     if status == "unsupported":
         return SetupCheck(
@@ -176,14 +176,14 @@ def _check_backend(probe=False) -> SetupCheck:
             detail=f"{binary} — stock build, no MoE expert cache{also}",
             fix="Experimental cache plans need the moe-serving fork; stock "
                 "builds serve normally without them.",
-            fix_url="/settings")
+            fix_url="/v2/settings")
     features = [k for k, v in (caps.get("features") or {}).items() if v]
     return SetupCheck(
         id="backend", title="llama.cpp runtime", severity="ok",
         detail=f"{binary} — schema {caps.get('schema', 0)}"
                + (f", features: {', '.join(sorted(features))}" if features else "")
                + also,
-        fix_url="/settings")
+        fix_url="/v2/settings")
 
 
 def _check_hardware() -> SetupCheck:
@@ -195,19 +195,19 @@ def _check_hardware() -> SetupCheck:
             id="hardware", title="GPUs", severity="warning",
             detail=f"hardware probe failed: {e}",
             fix="Placement falls back to CPU-only estimates.",
-            fix_url="/hardware")
+            fix_url="/v2/settings")
     gpus = [g for g in snap.gpus if g.enabled]
     if not gpus:
         return SetupCheck(
             id="hardware", title="GPUs", severity="warning",
             detail="no GPUs detected or all disabled",
             fix="Models will be planned for CPU/RAM execution only.",
-            fix_url="/hardware")
+            fix_url="/v2/settings")
     names = ", ".join(f"{g.device} {g.name}" for g in gpus)
     return SetupCheck(
         id="hardware", title="GPUs", severity="ok",
         detail=f"{len(gpus)} enabled — {names}",
-        fix_url="/hardware")
+        fix_url="/v2/settings")
 
 
 def _check_llama_swap() -> SetupCheck:
@@ -219,7 +219,7 @@ def _check_llama_swap() -> SetupCheck:
             if r.status == 200:
                 return SetupCheck(
                     id="llama_swap", title="llama-swap", severity="ok",
-                    detail=f"reachable at {base}", fix_url="/runtime/routing")
+                    detail=f"reachable at {base}", fix_url="/v2/settings")
     except Exception:
         pass
     if not config.exists():
@@ -228,13 +228,13 @@ def _check_llama_swap() -> SetupCheck:
             detail=f"not running, and no config at {config}",
             fix="Profiles can still be created and tested; registering them "
                 "for serving needs llama-swap.",
-            fix_url="/runtime/routing",
+            fix_url="/v2/settings",
             fix_command="modelctl sync")
     return SetupCheck(
         id="llama_swap", title="llama-swap", severity="warning",
         detail=f"config at {config}, but {base} is not responding",
         fix="Start the service to load and serve registered models.",
-        fix_url="/runtime/routing",
+        fix_url="/v2/settings",
         fix_command=f"systemctl --user start {modelctl.LLAMA_SWAP_SERVICE_NAME}")
 
 
@@ -253,7 +253,7 @@ def _check_runtime_env() -> SetupCheck:
         detail="no env script found",
         fix="SYCL builds may fail to start with a shared-library error. "
             "Save LD_LIBRARY_PATH into the profile's env instead.",
-        fix_url="/settings")
+        fix_url="/v2/settings")
 
 
 def _check_network_exposure() -> SetupCheck:

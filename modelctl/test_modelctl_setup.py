@@ -123,7 +123,15 @@ class TestLlamaSwapCheck(SetupBase):
         self.assertFalse(status.first_run)
 
 
-class TestSetupPage(SetupBase):
+class TestSetupOverTheWeb(SetupBase):
+    """Readiness as the web surface carries it.
+
+    Console phase 3 demolished the /setup page and the first-run diversion
+    the dashboard did into it. The checklist itself survived: it is now a
+    section of the settings payload (GET /api/v2/settings -> readiness),
+    and the old URLs 301 into /v2.
+    """
+
     def web(self):
         store = JobStore(self.root / "jobs.db")
         runner = JobRunner(store)
@@ -131,13 +139,18 @@ class TestSetupPage(SetupBase):
         client = TestClient(create_app(token=TOKEN, store=store, runner=runner))
         return client, {"Authorization": f"Bearer {TOKEN}"}
 
-    def test_setup_page_lists_every_check(self):
+    def test_settings_readiness_lists_every_check(self):
+        # The checklist is only worth having if it names every check in
+        # the words the operator reads. Asserting on ids alone (which
+        # test_console_phase3.py does) would not catch a check that stops
+        # being emitted, nor one that reaches the page with no title.
         client, auth = self.web()
-        resp = client.get("/setup", headers=auth)
+        resp = client.get("/api/v2/settings", headers=auth)
         self.assertEqual(resp.status_code, 200)
+        titles = [c["title"] for c in resp.json()["readiness"]["checks"]]
         for title in ("model directory", "profile store", "llama.cpp runtime",
                       "llama-swap"):
-            self.assertIn(title, resp.text)
+            self.assertIn(title, titles)
 
     def test_api_setup_reports_readiness(self):
         client, auth = self.web()
@@ -146,15 +159,21 @@ class TestSetupPage(SetupBase):
         self.assertTrue(body["first_run"])
         self.assertTrue(any(c["id"] == "models_dir" for c in body["checks"]))
 
-    def test_first_run_redirects_dashboard_to_setup(self):
+    def test_first_run_root_redirects_to_the_spa(self):
         client, auth = self.web()
         resp = client.get("/", headers=auth, follow_redirects=False)
-        # 303, matching every other redirect in the app: 307 preserves
-        # the method, which is never what a navigation redirect wants.
-        self.assertEqual(resp.status_code, 303)
-        self.assertEqual(resp.headers["location"], "/setup")
+        # Was 303 -> /setup. First run no longer diverts anywhere: the
+        # checklist is a section of the settings page, not a destination,
+        # so the entry point is the same one every visit. 301 because the
+        # old console is gone for good and bookmarks should be rewritten.
+        self.assertEqual(resp.status_code, 301)
+        self.assertEqual(resp.headers["location"], "/v2/")
 
-    def test_configured_machine_keeps_its_dashboard(self):
+    def test_configured_machine_root_redirects_the_same_way(self):
+        # Kept paired with the first-run case to pin that the redirect is
+        # unconditional. The dashboard used to branch on probe state; a
+        # reintroduced branch would make the console's entry point depend
+        # on whether llama-server happened to be findable that minute.
         self.models.mkdir()
         self.profiles.mkdir(parents=True)
         binary = self.root / "llama-server"
@@ -165,7 +184,8 @@ class TestSetupPage(SetupBase):
              mock.patch.object(modelctl, "find_llama_server_candidates", return_value=[]), \
              mock.patch.object(modelctl, "get_gpu_inventory", return_value=[]):
             resp = client.get("/", headers=auth, follow_redirects=False)
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 301)
+        self.assertEqual(resp.headers["location"], "/v2/")
 
 
 class TestWebEntryPointCommands(unittest.TestCase):

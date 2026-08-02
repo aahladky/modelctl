@@ -98,7 +98,11 @@ class TestCollector(unittest.TestCase):
     def test_snapshot_shape(self):
         snap = make_collector().snapshot()
         self.assertEqual(
-            set(snap), {"ts", "services", "gpus", "ram", "models", "jobs"})
+            set(snap),
+            {"ts", "services", "gpus", "ram", "models", "jobs", "errors"})
+        # A healthy tick names no failed section: `errors` is how a page
+        # tells an empty section from a section whose probe died.
+        self.assertEqual(snap["errors"], {})
         self.assertTrue(snap["services"]["swap"]["ok"])
         self.assertIn("console_started", snap["services"])
         g = snap["gpus"][0]

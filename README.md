@@ -27,9 +27,9 @@ cd modelctl && modelctl web install
 ```
 
 Installs and starts the web console as a systemd user service and prints
-its URL and token. The console is the primary interface; its `/setup`
-page reports whether this machine has a model directory, a runnable
-llama.cpp build, GPUs, and llama-swap. The CLI stays available for
+its URL and token. The console is the primary interface; the readiness
+section of its settings page reports whether this machine has a model
+directory, a runnable llama.cpp build, GPUs, and llama-swap. The CLI stays available for
 bootstrap, automation, diagnostics, and recovery.
 
 ## How they fit together
@@ -41,7 +41,7 @@ bootstrap, automation, diagnostics, and recovery.
   (`--moe-cache-bytes`, a uniform per-device budget or a `DEV=N,DEV=N`
   per-device map), Prometheus
   `moe_cache_*` metrics, and a `/cache/reset` endpoint; modelctl's web
-  console (`/runtime`) scrapes the metrics and proxies the reset.
+  console's operate page scrapes the metrics and proxies the reset.
 - Cache-aware tier planning (`modelctl place --tiers`) reserves the
   uniform runtime cache budget on every GPU named in the profile's
   cache budget map before placing static experts, so the two never

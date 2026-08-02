@@ -1,7 +1,7 @@
 import type {
   AdmissionPreview, CancelResult, ConfigSaveResult, GgufAnalysis, HistoryRow,
   JobRow, LogTail, ModelDetail, ModelRow, PlanRow, RegisterData, RepoContents,
-  SearchResult, WizardDetail, WizardSummary,
+  SaveResult, SearchResult, SettingsOverview, WizardDetail, WizardSummary,
 } from "./types";
 
 /* Server refusals (gates, scratch-safe mode, validation) answer with a
@@ -90,6 +90,13 @@ export const fetchAdmission = (name: string, ctx?: number | null,
   get<AdmissionPreview>(
     `/api/v2/models/${enc(name)}/admission${admissionQuery(ctx, budgets, moeMode)}`);
 
+/* Runtime actions: the mutation lane answers with the job id, and the
+   tick stream carries the rest. */
+export const loadModel = (name: string) =>
+  postJson<{ job_id: string }>(`/api/v2/models/${enc(name)}/load`);
+export const unloadModel = (name: string) =>
+  postJson<{ job_id: string }>(`/api/v2/models/${enc(name)}/unload`);
+
 export const saveModelConfig = (name: string, body: {
   updates: Record<string, string | boolean>;
   budgets_bytes?: Record<string, number> | null;
@@ -141,6 +148,24 @@ export const wizardDelete = (id: string) =>
 export const hfSearch = (q: string) =>
   get<{ results: SearchResult[]; error: string }>(
     `/api/v2/hf/search?q=${enc(q)}`);
+
+/* ---- settings ---- */
+
+export const fetchSettings = () => get<SettingsOverview>("/api/v2/settings");
+export const saveDefaults = (updates: Record<string, string | number>) =>
+  postJson<SaveResult>("/api/v2/settings/defaults", { updates });
+export const saveHardware = (body: {
+  devices?: Record<string, Record<string, unknown>>;
+  ram?: { reserve_bytes: number };
+}) => postJson<SaveResult>("/api/v2/settings/hardware", body);
+export const reprobeCapabilities = () =>
+  postJson<{ ok: boolean; message: string }>(
+    "/api/v2/settings/capabilities/reprobe");
+export const calibrateStorage = () =>
+  postJson<{ job_id: string }>("/api/v2/settings/hardware/calibrate");
+export const rotateToken = (confirm: boolean) =>
+  postJson<{ ok: boolean; token_path: string; message: string }>(
+    "/api/v2/settings/token/rotate", { confirm });
 
 export async function cancelJob(id: string): Promise<CancelResult> {
   const r = await fetch(`/api/v2/jobs/${id}/cancel`, { method: "POST" });

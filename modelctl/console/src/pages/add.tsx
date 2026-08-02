@@ -5,18 +5,29 @@ import {
   createWizard, fetchWizards, hfSearch, wizardDelete, wizardSource,
 } from "../lib/api";
 import { Info } from "../lib/info";
+import { useStream } from "../lib/stream";
 import { toast } from "../lib/toasts";
 import type { SearchResult, WizardSummary } from "../lib/types";
 
 export function Add() {
   const [wizards, setWizards] = useState<WizardSummary[] | null>(null);
-  const [q, setQ] = useState("");
+  // ?q= is the old /pull page's search hand-off, preserved by its 301.
+  const [q, setQ] = useState(
+    () => new URLSearchParams(location.search).get("q") ?? "");
   const [results, setResults] = useState<SearchResult[] | null>(null);
   const [searchErr, setSearchErr] = useState("");
   const [busy, setBusy] = useState(false);
 
+  /* A wizard's step advances when its job finishes, and the jobs are on
+     the shared tick already. Refetching whenever the finished-job count
+     moves keeps this list live without a poller of its own -- "no manual
+     refresh anywhere operational state is shown". */
+  const { tick } = useStream();
+  const finished = tick
+    ? tick.jobs.filter((j) => !["running", "queued"].includes(j.status)).length
+    : 0;
   const refresh = () => fetchWizards().then(setWizards).catch(() => setWizards([]));
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => { refresh(); }, [finished]);
 
   const start = async () => {
     setBusy(true);
@@ -57,8 +68,8 @@ export function Add() {
         </h2>
         <div class="frow" style="align-items:end">
           <div class="field" style="flex:2 1 300px">
-            <label>search Hugging Face</label>
-            <input type="text" placeholder="e.g. qwen gguf" value={q}
+            <label for="hf-q">search Hugging Face</label>
+            <input id="hf-q" type="text" placeholder="e.g. qwen gguf" value={q}
                    onInput={(e) => setQ((e.target as HTMLInputElement).value)}
                    onKeyDown={(e) => { if (e.key === "Enter") search(); }} />
           </div>
@@ -68,7 +79,8 @@ export function Add() {
                     onClick={start}>start blank wizard</button>
           </div>
         </div>
-        {searchErr && <p class="sub" style="color:var(--err)">{searchErr}</p>}
+        {/* colour alone is never the status marker (spec) */}
+        {searchErr && <div class="msg error">✗ {searchErr}</div>}
         {results && results.length === 0 && !searchErr &&
           <p class="sub">no results</p>}
         {results && results.length > 0 && (

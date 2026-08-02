@@ -2,6 +2,10 @@
 {% block title %}{{ heading | default('not allowed') }} - modelctl{% endblock %}
 {% block content %}
 <h1>{{ heading | default('not allowed') }}</h1>
-<div class="warn card"><p>{{ message }}</p></div>
-<p><a href="/">back to dashboard</a></p>
+<div class="card">
+  <p class="err">{{ message }}</p>
+  <p class="sub">The traceback is in the service journal
+    (<code>journalctl --user -u modelctl-web</code>).</p>
+  <p><a href="/v2/">back to operate</a></p>
+</div>
 {% endblock %}

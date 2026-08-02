@@ -323,10 +323,55 @@ class TestCacheMetricsCapture(unittest.TestCase):
         with mock.patch("urllib.request.urlopen", return_value=cm):
             self.assertIsNone(modelctl.scrape_moe_cache_metrics(1234))
 
-    def test_web_app_shares_the_same_parser(self):
+    def test_console_telemetry_parses_the_same_counters_as_the_measurement(self):
         # Two copies could drift, and the one on screen would be the one
-        # not used by the measurement.
+        # not used by the measurement. The console used to be pinned to the
+        # measurement's parser by an alias (modelctl_web.app's
+        # _scrape_moe_cache_metrics WAS modelctl.scrape_moe_cache_metrics);
+        # the /v2 SSE stream now parses the worker's /metrics itself in
+        # modelctl_web.telemetry, so identity can no longer carry the
+        # invariant and equivalence has to. Same exposition text in, same
+        # per-device counters out -- including the label shapes the
+        # measurement's parser promises to survive: extra and reordered
+        # labels, and a metric with no device label at all (the "" key).
         import modelctl
-        from modelctl_web import app as webapp
-        self.assertIs(webapp._scrape_moe_cache_metrics,
-                      modelctl.scrape_moe_cache_metrics)
+        from modelctl_web import telemetry
+        from unittest import mock
+        import io
+        text = (
+            "# HELP llamacpp:moe_cache_hits_total MoE expert cache hits\n"
+            "# TYPE llamacpp:moe_cache_hits_total counter\n"
+            'llamacpp:moe_cache_hits_total{device="SYCL0"} 846\n'
+            'llamacpp:moe_cache_misses_total{device="SYCL0"} 72\n'
+            'llamacpp:moe_cache_learning{device="SYCL0"} 1\n'
+            'llamacpp:moe_cache_hit_ratio{model="q3",device="SYCL1"} 0.92\n'
+            'llamacpp:moe_cache_hits_total{device="SYCL1"} 5\n'
+            "llamacpp:moe_cache_bytes_resident 1048576\n"
+            "llamacpp:prompt_tokens_total 40\n"
+            "unrelated_metric 1\n")
+        cm = mock.MagicMock()
+        cm.__enter__.return_value = io.BytesIO(text.encode())
+        with mock.patch("urllib.request.urlopen", return_value=cm):
+            measured = modelctl.scrape_moe_cache_metrics(1234)
+        shown = telemetry.parse_worker_metrics(text)["moe"]
+        self.assertEqual(shown, measured)
+        self.assertEqual(shown["SYCL0"]["hits_total"], "846")
+        self.assertEqual(shown["SYCL1"]["hit_ratio"], "0.92")
+        self.assertNotIn("unrelated_metric", str(shown))
+
+    def test_console_shows_no_counters_where_the_measurement_reads_unknown(self):
+        # Same "absent is not zero" rule on the console side: a server with
+        # no cache counters must leave the console with nothing to show,
+        # not with zeros that look like an inert cache.
+        import modelctl
+        from modelctl_web import telemetry
+        from unittest import mock
+        import io
+        text = "other_metric 3\n"
+        cm = mock.MagicMock()
+        cm.__enter__.return_value = io.BytesIO(text.encode())
+        with mock.patch("urllib.request.urlopen", return_value=cm):
+            self.assertIsNone(modelctl.scrape_moe_cache_metrics(1234))
+        moe = telemetry.parse_worker_metrics(text)["moe"]
+        self.assertEqual(moe, {})
+        self.assertIsNone(telemetry.summarize_cache(moe))

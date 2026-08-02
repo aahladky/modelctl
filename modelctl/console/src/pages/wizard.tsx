@@ -133,20 +133,30 @@ function SourceStep({ w, apply }:
       </div>
       {kind === "hf_repo" ? (
         <div class="field">
-          <label>repository id</label>
-          <input type="text" placeholder="org/model-name" value={repo}
+          <div class="lbl"><label for="src-repo">repository id</label>
+            <Info label="about the repository id">
+              The Hugging Face repo holding the GGUF files, written
+              owner/name — for example unsloth/Qwen3-30B-GGUF. The next
+              step lists the quantizations that repo actually publishes.
+            </Info>
+          </div>
+          <input id="src-repo" type="text" placeholder="org/model-name" value={repo}
                  spellcheck={false}
                  onInput={(e) => setRepo((e.target as HTMLInputElement).value)} />
-          <div class="help">like unsloth/Qwen3-30B-GGUF</div>
         </div>
       ) : (
         <div class="field">
-          <label>absolute path on this machine</label>
-          <input type="text" placeholder="/path/to/model.gguf" value={path}
+          <div class="lbl">
+            <label for="src-path">absolute path on this machine</label>
+            <Info label="about the local path">
+              An absolute path to a .gguf already on this machine; nothing
+              is copied. For a sharded model point at the first shard
+              (…-00001-of-000NN.gguf) and the rest are found beside it.
+            </Info>
+          </div>
+          <input id="src-path" type="text" placeholder="/path/to/model.gguf" value={path}
                  spellcheck={false}
                  onInput={(e) => setPath((e.target as HTMLInputElement).value)} />
-          <div class="help">sharded models: point at the first shard
-            (…-00001-of-000NN.gguf)</div>
         </div>
       )}
       {err && <div class="msg error">✗ {err}</div>}
@@ -241,7 +251,13 @@ function DownloadStep({ w, apply, retry }:
                onRetry={failed ? () => retry("download") : undefined}
                retryLabel="retry download (same source, same parameters)" />
       <div class="actions" style="justify-content:flex-end">
-        <button type="button" class="btn-primary" onClick={next}>
+        {/* the server already told us whether this step may advance;
+            disabling up front beats letting the user click into a 409 */}
+        {gate?.blocking_reason && (
+          <span class="sub stale-note">blocked: {gate.blocking_reason}</span>
+        )}
+        <button type="button" class="btn-primary" onClick={next}
+                disabled={!!gate?.blocking_reason}>
           continue to analyze →
         </button>
       </div>
@@ -562,20 +578,26 @@ function RegisterStep({ w, apply, retry }:
           <legend>profile</legend>
           <div class="frow">
             <div class="field" style="flex:2 1 220px">
-              <label>profile name</label>
-              <input type="text" value={data.profile.name} disabled />
-              <div class="help">fixed at download — shown everywhere in the
-                console and used in the swap config</div>
+              <div class="lbl"><label for="reg-name">profile name</label>
+                <Info label="about the profile name">
+                  Derived from the repo and quantization at download and
+                  fixed from then on: it is the id in the llama-swap config
+                  and the name every page and log line uses. Rename with
+                  the CLI if you must.
+                </Info>
+              </div>
+              <input id="reg-name" type="text" value={data.profile.name} disabled />
             </div>
             <div class={ctxError ? "field error" : "field"}>
-              <label>context length <span class="sub">tokens</span>{" "}
+              <div class="lbl">
+                <label for="reg-ctx">context length <span class="sub">tokens</span></label>
                 <Info label="about context length">
                   KV cache grows linearly with this; it is the biggest
                   single VRAM lever. The ceiling is the trained maximum
                   read from the GGUF header at the analyze step.
                 </Info>
-              </label>
-              <input type="number" min={512} step={1024} value={draft.ctx}
+              </div>
+              <input id="reg-ctx" type="number" min={512} step={1024} value={draft.ctx}
                      onInput={(e) => setDraft({ ...draft, ctx: (e.target as HTMLInputElement).value })} />
               {ctxError
                 ? <div class="msg error">✗ {ctxError}</div>
@@ -617,10 +639,14 @@ function RegisterStep({ w, apply, retry }:
                    onChange={(e) => setDraft({
                      ...draft,
                      cache_enabled: (e.target as HTMLInputElement).checked })} />
-            <div><b><label for="reg-cache">enable expert cache</label></b>
-              <div class="help">Reserves a VRAM budget per GPU for hot
-                experts. Learning starts at load; the cache reports
-                learning → engaged.</div>
+            <div class="lbl">
+              <b><label for="reg-cache">enable expert cache</label></b>
+              <Info label="about the expert cache">
+                Reserves a VRAM budget per GPU for the experts this model
+                actually reuses. Learning starts at load and the hit-ratio
+                meter on operate reports learning → engaged. Off means
+                experts run wherever the placement put them.
+              </Info>
             </div>
           </div>
           {draft.cache_enabled && (
@@ -637,16 +663,28 @@ function RegisterStep({ w, apply, retry }:
                 if (over) warningCount += 1;
                 return (
                   <div class={over ? "field warning" : "field"} key={g.device}>
-                    <label>{g.device} budget <span class="sub">GiB</span></label>
-                    <input type="number" min={0} step={0.5} value={gib}
+                    <label for={`reg-budget-${g.device}`}>{g.device} budget{" "}
+                      <span class="sub">GiB</span></label>
+                    <input id={`reg-budget-${g.device}`} type="number" min={0}
+                           step={0.5} value={gib}
                            onInput={(e) => setDraft({
                              ...draft,
                              budgets: { ...draft.budgets,
                                         [g.device]: (e.target as HTMLInputElement).value } })} />
                     <div class="help">{g.name} · {fmtGiB(g.total_bytes, 0)} GiB
                       {headroom != null
-                        ? ` · ${Math.max(0, headroom).toFixed(1)} GiB admissible`
-                        : ""}</div>
+                        ? <> · {Math.max(0, headroom).toFixed(1)} GiB admissible{" "}
+                            <span class="tag measured">measured</span></>
+                        : null}</div>
+                    {/* the fit case was silent; "measurements outrank
+                        estimates" has to be visible where the number is
+                        being chosen, not only when it is wrong */}
+                    {!over && headroom != null && !Number.isNaN(wanted) && (
+                      <div class="msg" style="color:var(--ok)">
+                        ✓ fits the measured headroom
+                        ({Math.max(0, headroom).toFixed(1)} GiB)
+                      </div>
+                    )}
                     {over && headroom != null && (
                       <div class="msg warning">
                         ⚠ exceeds the admissible headroom

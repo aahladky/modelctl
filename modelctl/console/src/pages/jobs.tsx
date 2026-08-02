@@ -76,7 +76,12 @@ export function Jobs() {
   const history = jobs.filter((j) => !["running", "queued"].includes(j.status));
   const wcls = stale ? "widget stale" : "widget";
 
+  /* keyed by the flash timestamp: a second refusal on a row that is
+     still flashing remounts the <tr>, which restarts the CSS animation.
+     Without it the loudest signal in "optimistic actions loudly un-happen"
+     goes quiet exactly when the user retries. */
   const rowClass = (id: string) => (flash[id] ? "unhappen" : "");
+  const rowKey = (id: string) => (flash[id] ? `${id}:${flash[id]}` : id);
 
   return (
     <>
@@ -95,7 +100,7 @@ export function Jobs() {
             <table>
               <tbody>
                 {running.map((j) => (
-                  <tr key={j.id} class={rowClass(j.id)}>
+                  <tr key={rowKey(j.id)} class={rowClass(j.id)}>
                     <td style="width:110px">
                       {pending[j.id]
                         ? <span class="chip warn"><span class="dot"></span>cancelling</span>
@@ -107,18 +112,29 @@ export function Jobs() {
                         <div class="fill" style={`width:${Math.round(j.progress * 100)}%`}></div>
                       </div>
                       <div class="sub num">
-                        {j.detail || `${Math.round(j.progress * 100)}%`}
+                        {/* percentage AND detail: the two answer different
+                            questions ("how far" vs "doing what"), and the
+                            || dropped the number exactly when a job was
+                            interesting enough to report detail */}
+                        {`${Math.round(j.progress * 100)}%`}
+                        {j.detail ? ` · ${j.detail}` : ""}
                         {j.started ? ` · started ${fmtAgo(j.started)}` : ""}
                       </div>
                       <LogTail text={j.result_tail} />
                     </td>
-                    <td class="actions" style="width:120px">
-                      <button class="btn-danger"
+                    <td class="actions" style="width:150px">
+                      <button class={pending[j.id] ? "btn-danger busy" : "btn-danger"}
                               disabled={!!pending[j.id] || !j.cancellable}
-                              title={j.cancellable ? undefined : "this job is not cancellable"}
                               onClick={() => request(j, "cancel")}>
                         cancel
                       </button>
+                      {/* why the control is dead is state, not teaching
+                          copy: inline and always visible, never a title
+                          attribute only a mouse can reach */}
+                      {!j.cancellable && (
+                        <div class="sub">this lane's jobs cannot be cancelled
+                          once started</div>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -135,17 +151,21 @@ export function Jobs() {
             <table>
               <tbody>
                 {queued.map((j, i) => (
-                  <tr key={j.id} class={rowClass(j.id)}>
+                  <tr key={rowKey(j.id)} class={rowClass(j.id)}>
                     <td style="width:110px">
                       {pending[j.id]
                         ? <span class="chip warn"><span class="dot"></span>dequeuing</span>
                         : <span class="chip"><span class="dot"></span>queued #{i + 1}</span>}
                     </td>
                     <td>
-                      {j.title} <span class="sub">· lane {j.lane}</span>
+                      {j.title}{" "}
+                      <span class="sub">
+                        · lane {j.lane}{j.detail ? ` · ${j.detail}` : ""}
+                      </span>
                     </td>
                     <td class="actions" style="width:120px">
-                      <button disabled={!!pending[j.id]}
+                      <button class={pending[j.id] ? "busy" : undefined}
+                              disabled={!!pending[j.id]}
                               onClick={() => request(j, "dequeue")}>
                         dequeue
                       </button>
