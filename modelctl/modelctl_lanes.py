@@ -40,6 +40,13 @@ scratch consoles never fight over 9293. The ledger lives in the state
 directory, not the repo -- it is machine state, and a lane that appeared
 in `git status` would be exactly the thing this module exists to hide.
 
+Scratch: a lane's build trees live outside the lane, on the pool, and
+both exits delete them. Neither half was true before 2026-08-02 -- they
+defaulted into /tmp, which is tmpfs, and nothing ever came back for
+them -- so every lane that ran CI took ~850 MB of RAM away from the
+thing this machine exists to run, permanently. `sweep --orphans`
+collects what the old teardown left behind.
+
 This module must stay a leaf: no modelctl imports (paths/fsutil only).
 """
 import fcntl
@@ -136,6 +143,51 @@ def lanes_root(main=None):
     return Path(main or main_checkout()).parent / ".lanes"
 
 
+# --- scratch ---------------------------------------------------------------
+# /tmp on this machine is tmpfs, which is to say RAM the inference stack
+# could be using. Two things were wrong with putting build trees there,
+# and both are fixed here:
+#
+#   * the default lived in RAM at all -- ~850 MB per lane that ran CI,
+#     against a pool with hundreds of gigabytes free and a warm ccache;
+#   * nothing ever deleted it. `land` freed the worktree, the branch and
+#     the port block and walked straight past the build trees CI had put
+#     beside them, so on 2026-08-02 four lanes' worth (3.4 GB) sat in
+#     tmpfs, one of them belonging to a lane that had been swept hours
+#     earlier.
+#
+# Scratch is therefore named in one place, defaults to the pool, and is
+# torn down by whatever tears the lane down.
+
+LEGACY_SCRATCH_BASE = Path("/tmp")
+
+# Used when ci/checks.sh cannot be read (a fixture checkout, a lane whose
+# worktree is already gone). Names, not paths: the parent is whichever
+# scratch base is configured.
+CI_SCRATCH_FALLBACK = ("ci-build-cpu", "ci-build-san", "ci-console-dist")
+
+_CI_DIR_DEFAULT_RE = re.compile(r"\$\{(MODELCTL_CI_[A-Z0-9_]+_DIR):-([^}]+)\}")
+
+
+def scratch_base():
+    """Where build scratch goes: the pool, not tmpfs.
+
+    `MODELCTL_CI_SCRATCH_ROOT` puts it back on tmpfs (or anywhere else)
+    for anyone who wants that -- ci/checks.sh reads the same variable, so
+    one export moves every build tree the project makes.
+    """
+    override = os.environ.get("MODELCTL_CI_SCRATCH_ROOT", "").strip()
+    if override:
+        return Path(override)
+    return Path.home() / ".cache" / "modelctl" / "ci"
+
+
+def lane_scratch_base():
+    """The directory lane scratch roots sit in."""
+    override = os.environ.get("MODELCTL_LANES_SCRATCH", "").strip()
+    return Path(override) if override else scratch_base()
+
+
 def scratch_root(slug):
     """Per-lane build/scratch space, outside both the lane and the repo.
 
@@ -143,9 +195,168 @@ def scratch_root(slug):
     cmake cache configured against a different source path, and the
     second one to arrive silently reconfigures the first one's build.
     """
-    override = os.environ.get("MODELCTL_LANES_SCRATCH", "").strip()
-    base = Path(override) if override else Path("/tmp")
-    return base / f"modelctl-lane-{slug}"
+    return lane_scratch_base() / f"modelctl-lane-{slug}"
+
+
+def scratch_search_dirs():
+    """Every directory a lane's scratch can be found in.
+
+    The configured bases, plus /tmp -- but /tmp only when nothing has
+    been redirected. Every lane before 2026-08-02 built in /tmp, so a
+    sweep blind to it would leave in RAM exactly the megabytes it exists
+    to reclaim; and a caller that has redirected scratch (a scratch-safe
+    walk, the test suite) has said that the machine's /tmp is not its to
+    delete from.
+    """
+    redirected = bool(os.environ.get("MODELCTL_CI_SCRATCH_ROOT", "").strip()
+                      or os.environ.get("MODELCTL_LANES_SCRATCH", "").strip())
+    candidates = [lane_scratch_base(), scratch_base()]
+    if not redirected:
+        candidates.append(LEGACY_SCRATCH_BASE)
+    out = []
+    for path in candidates:
+        path = Path(path)
+        if path not in out:
+            out.append(path)
+    return out
+
+
+def ci_scratch_names(main=None):
+    """Leaf directory names ci/checks.sh builds into.
+
+    Read out of the script rather than listed in this module. The list
+    grows whenever someone adds a build to CI, and a second copy of it
+    here would go stale silently -- which is the precise shape of the bug
+    being fixed: teardown knew about the lane's worktree and not about
+    the build trees CI had created beside it.
+    """
+    try:
+        text = (Path(main or main_checkout()) / "ci" / "checks.sh").read_text()
+    except (OSError, LaneError, subprocess.SubprocessError):
+        return CI_SCRATCH_FALLBACK
+    names = []
+    for _var, default in _CI_DIR_DEFAULT_RE.findall(text):
+        leaf = default.strip().rstrip("/").rsplit("/", 1)[-1]
+        # A default that is itself a variable names nothing sweepable.
+        if leaf and "$" not in leaf and leaf not in names:
+            names.append(leaf)
+    return tuple(names) or CI_SCRATCH_FALLBACK
+
+
+def scratch_dir_names(slug, main=None):
+    """The directory names that belong to `slug`, in any scratch base."""
+    names = [f"modelctl-lane-{slug}"]
+    for leaf in ci_scratch_names(main):
+        # The convention sessions use when they export MODELCTL_CI_*_DIR
+        # by hand rather than through `lane env`.
+        names.append(f"{leaf}-lane-{slug}")
+    return names
+
+
+def scratch_dirs_for(slug, main=None, search_dirs=None):
+    """Existing scratch directories belonging to `slug`."""
+    out = []
+    for base in (search_dirs if search_dirs is not None
+                 else scratch_search_dirs()):
+        for name in scratch_dir_names(slug, main):
+            path = Path(base) / name
+            if path not in out and path.is_dir() and not path.is_symlink():
+                out.append(path)
+    return out
+
+
+def dir_bytes(path):
+    """Blocks a directory occupies, the way du counts them.
+
+    Blocks rather than apparent size because the number that matters is
+    the RAM a tmpfs tree is holding, and that is what it allocated.
+    """
+    total = 0
+    for root, _dirs, files in os.walk(path, onerror=lambda e: None):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(root, name)).st_blocks * 512
+            except OSError:
+                continue
+    return total
+
+
+def _remove_dir(path):
+    """Delete one scratch directory; return its size, or None if it stayed."""
+    size = dir_bytes(path)
+    shutil.rmtree(path, ignore_errors=True)
+    return None if path.exists() else size
+
+
+def remove_scratch(slug, main=None, search_dirs=None):
+    """Delete every scratch directory belonging to `slug`.
+
+    Called by both exits from a lane -- `land` and `delete` -- because
+    the lane system is what created these directories and nothing else
+    is ever going to come back for them.
+    """
+    removed = []
+    for path in scratch_dirs_for(slug, main=main, search_dirs=search_dirs):
+        size = _remove_dir(path)
+        if size is not None:
+            removed.append({"path": str(path), "slug": slug, "bytes": size})
+    return removed
+
+
+def find_orphan_scratch(ledger=None, main=None, search_dirs=None, keep=()):
+    """Lane-suffixed scratch directories whose lane no longer exists.
+
+    The ledger is the authority on what a lane is: `start` writes it and
+    both exits remove it, so a scratch directory whose slug is not in it
+    is nobody's. `keep` spares a slug anyway, for the case the ledger
+    cannot cover -- a session that exported the build dirs by hand and
+    never took a ledger entry looks exactly like an orphan while it is
+    still compiling.
+    """
+    live = set(read_ledger(ledger)["lanes"]) | set(keep)
+    names = ci_scratch_names(main)
+    found = []
+    seen = set()
+    for base in (search_dirs if search_dirs is not None
+                 else scratch_search_dirs()):
+        base = Path(base)
+        try:
+            entries = sorted(base.iterdir())
+        except OSError:
+            continue
+        for path in entries:
+            if path in seen or not path.is_dir() or path.is_symlink():
+                continue
+            slug = _slug_of(path.name, names)
+            if slug is None or slug in live:
+                continue
+            seen.add(path)
+            found.append({"path": str(path), "slug": slug,
+                          "bytes": dir_bytes(path)})
+    return found
+
+
+def _slug_of(name, ci_names):
+    """The lane slug a scratch directory name belongs to, or None."""
+    prefixes = ["modelctl-lane-"] + [f"{leaf}-lane-" for leaf in ci_names]
+    for prefix in prefixes:
+        if name.startswith(prefix):
+            slug = name[len(prefix):]
+            # Validated, not just non-empty: this is the check standing
+            # between a sweep and someone else's directory.
+            return slug if _SLUG_RE.match(slug) else None
+    return None
+
+
+def sweep_scratch_orphans(ledger=None, main=None, search_dirs=None, keep=()):
+    """Delete the orphans and return what went, each one named."""
+    removed = []
+    for orphan in find_orphan_scratch(ledger=ledger, main=main,
+                                      search_dirs=search_dirs, keep=keep):
+        size = _remove_dir(Path(orphan["path"]))
+        if size is not None:
+            removed.append({**orphan, "bytes": size})
+    return removed
 
 
 # --- git -------------------------------------------------------------------
@@ -521,6 +732,7 @@ def delete(slug, ledger=None, force=False, clock=time.time,
             shutil.rmtree(entry["path"], ignore_errors=True)
         if _branch_exists(main, entry["branch"]):
             git(main, "branch", "-D", entry["branch"], check=False)
+        state["scratch_removed"] = remove_scratch(slug, main=main)
         del data["lanes"][slug]
         write_ledger(data, ledger)
     return state
@@ -636,7 +848,8 @@ def land(slug, ledger=None, checks=None, clock=time.time, timeout=None,
     stop, always with master untouched and the lane intact."""
     report = {"slug": slug, "landed": False, "journal": None,
               "rebase": None, "checks": "not run", "master_before": None,
-              "master_after": None, "checks_log": None}
+              "master_after": None, "checks_log": None,
+              "scratch_removed": [], "scratch_bytes": 0}
     with _exclusive(land_lock_path(), timeout=timeout, note=f"land {slug}"):
         data = read_ledger(ledger)
         entry = data["lanes"].get(slug)
@@ -738,6 +951,16 @@ def land(slug, ledger=None, checks=None, clock=time.time, timeout=None,
         git(main, "branch", "-d", branch, check=False)
         if _branch_exists(main, branch):
             git(main, "branch", "-D", branch, check=False)
+
+        # 8. And so is its scratch. The checks log lived in there, so the
+        #    report stops naming a file that no longer exists -- a failed
+        #    run keeps its log, because that is the run whose log anyone
+        #    wants, and a failed run never reaches this line.
+        report["scratch_removed"] = remove_scratch(slug, main=main)
+        report["scratch_bytes"] = sum(d["bytes"]
+                                      for d in report["scratch_removed"])
+        if report["checks_log"] and not Path(report["checks_log"]).exists():
+            report["checks_log"] = None
 
         with modelctl_fsutil.state_lock():
             data = read_ledger(ledger)

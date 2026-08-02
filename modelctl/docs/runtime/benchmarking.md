@@ -79,20 +79,38 @@ A pre-registration is a comparison declared, with its criterion, before
 it runs. `enabled` means **queued**, not scheduled: a person released it
 to run the next time the machine is quiet, and enabling is a diff.
 
-### The window
+### Conditions are recorded, never obeyed
 
-`window_state()` opens only when **both** hold:
+There was a gate here: `window_state()` opened only when llama-swap held
+no models *and* loadavg(1m) was at or below 1.5, and it failed closed on
+either reading being unavailable — an unread loadavg "cannot be shown
+low". On a rig that runs lanes all day that is close to a permanent
+veto, and the 2026-08-02 night pair nearly did not happen because of it.
+It was removed on 2026-08-02. **Benchmarks are never gated.**
 
-1. llama-swap is holding no models. A benchmark taken beside a live
-   model measures the two of them together.
-2. loadavg(1m) is at or below `DEFAULT_LOADAVG_CEILING` (1.5). The rig
-   idles around 0.1–1.0; the void battery ran at a mean of 8.99.
+What stands in its place:
 
-Both halves fail closed. An unreachable llama-swap is not an idle one —
-it could be mid-restart with a model about to land — and an unreadable
-loadavg is not a quiet machine. The window reports which reading it
-could not take, so a night that dispatched nothing can be explained in
-the morning without re-deriving the machine's state from logs.
+1. `observe()` takes the same readings — llama-swap's resident models,
+   loadavg, MemAvailable — and returns them with no verdict attached.
+   The type has no `open` field and no `reasons`, so there is nothing
+   for a future caller to gate on. A reading that could not be taken is
+   `None` and is named in `unreadable`, never substituted with a zero.
+2. `cleanup_pass()` runs before each job: it sweeps orphaned lane build
+   scratch (`modelctl lane sweep --orphans`), reaps llama-servers whose
+   launcher has died, and records MemAvailable and loadavg on both sides
+   of itself. It frees **junk only** — never the page cache, which is
+   part of the measurement rather than something in its way. Nothing in
+   it can stop a job: a cleanup that fails records why and the run
+   continues.
+3. The job runs, and its conditions live on in the per-run load trace.
+   Recording is what lets a paired design survive a noisy machine;
+   refusing only produces silence.
+
+The one thing that still makes a job wait is the **GPU lock**, because
+two benchmarks on one GPU is garbage rather than noise. It waits up to
+six hours rather than refusing after a minute, and a wait that does run
+out is filed as a **failure naming the lock's holder** — never a silent
+skip.
 
 ### Dispatch
 

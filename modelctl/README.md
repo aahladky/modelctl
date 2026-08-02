@@ -200,9 +200,11 @@ all documented in
 - **The night lane** (`night-lane.json`) holds pre-registered
   comparisons — question, criterion and sample size committed *before*
   any numbers exist. Enabled jobs run unattended on the benchmark lane,
-  but only through a window that requires llama-swap to be holding
-  nothing and the load to be below a ceiling; both halves fail closed.
-  Evidence lands in `docs/evidence/` with one-line summaries.
+  and they are never gated on conditions: a cleanup pass frees orphaned
+  build scratch and dead llama-servers, records MemAvailable and loadavg
+  either side of itself, and then the job runs whatever the machine
+  looks like. The only wait is the GPU lock. Evidence lands in
+  `docs/evidence/` with one-line summaries.
 
 ## Configuration (environment variables)
 
@@ -210,6 +212,7 @@ all documented in
 |---|---|
 | `MODELCTL_HOME` | State dir (profiles, defaults) — default `~/.local/share/modelctl` |
 | `MODELCTL_MODELS_DIR` | Where pulled GGUFs land — default `~/models` |
+| `MODELCTL_CI_SCRATCH_ROOT` | Where `ci/checks.sh` and lane build scratch go — default `~/.cache/modelctl/ci`, deliberately not `/tmp` (tmpfs) |
 | `MODELCTL_LLAMA_SERVER` | Path to the `llama-server` binary |
 | `MODELCTL_LLAMA_SWAP_CONFIG`, `MODELCTL_LLAMA_SWAP_SERVICE`, `MODELCTL_LLAMA_SWAP_BASE_URL`, `MODELCTL_LLAMA_SWAP_DIR` | Router config path / systemd unit / API base / install dir (the port comes from the base URL) |
 | `MODELCTL_OVMS_*` | OpenVINO Model Server backend knobs (`ovms-add`/`ovms-convert`) |

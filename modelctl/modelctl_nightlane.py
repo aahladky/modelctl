@@ -14,18 +14,33 @@ machine is quiet; a disabled one is a declaration only. Enabling is a
 diff, which is the point -- nothing here starts running because a
 default changed.
 
-The lane half of this module (`window_state`, `dispatch_due`) is what
-turns a queued job into a running one, and it refuses far more often
-than it dispatches:
+The lane half of this module (`observe`, `cleanup_pass`, `dispatch_due`)
+turns a queued job into a running one. It does not decide whether the
+machine deserves to be measured:
 
-  * The window is gated on llama-swap holding no models AND the load
-    being below a ceiling. A benchmark taken beside a live model is a
-    measurement of the two of them together, and the whole reason the
-    2026-08-01 battery is void is that nobody checked.
+  * **A benchmark is never gated on conditions.** There was a loadavg
+    ceiling here, and it skipped jobs -- including when the loadavg
+    could not be read at all, on the reasoning that an unread load
+    "cannot be shown low". Fail-closed both ways, on a rig that runs
+    lanes all day: the 2026-08-02 night pair nearly did not happen, and
+    a comparison that does not run answers nothing. So conditions are
+    now *recorded*, per run, as a load trace. Recording is what lets a
+    paired design survive a noisy machine; refusing only produces
+    silence.
+  * **Make room, then run.** Every job is preceded by a cleanup pass
+    that sweeps orphaned lane scratch and reaps llama-servers no living
+    launcher owns, and records MemAvailable and loadavg either side of
+    it. Cleanup frees junk -- never the page cache, which is part of
+    the measurement.
+  * **One form of waiting, and it is the GPU lock.** Two benchmarks on
+    one GPU is garbage rather than noise, so a job waits for the lock;
+    it does not skip. A wait that runs out is reported as a failure
+    naming the holder, never as a quiet skip.
   * A job whose arms need a fleet node the machine cannot reach is
     blocked, never silently run local -- the local-fallback plan is
     byte-identical to a fleet-free launch, so it would answer a
-    different question with a perfectly valid number.
+    different question with a perfectly valid number. That is a
+    statement about the question, not about the machine's mood.
   * Dispatch is explicit. Importing this module starts nothing; a
     caller has to hand it a job manager and ask.
 
@@ -38,6 +53,8 @@ Per the project rule, benchmarks record raw numbers, exact config, and
 concurrent machine load; the reading is Aaron's.
 """
 import json
+import os
+import signal
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,11 +67,6 @@ SUMMARY_PATH = EVIDENCE_DIR / "night-lane-log.md"
 # worker, so two night jobs can never contend for the GPUs, and the
 # console's jobs page renders it already.
 LANE = "benchmark"
-
-# Above this 1-minute load average the machine is not quiet enough to
-# measure on. The rig idles around 0.1-1.0; the void battery ran at a
-# mean of 8.99. The ceiling sits above idle and far below that.
-DEFAULT_LOADAVG_CEILING = 1.5
 
 
 @dataclass(frozen=True)
@@ -196,37 +208,37 @@ def blocking_reasons(job, usable_node_names=()) -> list:
     return reasons
 
 
-# --- the window ----------------------------------------------------------
+# --- conditions ----------------------------------------------------------
 
 @dataclass(frozen=True)
-class WindowState:
-    """Is the machine quiet enough to measure on, and how do we know?
+class Conditions:
+    """What the machine looked like. Readings only, no verdict.
 
-    `open` is never returned on its own: `reasons` says what closed it
-    and `observed` records the readings the decision was made from, so a
-    night that dispatched nothing can be explained in the morning
-    without re-deriving the machine's state from logs.
+    This is what is left of `window_state` after the gate came out. The
+    same readings are taken; none of them decides anything. A field that
+    is None was not readable, and `unreadable` says which and why --
+    never substituted with a zero, and never turned into a refusal,
+    because "the loadavg could not be read" is a fact about /proc and
+    the old lane treated it as a fact about the machine being busy.
     """
-    open: bool
-    reasons: tuple = ()
-    observed: dict = field(default_factory=dict)
+    at: float = 0.0
+    loadavg_1m: float | None = None
+    loadavg_5m: float | None = None
+    mem_available_bytes: int | None = None
+    llama_swap_running: tuple = ()
+    unreadable: tuple = ()
 
     def to_dict(self):
-        return {"open": self.open, "reasons": list(self.reasons),
-                "observed": dict(self.observed)}
+        return {"at": self.at, "loadavg_1m": self.loadavg_1m,
+                "loadavg_5m": self.loadavg_5m,
+                "mem_available_bytes": self.mem_available_bytes,
+                "llama_swap_running": list(self.llama_swap_running),
+                "unreadable": list(self.unreadable)}
 
 
-def window_state(swap_client=None, load_sample=None,
-                 loadavg_ceiling=DEFAULT_LOADAVG_CEILING) -> WindowState:
-    """The gate: llama-swap holding nothing AND the load below the ceiling.
-
-    Both halves fail closed. An unreachable llama-swap is not an idle
-    one -- it might be mid-restart with a model about to land -- and an
-    unreadable loadavg is not a quiet machine. In either case the window
-    stays shut and says which reading it could not take.
-    """
-    reasons = []
-    observed = {}
+def observe(swap_client=None, load_sample=None, clock=time.time) -> Conditions:
+    """Take every reading the old window took, and judge none of them."""
+    unreadable = []
 
     if swap_client is None:
         # Built from MODELCTL_LLAMA_SWAP_BASE_URL, not from the client's
@@ -239,31 +251,194 @@ def window_state(swap_client=None, load_sample=None,
         from modelctl_web.swap import LlamaSwapClient
         swap_client = LlamaSwapClient(base_url=LLAMA_SWAP_ROOT)
     try:
-        running = sorted(m for m in swap_client.running_model_ids() if m)
-        observed["llama_swap_running"] = running
-        if running:
-            reasons.append(
-                "llama-swap is holding " + ", ".join(running))
+        running = tuple(sorted(m for m in swap_client.running_model_ids() if m))
     except Exception as e:
-        observed["llama_swap_error"] = f"{type(e).__name__}: {e}"
-        reasons.append(
-            "llama-swap could not be reached, so it cannot be shown idle")
+        running = ()
+        unreadable.append(f"llama-swap: {type(e).__name__}: {e}")
 
     if load_sample is None:
         import modelctl_load
         load_sample = modelctl_load.sample_load()
     loadavg = getattr(load_sample, "loadavg_1m", None)
-    observed["loadavg_1m"] = loadavg
-    observed["loadavg_ceiling"] = loadavg_ceiling
     if loadavg is None:
-        reasons.append("loadavg could not be read, so it cannot be shown low")
-    elif loadavg > loadavg_ceiling:
-        reasons.append(
-            f"loadavg(1m) {loadavg:.2f} is above the {loadavg_ceiling:.2f} "
-            f"ceiling")
+        unreadable.append("loadavg: /proc/loadavg could not be read")
+    mem = getattr(load_sample, "mem_available_bytes", None)
+    if mem is None:
+        unreadable.append("mem_available: /proc/meminfo could not be read")
 
-    return WindowState(open=not reasons, reasons=tuple(reasons),
-                       observed=observed)
+    return Conditions(at=clock(), loadavg_1m=loadavg,
+                      loadavg_5m=getattr(load_sample, "loadavg_5m", None),
+                      mem_available_bytes=mem, llama_swap_running=running,
+                      unreadable=tuple(unreadable))
+
+
+# --- the cleanup pass ----------------------------------------------------
+# What the machine hoards between night runs: lane build trees nothing
+# deleted, and llama-servers whose launcher died mid-bench. Both are
+# junk, and junk is the only thing a cleanup pass is allowed to free --
+# never the page cache, which on the ornith pair is part of the
+# measurement rather than something in its way.
+
+SERVER_PROCESS_NAMES = ("llama-server",)
+
+
+def _proc_info(pid, proc_root="/proc"):
+    """name/ppid/start time/cgroup for one pid, or None if it is gone."""
+    base = os.path.join(str(proc_root), str(pid))
+    try:
+        with open(os.path.join(base, "stat")) as fh:
+            stat = fh.read()
+    except OSError:
+        return None
+    # comm is parenthesised and may itself contain spaces and brackets,
+    # so everything positional is read after the LAST ')'.
+    start, end = stat.find("("), stat.rfind(")")
+    if start < 0 or end < start:
+        return None
+    fields = stat[end + 2:].split()
+    try:
+        ppid = int(fields[1])
+        starttime = fields[19]
+    except (IndexError, ValueError):
+        return None
+    try:
+        with open(os.path.join(base, "cgroup")) as fh:
+            cgroup = fh.read().strip()
+    except OSError:
+        cgroup = ""
+    return {"pid": int(pid), "comm": stat[start + 1:end], "ppid": ppid,
+            "starttime": starttime, "cgroup": cgroup}
+
+
+def orphaned_servers(proc_root="/proc", names=SERVER_PROCESS_NAMES):
+    """llama-server processes that no living launcher owns.
+
+    Two conditions, both required, both read rather than assumed:
+
+      * the parent is PID 1. llama-swap holds its servers as children
+        and so does a lane's bench, so a reparented server is one whose
+        launcher has died;
+      * its own cgroup is not a systemd service. "ppid is 1" is also
+        true of every process systemd itself started, and that check
+        alone would let a 03:00 cleanup pass kill the serving stack.
+
+    Never a live one is the entire requirement: this runs unattended,
+    and the cost of one false positive is the rig.
+    """
+    out = []
+    try:
+        pids = sorted(int(n) for n in os.listdir(proc_root) if n.isdigit())
+    except OSError:
+        return out
+    for pid in pids:
+        info = _proc_info(pid, proc_root)
+        if info is None or info["comm"] not in names:
+            continue
+        if info["ppid"] != 1:
+            continue
+        if service_unit(info["cgroup"]):
+            continue
+        out.append(info)
+    return out
+
+
+def service_unit(cgroup):
+    """The systemd service unit owning a cgroup, or "" if none does.
+
+    The LEAF path component decides it, never a substring: every user
+    process on this machine sits under `user@1000.service`, so `".service"
+    in cgroup` is true of all of them and a reaper using it would spare
+    everything, forever, while looking like it worked.
+    """
+    for line in (cgroup or "").splitlines():
+        leaf = line.rpartition(":")[2].rstrip("/").rsplit("/", 1)[-1]
+        if leaf.endswith(".service"):
+            return leaf
+    return ""
+
+
+def _same_process(info, proc_root="/proc"):
+    """Is this pid still the process we decided about?"""
+    now = _proc_info(info["pid"], proc_root)
+    return bool(now and all(now[k] == info[k]
+                            for k in ("comm", "ppid", "starttime")))
+
+
+def reap_orphaned_servers(proc_root="/proc", killer=os.kill, wait=15.0,
+                          poll=0.5, clock=time.monotonic, sleep=time.sleep):
+    """Terminate the orphans; return one record per process signalled.
+
+    Every signal is preceded by re-reading the identity the decision was
+    made from (name, parent, start time). PID reuse is not theoretical
+    on a machine that spawns servers all night, and the window between
+    listing a pid and signalling it is exactly where a reused one would
+    land.
+    """
+    reaped = []
+    for info in orphaned_servers(proc_root):
+        if not _same_process(info, proc_root):
+            continue
+        entry = {"pid": info["pid"], "comm": info["comm"],
+                 "cgroup": info["cgroup"]}
+        try:
+            killer(info["pid"], signal.SIGTERM)
+        except OSError as e:
+            reaped.append({**entry, "outcome": f"SIGTERM failed: {e}"})
+            continue
+        deadline = clock() + wait
+        while _same_process(info, proc_root) and clock() < deadline:
+            sleep(poll)
+        entry["outcome"] = "SIGTERM"
+        if _same_process(info, proc_root):
+            try:
+                killer(info["pid"], signal.SIGKILL)
+                entry["outcome"] = f"SIGKILL after {wait:.0f}s"
+            except OSError as e:
+                entry["outcome"] = f"SIGKILL failed: {e}"
+        reaped.append(entry)
+    return reaped
+
+
+def _sweep_lane_scratch():
+    import modelctl_lanes
+    return modelctl_lanes.sweep_scratch_orphans()
+
+
+def cleanup_pass(observer=None, sweep=None, reap=None) -> dict:
+    """Free what the machine is hoarding, and record both sides of it.
+
+    This is what stands where the loadavg ceiling used to. The ceiling
+    read a busy machine and refused; this makes the machine less busy
+    and then measures anyway, which is the same information put to use
+    instead of to a veto.
+
+    Nothing in here can stop a job. A cleanup that fails records why and
+    the run continues -- a new refusal path smuggled in as error
+    handling would be the same bug wearing a different hat.
+    """
+    observer = observer or observe
+    sweep = sweep or _sweep_lane_scratch
+    reap = reap or reap_orphaned_servers
+
+    before = observer()
+    result = {"before": before.to_dict(), "scratch_removed": [],
+              "processes_reaped": [], "errors": []}
+    for key, action in (("scratch_removed", sweep),
+                        ("processes_reaped", reap)):
+        try:
+            result[key] = list(action() or [])
+        except Exception as e:
+            result["errors"].append(f"{key}: {type(e).__name__}: {e}")
+    after = observer()
+    result["after"] = after.to_dict()
+    result["scratch_bytes"] = sum(int(d.get("bytes") or 0)
+                                  for d in result["scratch_removed"])
+    if before.mem_available_bytes is None or after.mem_available_bytes is None:
+        result["mem_available_delta_bytes"] = None
+    else:
+        result["mem_available_delta_bytes"] = (after.mem_available_bytes
+                                               - before.mem_available_bytes)
+    return result
 
 
 # --- dispatch ------------------------------------------------------------
@@ -271,12 +446,12 @@ def window_state(swap_client=None, load_sample=None,
 @dataclass
 class Dispatch:
     """What one pass over the lane did, and what it declined to do."""
-    window: WindowState
+    conditions: Conditions = field(default_factory=Conditions)
     submitted: list = field(default_factory=list)   # (job_id, store_job_id)
     skipped: list = field(default_factory=list)     # (job_id, reasons)
 
     def to_dict(self):
-        return {"window": self.window.to_dict(),
+        return {"conditions": self.conditions.to_dict(),
                 "submitted": [{"job": j, "store_job": s}
                               for j, s in self.submitted],
                 "skipped": [{"job": j, "reasons": r} for j, r in self.skipped]}
@@ -300,37 +475,31 @@ def due_jobs(jobs=None, usable_node_names=(), path=None):
 
 
 def dispatch_due(manager, runner, jobs=None, usable_node_names=(),
-                 window=None, path=None, limit=None) -> Dispatch:
+                 conditions=None, path=None, limit=None) -> Dispatch:
     """Submit every due job to the job store's benchmark lane.
 
     `runner(job, ctx) -> dict` performs one job; it is injected so this
-    module owns the gate and the bookkeeping and nothing else. The
-    benchmark lane has a single worker, so submitting several at once
-    still runs them one at a time -- which is required, not incidental:
-    two benchmarks sharing the GPUs measure each other.
+    module owns the bookkeeping and nothing else. The benchmark lane has
+    a single worker, so submitting several at once still runs them one
+    at a time -- which is required, not incidental: two benchmarks
+    sharing the GPUs measure each other.
 
-    Submits nothing at all when the window is shut. A partially-open
-    window is not a thing: the machine either was quiet for the run or
-    the run does not count.
+    The machine's condition is read once here and carried in the job's
+    payload, because knowing what the queue looked like at 03:00 is
+    worth having in the morning. It is not consulted: nothing about the
+    readings can stop a submission.
     """
-    state = window if window is not None else window_state()
-    result = Dispatch(window=state)
+    state = conditions if conditions is not None else observe()
+    result = Dispatch(conditions=state)
     runnable, skipped = due_jobs(jobs, usable_node_names, path)
     result.skipped = [(j.id, r) for j, r in skipped]
-
-    if not state.open:
-        for job in runnable:
-            result.skipped.append(
-                (job.id, ["the measurement window is shut: "
-                          + "; ".join(state.reasons)]))
-        return result
 
     for job in runnable[:limit] if limit else runnable:
         store_job_id = manager.submit(
             "nightlane", job.title,
             lambda ctx, _job=job: runner(_job, ctx),
             payload={"night_lane_job": job.id, "mode": job.mode,
-                     "window": state.to_dict()},
+                     "conditions": state.to_dict()},
             lane=LANE)
         result.submitted.append((job.id, store_job_id))
     if limit and len(runnable) > limit:
@@ -465,18 +634,20 @@ def today(clock=time.time) -> str:
 
 # --- running a job -------------------------------------------------------
 
-# How long a night job waits for the GPU lock before refusing. The
-# window gate already asked for a quiet machine, so a held lock means
-# somebody's bench is running right now: a minute covers the gap between
-# a lane releasing the lock and this job asking, and refusing after that
-# is correct -- the job is queued, not scheduled, and tomorrow night is
-# fine. Waiting instead would put a benchmark inside a window that was
-# checked an hour earlier.
-GPU_LOCK_WAIT_SECONDS = 60.0
+# How long a night job waits for the GPU lock. It waits; it does not
+# refuse. This is the one thing the lane still blocks on, because two
+# benchmarks on one GPU produce garbage rather than noise -- unlike a
+# busy machine, which produces a real number under a recorded load. A
+# night's worth of waiting outlasts any bench a session might be
+# running, and a wait that does run out is a failure with the holder
+# named, not a skip: something is holding the lock that should not be,
+# and that is worth waking up to.
+GPU_LOCK_WAIT_SECONDS = 6 * 3600.0
 
 
 def run_job(job, measure, ctx=None, load_interval=5.0, clock=time.time,
-            gpu_lock=None, gpu_lock_wait=GPU_LOCK_WAIT_SECONDS):
+            gpu_lock=None, gpu_lock_wait=GPU_LOCK_WAIT_SECONDS,
+            cleanup=None):
     """Execute one pre-registered job and return its record.
 
     `measure(arm, index, slot) -> dict` performs one run of one arm. It is
@@ -490,6 +661,11 @@ def run_job(job, measure, ctx=None, load_interval=5.0, clock=time.time,
     night jobs from overlapping; the lock is what stops a night job and
     a session's bench in a parallel lane from measuring each other, and
     those two schedulers know nothing about one another.
+
+    Inside the lock and before the first measurement, `cleanup` frees
+    what the machine is hoarding and records MemAvailable and loadavg on
+    both sides of it. Inside, so that the numbers describe the machine
+    the run actually got.
 
     The record it returns is what `file_evidence` writes. It carries the
     job's own criterion verbatim: a result read months later without the
@@ -522,22 +698,26 @@ def run_job(job, measure, ctx=None, load_interval=5.0, clock=time.time,
     try:
         with gpu_lock(timeout=gpu_lock_wait, note=f"night lane {job.id}"):
             return _run_measurements(job, measure, record, ctx, load_interval,
-                                     clock)
+                                     clock, cleanup)
     except Exception as e:
-        # LockBusy is the only expected one, and it is a refusal rather
-        # than an error: nothing ran, so there is nothing to file but the
-        # reason. Caught by name rather than by class to keep this module
-        # a leaf of modelctl_lanes' exception types.
+        # LockBusy is the only expected one. It is a failure, not a
+        # skip: the job waited hours for a lock somebody else never
+        # released, and the holder is in the message so the morning
+        # knows who. Caught by name rather than by class to keep this
+        # module a leaf of modelctl_lanes' exception types.
         if type(e).__name__ != "LockBusy":
             raise
-        record["status"] = "refused"
-        record["violations"] = [
-            f"the GPU lock is held by another run ({e}); nothing was measured"]
+        record["status"] = "failed"
+        record["error"] = (
+            f"the GPU lock was still held after {gpu_lock_wait:.0f}s, so "
+            f"nothing was measured: {e}")
         record["finished"] = clock()
         return record
 
 
-def _run_measurements(job, measure, record, ctx, load_interval, clock):
+def _run_measurements(job, measure, record, ctx, load_interval, clock,
+                      cleanup=None):
+    record["cleanup"] = (cleanup or cleanup_pass)()
     if job.mode == "paired":
         import modelctl_paired
         a, b = (modelctl_paired.Condition(

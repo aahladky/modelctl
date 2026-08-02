@@ -21,8 +21,11 @@ What is worth breaking on, in order:
     since it is the only thing standing between a lane bench and a
     03:00 night job.
 """
+import contextlib
+import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -68,17 +71,25 @@ class LaneCase(unittest.TestCase):
         patcher = mock.patch.object(modelctl_fsutil, "STATE_DIR", self.state)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Both scratch bases are redirected, and setting either one also
+        # takes the machine's /tmp out of scratch_search_dirs(): these
+        # tests delete whole directories under those roots.
         env = mock.patch.dict(os.environ, {
             "MODELCTL_LANES_LEDGER": str(self.state / "lanes.json"),
             "MODELCTL_LANES_LAND_LOCK": str(self.state / "lanes-land.lock"),
             "MODELCTL_GPU_LOCK": str(self.state / "gpu.lock"),
             "MODELCTL_LANES_SCRATCH": str(self.tmp / "scratch"),
+            "MODELCTL_CI_SCRATCH_ROOT": str(self.tmp / "ci-scratch"),
             "MODELCTL_LANES_ROOT": str(self.tmp / ".lanes"),
         })
         env.start()
         self.addCleanup(env.stop)
         self.ledger = self.state / "lanes.json"
         self.root = self.tmp / ".lanes"
+        self.scratch = self.tmp / "scratch"
+        self.ci_scratch = self.tmp / "ci-scratch"
+        self.scratch.mkdir()
+        self.ci_scratch.mkdir()
 
         self.fork = self.init_repo(self.tmp / "forks" / "fork")
         self.commit(self.fork, "kernel.c", "int one(void);\n", "fork: first")
@@ -142,6 +153,13 @@ class LaneCase(unittest.TestCase):
         d = self.proc_root / str(pid)
         d.mkdir(parents=True)
         os.symlink(str(cwd), str(d / "cwd"))
+
+    def make_scratch(self, base, name, kbytes=4):
+        """A stand-in build tree, with enough bytes in it to be counted."""
+        path = Path(base) / name
+        (path / "CMakeFiles").mkdir(parents=True)
+        (path / "CMakeCache.txt").write_text("x" * (kbytes * 1024))
+        return path
 
 
 # --- start -----------------------------------------------------------------
@@ -577,6 +595,243 @@ class TestListAndSweep(LaneCase):
                          proc_root=str(self.proc_root))
 
 
+# --- build scratch ---------------------------------------------------------
+
+class TestScratchLocation(LaneCase):
+    """Scratch is on the pool, not in tmpfs.
+
+    /tmp on this machine is RAM. A default that put every lane's cmake
+    output there took ~850 MB per lane away from the models, and nobody
+    noticed because nothing ever reported it.
+    """
+
+    def test_the_default_is_not_tmpfs(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            base = lanes.scratch_base()
+        self.assertNotEqual(base, lanes.LEGACY_SCRATCH_BASE)
+        self.assertFalse(str(base).startswith("/tmp"), base)
+
+    def test_the_env_override_moves_every_lane_at_once(self):
+        # The same variable ci/checks.sh reads, so one export moves every
+        # build tree the project makes.
+        with mock.patch.dict(os.environ,
+                             {"MODELCTL_CI_SCRATCH_ROOT": "/mnt/fast"},
+                             clear=True):
+            self.assertEqual(lanes.scratch_root("alpha"),
+                             Path("/mnt/fast/modelctl-lane-alpha"))
+
+    def test_the_lane_specific_override_wins_over_the_shared_one(self):
+        with mock.patch.dict(os.environ,
+                             {"MODELCTL_CI_SCRATCH_ROOT": "/mnt/fast",
+                              "MODELCTL_LANES_SCRATCH": "/mnt/lanes"},
+                             clear=True):
+            self.assertEqual(lanes.scratch_root("alpha"),
+                             Path("/mnt/lanes/modelctl-lane-alpha"))
+
+    def test_tmp_is_searched_only_when_nothing_is_redirected(self):
+        # The legacy scan is how the megabytes every earlier lane left in
+        # tmpfs get collected; a caller that has redirected scratch has
+        # said the machine's /tmp is not its to delete from.
+        self.assertNotIn(lanes.LEGACY_SCRATCH_BASE, lanes.scratch_search_dirs())
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIn(lanes.LEGACY_SCRATCH_BASE,
+                          lanes.scratch_search_dirs())
+
+    def test_both_configured_bases_are_searched(self):
+        dirs = lanes.scratch_search_dirs()
+        self.assertIn(self.scratch, dirs)
+        self.assertIn(self.ci_scratch, dirs)
+
+
+class TestScratchNamesComeFromChecks(LaneCase):
+    """The list of build directories is read out of ci/checks.sh.
+
+    Hardcoding it here is how teardown fell behind CI in the first
+    place: the script grew a console build and a sanitizer build, and
+    nothing that cleans up was told.
+    """
+
+    def test_a_new_ci_build_dir_is_picked_up_without_editing_this_module(self):
+        checks = self.main / "ci" / "checks.sh"
+        checks.write_text(CHECKS_STUB + '\nB="${MODELCTL_CI_WIDGET_DIR:'
+                                        '-$CI_SCRATCH_ROOT/ci-widget}"\n')
+        self.assertIn("ci-widget", lanes.ci_scratch_names(self.main))
+        self.assertIn("ci-widget-lane-alpha",
+                      lanes.scratch_dir_names("alpha", self.main))
+
+    def test_an_unreadable_script_falls_back_rather_than_sweeping_nothing(self):
+        self.assertEqual(lanes.ci_scratch_names(self.tmp / "nowhere"),
+                         lanes.CI_SCRATCH_FALLBACK)
+
+    def test_a_default_that_is_itself_a_variable_names_nothing(self):
+        checks = self.main / "ci" / "checks.sh"
+        checks.write_text('X="${MODELCTL_CI_ODD_DIR:-$SOMEWHERE}"\n')
+        self.assertEqual(lanes.ci_scratch_names(self.main),
+                         lanes.CI_SCRATCH_FALLBACK)
+
+
+class TestScratchTeardown(LaneCase):
+    """Both exits from a lane take its build trees with them.
+
+    Before this, `land` freed the worktree, the branch and the port
+    block and left the build trees: on 2026-08-02 four lanes' worth
+    (3.4 GB) sat in tmpfs, one of them belonging to a lane that had been
+    swept hours earlier.
+    """
+
+    def scratch_for(self, slug):
+        """One of each naming convention: `lane env`'s, and the one a
+        session uses when it exports MODELCTL_CI_*_DIR by hand."""
+        return [self.make_scratch(self.scratch, f"modelctl-lane-{slug}"),
+                self.make_scratch(self.ci_scratch,
+                                  f"ci-build-cpu-lane-{slug}"),
+                self.make_scratch(self.ci_scratch,
+                                  f"ci-console-dist-lane-{slug}")]
+
+    def test_land_removes_every_scratch_directory_of_the_lane(self):
+        self.start("alpha")
+        made = self.scratch_for("alpha")
+        report = self.land("alpha")
+        self.assertTrue(report["landed"])
+        for path in made:
+            self.assertFalse(path.exists(), path)
+        self.assertEqual({Path(d["path"]) for d in report["scratch_removed"]},
+                         set(made))
+        self.assertGreater(report["scratch_bytes"], 0)
+
+    def test_another_lanes_scratch_is_untouched(self):
+        self.start("alpha")
+        self.start("bravo")
+        mine, theirs = self.scratch_for("alpha"), self.scratch_for("bravo")
+        self.land("alpha")
+        self.assertFalse(any(p.exists() for p in mine))
+        self.assertTrue(all(p.exists() for p in theirs))
+
+    def test_delete_removes_the_scratch_too(self):
+        self.start("alpha")
+        made = self.scratch_for("alpha")
+        state = lanes.delete("alpha", ledger=self.ledger, force=True,
+                             proc_root=str(self.proc_root))
+        for path in made:
+            self.assertFalse(path.exists(), path)
+        self.assertEqual(len(state["scratch_removed"]), len(made))
+
+    def test_a_failed_land_keeps_the_scratch_and_its_checks_log(self):
+        # The log of the run that failed is the one anybody wants, and
+        # the lane is still there to be fixed and landed again.
+        entry = self.start("alpha")
+        self.commit(self.main, "b.txt", "moved\n", "main: moved")
+        self.commit(Path(entry["path"]), "c.txt", "lane\n", "lane: work")
+        made = self.scratch_for("alpha")
+
+        def failing_checks_with_a_log(lane_path, env, log_path=None):
+            Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(log_path).write_text("fixture checks: FAIL cache tests\n")
+            return 1, "fixture checks: FAIL cache tests\n"
+
+        with self.assertRaises(lanes.LaneError) as cm:
+            self.land("alpha", checks=failing_checks_with_a_log)
+        self.assertTrue(all(p.exists() for p in made))
+        log = lanes.scratch_root("alpha") / "land-checks.log"
+        self.assertTrue(log.exists())
+        self.assertIn(str(log), str(cm.exception))
+
+    def test_a_landed_report_stops_naming_a_log_it_deleted(self):
+        entry = self.start("alpha")
+        self.commit(self.main, "b.txt", "moved\n", "main: moved")
+        self.commit(Path(entry["path"]), "c.txt", "lane\n", "lane: work")
+        report = self.land("alpha")
+        self.assertEqual(report["checks"], "passed")
+        self.assertIsNone(report["checks_log"])
+
+    def test_nothing_to_remove_is_not_an_error(self):
+        self.start("alpha")
+        report = self.land("alpha")
+        self.assertEqual(report["scratch_removed"], [])
+        self.assertEqual(report["scratch_bytes"], 0)
+
+
+class TestOrphanSweep(LaneCase):
+    """`sweep --orphans`: scratch whose lane no longer exists.
+
+    The ledger is the authority. `start` writes it and both exits remove
+    it, so a lane-suffixed directory whose slug is not in it belongs to
+    nobody -- which described 3.4 GB of tmpfs on the morning this was
+    written.
+    """
+
+    def orphans(self, **kw):
+        return lanes.find_orphan_scratch(ledger=self.ledger, main=self.main,
+                                         **kw)
+
+    def sweep(self, **kw):
+        return lanes.sweep_scratch_orphans(ledger=self.ledger, main=self.main,
+                                           **kw)
+
+    def test_scratch_of_a_lane_that_is_gone_is_found_named_and_deleted(self):
+        dead = self.make_scratch(self.scratch, "modelctl-lane-gone")
+        found = self.orphans()
+        self.assertEqual([Path(f["path"]) for f in found], [dead])
+        self.assertEqual(found[0]["slug"], "gone")
+        self.assertGreater(found[0]["bytes"], 0)
+
+        removed = self.sweep()
+        self.assertFalse(dead.exists())
+        self.assertEqual([Path(r["path"]) for r in removed], [dead])
+        self.assertGreater(removed[0]["bytes"], 0)
+
+    def test_a_live_lanes_scratch_is_spared(self):
+        self.start("alive")
+        live = self.make_scratch(self.scratch, "modelctl-lane-alive")
+        live_ci = self.make_scratch(self.ci_scratch, "ci-build-cpu-lane-alive")
+        self.sweep()
+        self.assertTrue(live.exists())
+        self.assertTrue(live_ci.exists())
+
+    def test_keep_spares_a_slug_the_ledger_cannot_see(self):
+        # A session that exported the build dirs by hand and never took
+        # a ledger entry looks exactly like an orphan while it compiles.
+        busy = self.make_scratch(self.ci_scratch, "ci-build-cpu-lane-busy")
+        other = self.make_scratch(self.ci_scratch, "ci-build-cpu-lane-old")
+        removed = self.sweep(keep=["busy"])
+        self.assertTrue(busy.exists())
+        self.assertFalse(other.exists())
+        self.assertEqual([r["slug"] for r in removed], ["old"])
+
+    def test_directories_that_are_not_lane_scratch_are_never_touched(self):
+        keepers = [self.make_scratch(self.scratch, "ci-build-cpu"),
+                   self.make_scratch(self.scratch, "modelctl-lane-"),
+                   self.make_scratch(self.scratch, "modelctl-lane-Bad_Slug"),
+                   self.make_scratch(self.scratch, "somebody-elses-work"),
+                   self.make_scratch(self.ci_scratch, "ci-build-cpu-lane")]
+        self.assertEqual(self.orphans(), [])
+        self.sweep()
+        self.assertTrue(all(p.exists() for p in keepers))
+
+    def test_a_symlinked_directory_is_not_followed(self):
+        # rmtree on a symlinked scratch dir would delete its target's
+        # contents, which is not a directory this sweep ever chose.
+        target = self.tmp / "elsewhere"
+        (target / "keep").mkdir(parents=True)
+        os.symlink(str(target), str(self.scratch / "modelctl-lane-link"))
+        self.sweep()
+        self.assertTrue((target / "keep").exists())
+
+    def test_every_ci_naming_convention_is_collected(self):
+        made = [self.make_scratch(self.scratch, "modelctl-lane-gone"),
+                self.make_scratch(self.ci_scratch, "ci-build-cpu-lane-gone"),
+                self.make_scratch(self.ci_scratch, "ci-build-san-lane-gone"),
+                self.make_scratch(self.ci_scratch,
+                                  "ci-console-dist-lane-gone")]
+        removed = self.sweep()
+        self.assertEqual(len(removed), len(made))
+        self.assertFalse(any(p.exists() for p in made))
+
+    def test_a_missing_search_directory_is_not_an_error(self):
+        shutil.rmtree(self.ci_scratch)
+        self.assertEqual(self.sweep(), [])
+
+
 class TestSessionDetection(LaneCase):
     def test_only_processes_inside_the_lane_count(self):
         self.fake_session(11, self.tmp / "elsewhere")
@@ -788,6 +1043,56 @@ class TestLaneCli(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 modelctl._cmd_lane_cli(self.parse("land", "alpha"))
         self.assertEqual(cm.exception.code, 0)
+
+    def test_a_land_reports_the_scratch_it_reclaimed(self):
+        import modelctl
+        report = {"slug": "alpha", "landed": True, "journal": None,
+                  "rebase": "no-op", "checks": "not run", "checks_log": None,
+                  "master_before": "a" * 40, "master_after": "b" * 40,
+                  "ports_freed": [9500, 9509],
+                  "scratch_removed": [{"path": "/s/modelctl-lane-alpha",
+                                       "slug": "alpha", "bytes": 850_000_000}],
+                  "scratch_bytes": 850_000_000}
+        buf = io.StringIO()
+        with mock.patch.object(lanes, "land", return_value=report), \
+             contextlib.redirect_stdout(buf):
+            modelctl.cmd_lane(self.parse("land", "alpha"))
+        self.assertIn("/s/modelctl-lane-alpha", buf.getvalue())
+
+    def test_sweep_orphans_names_each_directory_it_removed(self):
+        import modelctl
+        removed = [{"path": "/tmp/modelctl-lane-gone", "slug": "gone",
+                    "bytes": 842_000_000}]
+        buf = io.StringIO()
+        with mock.patch.object(lanes, "lane_list", return_value=[]), \
+             mock.patch.object(lanes, "sweep_scratch_orphans",
+                               return_value=removed) as sweep, \
+             contextlib.redirect_stdout(buf):
+            rc = modelctl.cmd_lane(self.parse("sweep", "--orphans"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(sweep.call_args.kwargs["keep"], [])
+        out = buf.getvalue()
+        self.assertIn("/tmp/modelctl-lane-gone", out)
+        self.assertIn("gone", out)
+
+    def test_sweep_without_orphans_deletes_no_scratch(self):
+        # `sweep` on its own still only reports: the flag is the consent.
+        import modelctl
+        with mock.patch.object(lanes, "lane_list", return_value=[]), \
+             mock.patch.object(lanes, "sweep_scratch_orphans") as sweep, \
+             contextlib.redirect_stdout(io.StringIO()):
+            modelctl.cmd_lane(self.parse("sweep"))
+        sweep.assert_not_called()
+
+    def test_keep_reaches_the_sweep(self):
+        import modelctl
+        with mock.patch.object(lanes, "lane_list", return_value=[]), \
+             mock.patch.object(lanes, "sweep_scratch_orphans",
+                               return_value=[]) as sweep, \
+             contextlib.redirect_stdout(io.StringIO()):
+            modelctl.cmd_lane(self.parse("sweep", "--orphans",
+                                         "--keep", "console-fleet"))
+        self.assertEqual(sweep.call_args.kwargs["keep"], ["console-fleet"])
 
     def test_gpu_lock_passes_the_command_after_the_separator(self):
         import modelctl

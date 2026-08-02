@@ -26,6 +26,7 @@ from unittest import mock
 
 import modelctl
 import modelctl_display
+import modelctl_nightlane as nl
 import modelctl_tiers
 
 
@@ -638,8 +639,8 @@ class TestHeadlessCLI(StatePathMixin, unittest.TestCase):
     def test_verify_is_detached_via_systemd_run_user(self):
         # A foreground verify would be killed by its own first isolate.
         with mock.patch.object(modelctl_display, "_run", ready()), \
-             mock.patch("modelctl_nightlane.window_state",
-                        return_value=mock.Mock(open=True, reasons=())):
+             mock.patch("modelctl_nightlane.observe",
+                        return_value=nl.Conditions(loadavg_1m=0.2)):
             spawned = self.allow_spawn()
             rc = modelctl.cmd_headless(self.args("verify"))
         self.assertEqual(rc, 0)
@@ -647,14 +648,35 @@ class TestHeadlessCLI(StatePathMixin, unittest.TestCase):
         self.assertEqual(argv[:2], ["systemd-run", "--user"])
         self.assertIn("--run", argv)
 
-    def test_verify_refuses_when_the_lane_window_is_shut(self):
+    def test_verify_refuses_beside_a_resident_model(self):
+        # This command drops the desktop to weigh the VRAM that comes
+        # back, and a reading taken beside a live model is a reading of
+        # both. It owns this gate itself: the night lane's version of it
+        # was removed on 2026-08-02, because a benchmark that refuses to
+        # run answers nothing.
         with mock.patch.object(modelctl_display, "_run", ready()), \
-             mock.patch("modelctl_nightlane.window_state",
-                        return_value=mock.Mock(
-                            open=False, reasons=("llama-swap is holding m1",))):
+             mock.patch("modelctl_nightlane.observe",
+                        return_value=nl.Conditions(
+                            loadavg_1m=0.2, llama_swap_running=("m1",))):
             rc = modelctl.cmd_headless(self.args("verify"))
         self.assertEqual(rc, 1)
         self.spawned.assert_not_called()
+
+    def test_verify_refuses_when_the_load_is_high_or_unreadable(self):
+        for conditions in (nl.Conditions(loadavg_1m=8.99),
+                           nl.Conditions(loadavg_1m=None,
+                                         unreadable=("loadavg: x",))):
+            with mock.patch.object(modelctl_display, "_run", ready()), \
+                 mock.patch("modelctl_nightlane.observe",
+                            return_value=conditions):
+                self.assertEqual(modelctl.cmd_headless(self.args("verify")), 1)
+        self.spawned.assert_not_called()
+
+    def test_an_unreachable_swap_is_not_an_idle_one(self):
+        blockers = modelctl._headless_verify_blockers(
+            nl.Conditions(loadavg_1m=0.2,
+                          unreadable=("llama-swap: OSError: refused",)))
+        self.assertTrue(any("cannot be shown idle" in b for b in blockers))
 
     def test_status_reports_both_modes_and_readiness(self):
         modelctl_display.write_state("headless", now=1000.0)

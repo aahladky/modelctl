@@ -31,6 +31,21 @@ section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 VENV="$REPO/modelctl/.venv/bin/python"
 [ -x "$VENV" ] || VENV=python3
 
+# Where this script builds and logs. On the pool, not in /tmp: /tmp here
+# is tmpfs, so every build tree CI left behind was RAM the inference
+# stack could not use -- 3.4 GB of it by 2026-08-02, because lane
+# teardown never deleted them either. ccache is warm and path-independent
+# (below), so the cost of building on disk instead of in RAM is small and
+# was measured before the move. MODELCTL_CI_SCRATCH_ROOT puts it back on
+# tmpfs for anyone who wants that; modelctl_lanes reads the same variable,
+# so one export moves every build tree the project makes.
+CI_SCRATCH_ROOT="${MODELCTL_CI_SCRATCH_ROOT:-$HOME/.cache/modelctl/ci}"
+mkdir -p "$CI_SCRATCH_ROOT" || {
+    printf 'cannot create the CI scratch root %s\n' "$CI_SCRATCH_ROOT" >&2
+    exit 2
+}
+LOGS="$CI_SCRATCH_ROOT"
+
 # ccache, made path-independent. Without this, the same commit built from
 # a lane worktree (/home/aaron/workspace/.lanes/<slug>) misses on every
 # object the main checkout already compiled, because ccache hashes the
@@ -87,10 +102,10 @@ fi
 
 # --- 2. static import / compile --------------------------------------
 section "static checks"
-if "$VENV" -m compileall -q "$REPO/modelctl" > /tmp/ci-compileall.log 2>&1; then
+if "$VENV" -m compileall -q "$REPO/modelctl" > "$LOGS/ci-compileall.log" 2>&1; then
     pass "compileall"
 else
-    fail "compileall -- see /tmp/ci-compileall.log"
+    fail "compileall -- see $LOGS/ci-compileall.log"
 fi
 
 if (cd "$REPO/modelctl" && "$VENV" -c "
@@ -105,10 +120,10 @@ for p in sorted(pathlib.Path('.').glob('modelctl*.py')):
         bad.append(f'{p.stem}: {type(e).__name__}: {e}')
 if bad:
     print('\n'.join(bad)); sys.exit(1)
-" > /tmp/ci-imports.log 2>&1); then
+" > "$LOGS/ci-imports.log" 2>&1); then
     pass "every modelctl module imports"
 else
-    fail "import failure -- $(command head -1 /tmp/ci-imports.log)"
+    fail "import failure -- $(command head -1 "$LOGS/ci-imports.log")"
 fi
 
 # --- 3. test suite ----------------------------------------------------
@@ -122,10 +137,10 @@ TESTS_T0=$SECONDS
 # skipped", so the summary grep below matched only the first half and the
 # PASS line silently under-reported the run.
 if (cd "$REPO/modelctl" && "$VENV" -m pytest -n auto -q --color=no . \
-        > /tmp/ci-tests.log 2>&1); then
-    pass "$(grep -oE '[0-9]+ passed(, [0-9]+ skipped)?' /tmp/ci-tests.log | tail -1) in $((SECONDS - TESTS_T0))s wall"
+        > "$LOGS/ci-tests.log" 2>&1); then
+    pass "$(grep -oE '[0-9]+ passed(, [0-9]+ skipped)?' "$LOGS/ci-tests.log" | tail -1) in $((SECONDS - TESTS_T0))s wall"
 else
-    fail "tests -- $(grep -oE '[0-9]+ (failed|error)[a-z]*' /tmp/ci-tests.log | tail -1 || echo 'failure'), see /tmp/ci-tests.log"
+    fail "tests -- $(grep -oE '[0-9]+ (failed|error)[a-z]*' "$LOGS/ci-tests.log" | tail -1 || echo 'failure'), see $LOGS/ci-tests.log"
 fi
 
 # --- 3b. console offline build ----------------------------------------
@@ -136,14 +151,14 @@ fi
 # design -- content hashes move with every source edit).
 section "console offline build"
 CONSOLE="$REPO/modelctl/console"
-CONSOLE_OUT="${MODELCTL_CI_CONSOLE_DIR:-/tmp/ci-console-dist}"
+CONSOLE_OUT="${MODELCTL_CI_CONSOLE_DIR:-$CI_SCRATCH_ROOT/ci-console-dist}"
 if ! command -v node >/dev/null; then
     fail "node not found (the console toolchain needs only node itself)"
 elif (cd "$CONSOLE" && npm run --offline build -- --outDir "$CONSOLE_OUT" \
-        --emptyOutDir > /tmp/ci-console.log 2>&1); then
+        --emptyOutDir > "$LOGS/ci-console.log" 2>&1); then
     pass "console builds offline from the vendored tree"
 else
-    fail "console build -- see /tmp/ci-console.log"
+    fail "console build -- see $LOGS/ci-console.log"
 fi
 
 # --- 4. CPU-only build and capability truthfulness --------------------
@@ -157,16 +172,16 @@ if [ "$QUICK" = "1" ]; then
 else
     # Overridable so worktrees and parallel runs don't fight over one
     # cmake cache configured against a different source path.
-    BUILD="${MODELCTL_CI_BUILD_DIR:-/tmp/ci-build-cpu}"
+    BUILD="${MODELCTL_CI_BUILD_DIR:-$CI_SCRATCH_ROOT/ci-build-cpu}"
     # From $REPO: CCACHE_BASEDIR rewrites to paths relative to the cwd,
     # so the cwd has to be the checkout root for a lane's entries and the
     # main checkout's to match.
     if (cd "$REPO" && cmake -B "$BUILD" -S "$REPO/llama.cpp" -DGGML_SYCL=OFF \
             -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_TESTS=ON \
             -DLLAMA_BUILD_EXAMPLES=OFF -DCMAKE_BUILD_TYPE=Release \
-            > /tmp/ci-cmake.log 2>&1 \
+            > "$LOGS/ci-cmake.log" 2>&1 \
        && cmake --build "$BUILD" --target llama-server test-moe-cache \
-            test-moe-hybrid -j"$(nproc)" > /tmp/ci-build.log 2>&1); then
+            test-moe-hybrid -j"$(nproc)" > "$LOGS/ci-build.log" 2>&1); then
         pass "CPU-only build"
 
         if "$BUILD/bin/test-moe-cache" > /dev/null 2>&1; then
@@ -193,7 +208,7 @@ print(','.join(k for k, v in f.items() if v) or 'none')
             fail "CPU-only build claims: $LIARS"
         fi
     else
-        fail "CPU-only build -- see /tmp/ci-build.log"
+        fail "CPU-only build -- see $LOGS/ci-build.log"
     fi
 fi
 
@@ -206,7 +221,7 @@ section "sanitizer pass (ASan/UBSan, host-only tests)"
 if [ "$QUICK" = "1" ]; then
     printf '  \033[33mSKIP\033[0m  sanitizers (--quick)\n'
 else
-    SBUILD="${MODELCTL_CI_SAN_BUILD_DIR:-/tmp/ci-build-san}"
+    SBUILD="${MODELCTL_CI_SAN_BUILD_DIR:-$CI_SCRATCH_ROOT/ci-build-san}"
     # -fno-sanitize=function: upstream ggml's type-traits table stores
     # dequantizers cast to a generic signature; every indirect call
     # through it trips clang's function-type check. That UB is upstream's
@@ -220,11 +235,11 @@ else
         c="${pair%%:*}"; cxx="${pair##*:}"
         if command -v "$c" >/dev/null && command -v "$cxx" >/dev/null \
            && echo 'int main(){return 0;}' | "$c" $SANFLAGS -x c - \
-                -o /tmp/ci-santest 2>/dev/null; then
+                -o "$LOGS/ci-santest" 2>/dev/null; then
             SAN_CC="$c"; SAN_CXX="$cxx"; break
         fi
     done
-    rm -f /tmp/ci-santest
+    rm -f "$LOGS/ci-santest"
     if [ -z "$SAN_CC" ]; then
         printf '  \033[33mSKIP\033[0m  no toolchain with a working sanitizer runtime (dnf install libasan libubsan, or install clang)\n'
     elif (cd "$REPO" && cmake -B "$SBUILD" -S "$REPO/llama.cpp" -DGGML_SYCL=OFF \
@@ -232,9 +247,9 @@ else
             -DLLAMA_BUILD_EXAMPLES=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_C_COMPILER="$SAN_CC" -DCMAKE_CXX_COMPILER="$SAN_CXX" \
             -DCMAKE_C_FLAGS="$SANFLAGS" -DCMAKE_CXX_FLAGS="$SANFLAGS" \
-            > /tmp/ci-cmake-san.log 2>&1 \
+            > "$LOGS/ci-cmake-san.log" 2>&1 \
        && cmake --build "$SBUILD" --target test-moe-cache test-moe-hybrid \
-            -j"$(nproc)" > /tmp/ci-build-san.log 2>&1); then
+            -j"$(nproc)" > "$LOGS/ci-build-san.log" 2>&1); then
         if "$SBUILD/bin/test-moe-cache" > /dev/null 2>&1; then
             pass "test-moe-cache under ASan/UBSan"
         else fail "test-moe-cache under ASan/UBSan"; fi
@@ -242,7 +257,7 @@ else
             pass "test-moe-hybrid under ASan/UBSan"
         else fail "test-moe-hybrid under ASan/UBSan"; fi
     else
-        fail "sanitizer build -- see /tmp/ci-build-san.log"
+        fail "sanitizer build -- see $LOGS/ci-build-san.log"
     fi
 fi
 

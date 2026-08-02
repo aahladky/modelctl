@@ -145,7 +145,9 @@ modelctl headless verify
 
 Aaron triggers this; it is not something a work session runs. It refuses
 unless the root setup is complete, and refuses unless the night lane's
-window is open (llama-swap holding nothing, load below the ceiling) —
+machine is quiet (llama-swap holding nothing, load below this command's
+own 1.5 ceiling; the night lane's version of this gate was removed on
+2026-08-02, and `headless verify` now owns the only one left) —
 `--force` overrides the second, never the first.
 
 It runs **detached**, in a transient `systemd-run --user` unit, because

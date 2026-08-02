@@ -9,6 +9,7 @@ as the session that owns it; landing it is a fast-forward of `master`.
     modelctl lane land <slug>       # rebase, re-check if needed, fast-forward, delete
     modelctl lane list              # age, sessions, unlanded commits, flags
     modelctl lane sweep             # the same, and delete only what is named
+    modelctl lane sweep --orphans   # delete build scratch whose lane is gone
     modelctl lane env <slug>        # the lane's shell environment
     modelctl lane gpu-lock -- <cmd> # run <cmd> holding the machine's GPU lock
 
@@ -101,6 +102,18 @@ and refuses even then if the lane has unlanded commits or a live
 session; `--force` overrides. A sweep that deleted stale lanes on its
 own would be the thing that forgets somebody's work.
 
+`sweep --orphans` is the one thing it does delete without being handed a
+name, and it is not lanes: it is **build scratch whose lane no longer
+exists**. Nothing here is anybody's work — a cmake output tree is
+reproducible by definition — and until 2026-08-02 nothing ever deleted
+it, so four dead lanes were holding 3.4 GB of tmpfs. Each directory is
+named as it goes, with its size. `--keep <slug>` spares one the ledger
+cannot see (a session that exported `MODELCTL_CI_*_DIR` by hand and
+never took a ledger entry looks exactly like an orphan while it is still
+compiling).
+
+The night lane's cleanup pass runs this same sweep before every job.
+
 ## Ports
 
 Each lane gets a block of ten from a ledger, so two scratch consoles
@@ -155,7 +168,7 @@ defaults, and the only thing made path-independent is the path.
 | --- | --- |
 | `MODELCTL_LANE`, `MODELCTL_LANE_PORT_BASE` | which lane this shell is in |
 | `MODELCTL_WEB_BIND` | `127.0.0.1:<port base>` — the lane's console port |
-| `MODELCTL_CI_BUILD_DIR`, `MODELCTL_CI_SAN_BUILD_DIR`, `MODELCTL_CI_CONSOLE_DIR` | per-lane build scratch under `/tmp/modelctl-lane-<slug>/`, so two lanes running `ci/checks.sh` do not share one cmake cache configured against a different source path |
+| `MODELCTL_CI_BUILD_DIR`, `MODELCTL_CI_SAN_BUILD_DIR`, `MODELCTL_CI_CONSOLE_DIR` | per-lane build scratch under `~/.cache/modelctl/ci/modelctl-lane-<slug>/`, so two lanes running `ci/checks.sh` do not share one cmake cache configured against a different source path |
 | `CCACHE_DIR`, `CCACHE_BASEDIR`, `CCACHE_NOHASHDIR` | shared, path-independent ccache |
 
 Note what it does **not** set: `MODELCTL_HOME` still points at the real
@@ -171,7 +184,7 @@ have — `MODELCTL_WEB_SCRATCH=1` plus the five redirections.
 | Ledger | `~/.local/share/modelctl/lanes.json` (`MODELCTL_LANES_LEDGER`) |
 | Land lock | `~/.local/share/modelctl/lanes-land.lock` (`MODELCTL_LANES_LAND_LOCK`) |
 | GPU lock | `~/.local/share/modelctl/gpu.lock` (`MODELCTL_GPU_LOCK`) |
-| Build scratch | `/tmp/modelctl-lane-<slug>/` (`MODELCTL_LANES_SCRATCH`) |
+| Build scratch | `~/.cache/modelctl/ci/modelctl-lane-<slug>/` (`MODELCTL_LANES_SCRATCH`, else `MODELCTL_CI_SCRATCH_ROOT`) |
 
 The ledger and the locks sit under `MODELCTL_HOME` rather than
 `~/.local/state/modelctl`, the same call `modelctl_display` and
@@ -222,7 +235,14 @@ tool cannot check it:
 
 * `land` never stashes and never force-pushes; there is no `--force`
   anywhere in the land path.
-* `sweep` never deletes on its own.
+* `sweep` never deletes a lane on its own. `--orphans` deletes build
+  scratch whose lane is gone, which is not work and cannot be lost.
+* Build scratch is on the pool, not in `/tmp`. `/tmp` here is tmpfs, so
+  a build tree left there is RAM the models cannot use;
+  `MODELCTL_CI_SCRATCH_ROOT` puts it back on tmpfs for anyone who wants
+  that, and `ci/checks.sh` reads the same variable.
+* Both exits from a lane — `land` and `sweep --delete` — delete its
+  build scratch and say how much they freed.
 * A lane is not created inside the repository, and the ledger is not
   version-controlled: nothing about lane machinery ever appears in `git
   status` in the main checkout.

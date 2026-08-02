@@ -6,9 +6,15 @@ The registry half is a discipline, not an algorithm: the value is that a
 criterion was written before any numbers existed and that nothing runs by
 accident. Those tests are about the shipped file's content.
 
-The lane half is a gate. Its tests are about refusal -- what it declines
-to dispatch, and whether it fails closed when it cannot see the machine.
-A gate that only gets tested on the path where it opens is not a gate.
+The lane half used to be a gate, and its tests were about refusal. They
+are now about the opposite, because the refusals were the defect: a
+benchmark that does not run answers nothing, and a loadavg ceiling on a
+rig that runs lanes all day is a permanent veto. What is worth breaking
+on now is that a job RUNS -- under a load above the old ceiling, under a
+loadavg that cannot be read at all, beside a resident model -- and that
+what the machine looked like is in the record either way. The one thing
+that still makes a job wait is the GPU lock, because two benchmarks on
+one GPU is garbage rather than noise.
 """
 import json
 import os
@@ -21,21 +27,34 @@ from unittest import mock
 
 import modelctl_nightlane as nl
 
-_GPU_LOCK_TMP = None
+_TMP = None
+
+NO_CLEANUP = dict   # a cleanup pass that does nothing, for tests about
+                    # something else
 
 
 def setUpModule():
-    """Every run_job() here takes the real GPU lock unless one is
-    injected. Redirect it: a single-file run of this test must not flock
-    the path the live night lane and `modelctl lane gpu-lock` use."""
-    global _GPU_LOCK_TMP
-    _GPU_LOCK_TMP = tempfile.mkdtemp(prefix="nightlane-gpu-lock-")
-    os.environ["MODELCTL_GPU_LOCK"] = str(Path(_GPU_LOCK_TMP) / "gpu.lock")
+    """Redirections a single-file run needs, none of which the suite-wide
+    bootstrap can be relied on for (this file runs on its own too).
+
+    The GPU lock: every run_job() here takes the real one unless a lock
+    is injected, and it must not flock the path the live night lane and
+    `modelctl lane gpu-lock` use.
+
+    The scratch root: cleanup_pass() DELETES orphaned lane scratch, and
+    unredirected that is the machine's real build trees. Setting it also
+    takes /tmp out of the sweep's search path.
+    """
+    global _TMP
+    _TMP = tempfile.mkdtemp(prefix="nightlane-")
+    os.environ["MODELCTL_GPU_LOCK"] = str(Path(_TMP) / "gpu.lock")
+    os.environ["MODELCTL_CI_SCRATCH_ROOT"] = str(Path(_TMP) / "ci-scratch")
 
 
 def tearDownModule():
     os.environ.pop("MODELCTL_GPU_LOCK", None)
-    shutil.rmtree(_GPU_LOCK_TMP, ignore_errors=True)
+    os.environ.pop("MODELCTL_CI_SCRATCH_ROOT", None)
+    shutil.rmtree(_TMP, ignore_errors=True)
 
 RPC_PAIRS = ["ornith-rpc-criterion-2026-08-02",
              "qwen122b-remote-experts-hypothesis-2026-08-02"]
@@ -231,49 +250,257 @@ class _Swap:
 
 
 class _Load:
-    def __init__(self, loadavg_1m):
+    def __init__(self, loadavg_1m, mem_available_bytes=8 * 2**30):
         self.loadavg_1m = loadavg_1m
+        self.loadavg_5m = loadavg_1m
+        self.mem_available_bytes = mem_available_bytes
 
 
-class TestWindow(unittest.TestCase):
-    def test_idle_swap_and_low_load_opens_the_window(self):
-        state = nl.window_state(_Swap(), _Load(0.4))
-        self.assertTrue(state.open, state.reasons)
-        self.assertEqual(state.reasons, ())
-        self.assertEqual(state.observed["loadavg_1m"], 0.4)
+class TestConditions(unittest.TestCase):
+    """`observe` takes the readings the window took, and judges none.
 
-    def test_a_resident_model_shuts_the_window(self):
-        # A benchmark taken beside a live model measures the two of them.
-        state = nl.window_state(_Swap(["laguna-s2.1"]), _Load(0.1))
-        self.assertFalse(state.open)
-        self.assertTrue(any("laguna-s2.1" in r for r in state.reasons))
-        self.assertEqual(state.observed["llama_swap_running"], ["laguna-s2.1"])
+    There is deliberately no `open`, no `reasons` and no ceiling to
+    assert against: the type has no way to express a refusal, which is
+    the point. A reading that cannot be taken says so and stays None --
+    never a substituted zero, which would make the worst machine look
+    like the quietest.
+    """
 
-    def test_load_above_the_ceiling_shuts_the_window(self):
-        state = nl.window_state(_Swap(), _Load(8.99))
-        self.assertFalse(state.open)
-        self.assertTrue(any("8.99" in r for r in state.reasons))
+    def test_it_records_every_reading(self):
+        cond = nl.observe(_Swap(["laguna-s2.1"]), _Load(8.99), clock=lambda: 7)
+        self.assertEqual(cond.loadavg_1m, 8.99)
+        self.assertEqual(cond.llama_swap_running, ("laguna-s2.1",))
+        self.assertEqual(cond.mem_available_bytes, 8 * 2**30)
+        self.assertEqual(cond.at, 7)
+        self.assertEqual(cond.unreadable, ())
 
-    def test_the_ceiling_is_inclusive_at_its_own_value(self):
-        self.assertTrue(nl.window_state(
-            _Swap(), _Load(nl.DEFAULT_LOADAVG_CEILING)).open)
+    def test_it_has_no_verdict_to_give(self):
+        cond = nl.observe(_Swap(["ornith-397b"]), _Load(12.0))
+        for name in ("open", "reasons", "loadavg_ceiling"):
+            self.assertFalse(hasattr(cond, name), name)
 
-    def test_an_unreachable_swap_fails_closed(self):
-        # Not idle -- unknown. It could be mid-restart with a model about
-        # to land, and the run would be contaminated from its first token.
-        state = nl.window_state(_Swap(raises=OSError("refused")), _Load(0.1))
-        self.assertFalse(state.open)
-        self.assertTrue(any("could not be reached" in r for r in state.reasons))
-        self.assertIn("llama_swap_error", state.observed)
+    def test_an_unreadable_loadavg_is_recorded_as_unreadable(self):
+        cond = nl.observe(_Swap(), _Load(None))
+        self.assertIsNone(cond.loadavg_1m)
+        self.assertTrue(any("loadavg" in u for u in cond.unreadable))
+        self.assertNotIn(0.0, cond.to_dict().values())
 
-    def test_an_unreadable_loadavg_fails_closed(self):
-        state = nl.window_state(_Swap(), _Load(None))
-        self.assertFalse(state.open)
-        self.assertTrue(any("could not be read" in r for r in state.reasons))
+    def test_an_unreachable_swap_is_recorded_not_assumed(self):
+        cond = nl.observe(_Swap(raises=OSError("refused")), _Load(0.1))
+        self.assertEqual(cond.llama_swap_running, ())
+        self.assertTrue(any("llama-swap" in u for u in cond.unreadable))
 
-    def test_both_halves_are_reported_not_just_the_first(self):
-        state = nl.window_state(_Swap(["ornith-397b"]), _Load(12.0))
-        self.assertEqual(len(state.reasons), 2, state.reasons)
+    def test_it_serialises_for_the_evidence_file(self):
+        payload = nl.observe(_Swap(["m"]), _Load(0.5)).to_dict()
+        self.assertEqual(json.loads(json.dumps(payload))["llama_swap_running"],
+                         ["m"])
+
+
+class _FakeProc:
+    """A /proc tree: pid -> (comm, ppid, starttime, cgroup)."""
+
+    APP = "0::/user.slice/user-1000.slice/user@1000.service/app.slice"
+    SERVICE = APP + "/llama-swap.service"
+
+    def __init__(self, root, procs):
+        self.root = Path(root)
+        for pid, (comm, ppid, starttime, cgroup) in procs.items():
+            d = self.root / str(pid)
+            d.mkdir(parents=True, exist_ok=True)
+            # /proc/<pid>/stat, positionally: pid (comm) state ppid ...
+            # with starttime at field 22. The state is written out here,
+            # so this list starts at ppid.
+            fields = ["0"] * 50
+            fields[0] = str(ppid)
+            fields[18] = str(starttime)
+            (d / "stat").write_text(f"{pid} ({comm}) S " + " ".join(fields))
+            (d / "cgroup").write_text(cgroup)
+
+    def remove(self, pid):
+        shutil.rmtree(self.root / str(pid))
+
+
+class TestReapingOrphanedServers(unittest.TestCase):
+    """The cleanup pass kills llama-servers nobody owns, and nothing else.
+
+    This runs at 03:00 with nobody watching. The cost of one false
+    positive is the rig's serving stack, so both conditions are read
+    from /proc rather than assumed, and the identity is re-read
+    immediately before the signal.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="nightlane-proc-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.signals = []
+
+    def killer(self, pid, sig):
+        self.signals.append((pid, sig))
+
+    def procs(self, **kw):
+        return _FakeProc(self.tmp, kw)
+
+    def test_a_reparented_server_is_an_orphan(self):
+        self.procs(**{"41": ("llama-server", 1, 900, _FakeProc.APP)})
+        found = nl.orphaned_servers(self.tmp)
+        self.assertEqual([p["pid"] for p in found], [41])
+
+    def test_a_server_with_a_living_launcher_is_not_touched(self):
+        # llama-swap holds its servers as children, and so does a lane's
+        # bench: a live parent means somebody is using this.
+        self.procs(**{"3033": ("llama-swap", 1, 100, _FakeProc.SERVICE),
+                      "42": ("llama-server", 3033, 900, _FakeProc.SERVICE)})
+        self.assertEqual(nl.orphaned_servers(self.tmp), [])
+
+    def test_a_systemd_service_is_never_reaped(self):
+        # "ppid is 1" is true of every unit systemd started. That check
+        # alone would let this kill the serving stack.
+        self.procs(**{"7": ("llama-server", 1, 900, _FakeProc.SERVICE)})
+        self.assertEqual(nl.orphaned_servers(self.tmp), [])
+
+    def test_the_leaf_cgroup_decides_not_a_substring(self):
+        # Every user process on this machine sits under
+        # `user@1000.service`. A substring test would spare all of them
+        # and the reaper would never reap anything, while looking like
+        # it worked.
+        self.assertIn("user@1000.service", _FakeProc.APP)
+        self.assertEqual(nl.service_unit(_FakeProc.APP), "")
+        self.assertEqual(nl.service_unit(_FakeProc.SERVICE),
+                         "llama-swap.service")
+        self.assertEqual(nl.service_unit(_FakeProc.APP + "/tab(9).scope"), "")
+
+    def test_other_processes_are_not_candidates(self):
+        self.procs(**{"9": ("python3", 1, 900, _FakeProc.APP),
+                      "10": ("llama-swap", 1, 900, _FakeProc.APP)})
+        self.assertEqual(nl.orphaned_servers(self.tmp), [])
+
+    def test_an_orphan_gets_sigterm_first(self):
+        procs = self.procs(**{"41": ("llama-server", 1, 900, _FakeProc.APP)})
+        sleeps = []
+
+        def sleep(_s):
+            sleeps.append(_s)
+            procs.remove(41)          # it went away, as a live one would
+
+        reaped = nl.reap_orphaned_servers(self.tmp, killer=self.killer,
+                                          sleep=sleep)
+        self.assertEqual(self.signals, [(41, 15)])
+        self.assertEqual(reaped[0]["outcome"], "SIGTERM")
+        self.assertEqual(reaped[0]["pid"], 41)
+
+    def test_one_that_will_not_go_is_killed(self):
+        self.procs(**{"41": ("llama-server", 1, 900, _FakeProc.APP)})
+        clock = iter([0.0, 0.0, 99.0]).__next__
+        reaped = nl.reap_orphaned_servers(self.tmp, killer=self.killer,
+                                          wait=1.0, clock=clock,
+                                          sleep=lambda _s: None)
+        self.assertEqual(self.signals, [(41, 15), (41, 9)])
+        self.assertIn("SIGKILL", reaped[0]["outcome"])
+
+    def test_a_recycled_pid_is_not_signalled(self):
+        # Between listing and signalling, this pid became something
+        # else. Every signal is preceded by re-reading the identity the
+        # decision was made from.
+        procs = self.procs(**{"41": ("llama-server", 1, 900, _FakeProc.APP)})
+        real = nl.orphaned_servers
+
+        def relist(proc_root, **kw):
+            found = real(proc_root, **kw)
+            procs.remove(41)
+            _FakeProc(self.tmp, {"41": ("some-other-thing", 1, 5000,
+                                        _FakeProc.APP)})
+            return found
+
+        with mock.patch.object(nl, "orphaned_servers", relist):
+            reaped = nl.reap_orphaned_servers(self.tmp, killer=self.killer)
+        self.assertEqual(self.signals, [])
+        self.assertEqual(reaped, [])
+
+    def test_a_process_that_exits_between_listing_and_signalling(self):
+        procs = self.procs(**{"41": ("llama-server", 1, 900, _FakeProc.APP)})
+        real = nl.orphaned_servers
+
+        def relist(proc_root, **kw):
+            found = real(proc_root, **kw)
+            procs.remove(41)
+            return found
+
+        with mock.patch.object(nl, "orphaned_servers", relist):
+            self.assertEqual(nl.reap_orphaned_servers(self.tmp,
+                                                      killer=self.killer), [])
+
+    def test_an_unreadable_proc_is_not_a_crash(self):
+        self.assertEqual(nl.orphaned_servers(self.tmp + "/nowhere"), [])
+
+
+class TestCleanupPass(unittest.TestCase):
+    """Make room, record both sides, and never refuse.
+
+    This is what stands where the loadavg ceiling used to. The ceiling
+    read a busy machine and skipped the job; this makes the machine less
+    busy and measures anyway.
+    """
+
+    def pass_with(self, before=1.0, after=3.0, **kw):
+        loads = iter([_Load(0.5, int(before * 2**30)),
+                      _Load(0.5, int(after * 2**30))])
+        kw.setdefault("sweep", lambda: [])
+        kw.setdefault("reap", lambda: [])
+        return nl.cleanup_pass(
+            observer=lambda: nl.observe(_Swap(), next(loads)), **kw)
+
+    def test_it_records_memavailable_and_load_either_side(self):
+        result = self.pass_with(before=1.0, after=3.0)
+        self.assertEqual(result["before"]["mem_available_bytes"], 2**30)
+        self.assertEqual(result["after"]["mem_available_bytes"], 3 * 2**30)
+        self.assertEqual(result["mem_available_delta_bytes"], 2 * 2**30)
+        self.assertEqual(result["before"]["loadavg_1m"], 0.5)
+
+    def test_it_names_what_it_freed(self):
+        freed = [{"path": "/s/modelctl-lane-gone", "slug": "gone",
+                  "bytes": 842_000_000}]
+        result = self.pass_with(sweep=lambda: freed,
+                                reap=lambda: [{"pid": 41,
+                                               "outcome": "SIGTERM"}])
+        self.assertEqual(result["scratch_removed"], freed)
+        self.assertEqual(result["scratch_bytes"], 842_000_000)
+        self.assertEqual(result["processes_reaped"][0]["pid"], 41)
+
+    def test_a_failing_sweep_is_recorded_and_the_run_continues(self):
+        # The one thing a cleanup pass must never become is a new
+        # refusal path wearing error handling as a disguise.
+        result = self.pass_with(sweep=_raise(OSError("ledger unreadable")))
+        self.assertEqual(result["scratch_removed"], [])
+        self.assertTrue(any("ledger unreadable" in e
+                            for e in result["errors"]))
+        self.assertIn("after", result)
+
+    def test_a_failing_reap_does_not_stop_the_sweep(self):
+        result = self.pass_with(sweep=lambda: [{"bytes": 5}],
+                                reap=_raise(PermissionError("nope")))
+        self.assertEqual(result["scratch_bytes"], 5)
+        self.assertTrue(any("processes_reaped" in e for e in result["errors"]))
+
+    def test_an_unreadable_meminfo_leaves_the_delta_unknown(self):
+        loads = iter([_Load(0.5, None), _Load(0.5, None)])
+        result = nl.cleanup_pass(
+            observer=lambda: nl.observe(_Swap(), next(loads)),
+            sweep=lambda: [], reap=lambda: [])
+        self.assertIsNone(result["mem_available_delta_bytes"])
+
+    def test_it_never_drops_the_page_cache(self):
+        # Cleanup frees junk. Page-cache state is part of the
+        # measurement -- the ornith night pair treats it as such -- so
+        # nothing in here may reach for drop_caches.
+        source = Path(nl.__file__).read_text()
+        for forbidden in ("drop_caches", "vm.drop_caches", "sync;"):
+            self.assertNotIn(forbidden, source)
+
+
+def _raise(exc):
+    def boom():
+        raise exc
+    return boom
 
 
 class _Manager:
@@ -293,25 +520,35 @@ class TestDispatch(unittest.TestCase):
         return [_job("a"), _job("b"), _job("c"), _job("d"),
                 _job("held", enabled=False)]
 
-    def test_a_shut_window_dispatches_nothing(self):
-        mgr = _Manager()
-        result = nl.dispatch_due(mgr, runner=lambda job, ctx: {},
-                                 jobs=self._jobs(),
-                                 window=nl.WindowState(False, ("busy",)))
-        self.assertEqual(mgr.submitted, [])
-        self.assertEqual(result.submitted, [])
-        # Every runnable job appears as skipped-with-a-reason, so a night
-        # that dispatched nothing can say why rather than looking idle.
-        self.assertEqual({j for j, _ in result.skipped},
-                         {"a", "b", "c", "d", "held"})
-        self.assertTrue(any("window is shut" in r
-                            for _j, rs in result.skipped for r in rs))
+    def quiet(self):
+        return nl.observe(_Swap(), _Load(0.2))
 
-    def test_an_open_window_dispatches_only_the_enabled_jobs(self):
+    def test_a_busy_machine_dispatches_everything_anyway(self):
+        # The regression this exists for: a loadavg ceiling that skipped
+        # the 2026-08-02 night pair on a rig that runs lanes all day.
+        # 8.99 is the mean the void battery ran at -- six times the old
+        # ceiling -- and it dispatches.
+        mgr = _Manager()
+        busy = nl.observe(_Swap(["ornith-397b"]), _Load(8.99))
+        result = nl.dispatch_due(mgr, runner=lambda job, ctx: {},
+                                 jobs=self._jobs(), conditions=busy)
+        self.assertEqual(sorted(j for j, _ in result.submitted),
+                         ["a", "b", "c", "d"])
+        self.assertEqual([j for j, _ in result.skipped], ["held"])
+
+    def test_an_unreadable_loadavg_dispatches_too(self):
+        # It was skipped for this: "cannot be shown low". An unread
+        # /proc is a fact about /proc.
+        mgr = _Manager()
+        blind = nl.observe(_Swap(raises=OSError("refused")), _Load(None))
+        result = nl.dispatch_due(mgr, runner=lambda job, ctx: {},
+                                 jobs=self._jobs(), conditions=blind)
+        self.assertEqual(len(result.submitted), 4)
+
+    def test_only_the_enabled_jobs_are_dispatched(self):
         mgr = _Manager()
         result = nl.dispatch_due(mgr, runner=lambda job, ctx: {},
-                                 jobs=self._jobs(),
-                                 window=nl.WindowState(True))
+                                 jobs=self._jobs(), conditions=self.quiet())
         self.assertEqual(sorted(j for j, _ in result.submitted),
                          ["a", "b", "c", "d"])
         self.assertEqual([j for j, _ in result.skipped], ["held"])
@@ -320,25 +557,39 @@ class TestDispatch(unittest.TestCase):
         mgr = _Manager()
         result = nl.dispatch_due(mgr, runner=lambda job, ctx: {},
                                  jobs=nl.load_jobs(),
-                                 window=nl.WindowState(True))
+                                 conditions=self.quiet())
         self.assertEqual(result.submitted, [])
         self.assertEqual(sorted(j for j, _ in result.skipped),
                          sorted(RPC_PAIRS + MAIDEN))
+
+    def test_a_job_needing_an_unreachable_node_is_still_blocked(self):
+        # Not a condition of the machine: the local-fallback plan is
+        # byte-identical to a fleet-free launch, so running it would
+        # answer a different question with a perfectly valid number.
+        mgr = _Manager()
+        job = _job("remote", arms=(nl.Arm(name="a", profile="p",
+                                          requires_nodes=("ph16-71-cuda0",)),))
+        result = nl.dispatch_due(mgr, runner=lambda job, ctx: {}, jobs=[job],
+                                 conditions=self.quiet())
+        self.assertEqual(result.submitted, [])
+        self.assertTrue(any("ph16-71-cuda0" in r
+                            for _j, rs in result.skipped for r in rs))
 
     def test_dispatch_uses_the_benchmark_lane(self):
         # One worker, so two night jobs can never share the GPUs -- and
         # the console's jobs page renders that lane already.
         mgr = _Manager()
         nl.dispatch_due(mgr, runner=lambda job, ctx: {}, jobs=self._jobs(),
-                        window=nl.WindowState(True))
+                        conditions=self.quiet())
         self.assertEqual({s["lane"] for s in mgr.submitted}, {nl.LANE})
 
-    def test_the_payload_carries_the_window_it_was_dispatched_under(self):
+    def test_the_payload_carries_the_conditions_it_was_dispatched_under(self):
         mgr = _Manager()
         nl.dispatch_due(mgr, runner=lambda job, ctx: {}, jobs=self._jobs(),
-                        window=nl.WindowState(True, (), {"loadavg_1m": 0.3}))
+                        conditions=nl.observe(_Swap(["m"]), _Load(0.3)))
         payload = mgr.submitted[0]["payload"]
-        self.assertEqual(payload["window"]["observed"]["loadavg_1m"], 0.3)
+        self.assertEqual(payload["conditions"]["loadavg_1m"], 0.3)
+        self.assertEqual(payload["conditions"]["llama_swap_running"], ["m"])
         self.assertEqual(payload["night_lane_job"], "a")
 
     def test_each_submission_closes_over_its_own_job(self):
@@ -348,7 +599,7 @@ class TestDispatch(unittest.TestCase):
         mgr = _Manager()
         seen = []
         nl.dispatch_due(mgr, runner=lambda job, ctx: seen.append(job.id),
-                        jobs=self._jobs(), window=nl.WindowState(True))
+                        jobs=self._jobs(), conditions=self.quiet())
         for submission in mgr.submitted:
             submission["fn"](object())
         self.assertEqual(sorted(seen), ["a", "b", "c", "d"])
@@ -357,7 +608,7 @@ class TestDispatch(unittest.TestCase):
         mgr = _Manager()
         result = nl.dispatch_due(mgr, runner=lambda job, ctx: {},
                                  jobs=self._jobs(),
-                                 window=nl.WindowState(True), limit=1)
+                                 conditions=self.quiet(), limit=1)
         self.assertEqual(len(result.submitted), 1)
         deferred = [r for j, r in result.skipped
                     if any("limit of 1" in x for x in r)]
@@ -507,7 +758,8 @@ class TestTheOffloadFloor(unittest.TestCase):
             measures=("m",), mode="paired", pairs=2,
             arms=(self._arm("1"), nl.Arm(name="b", profile="p")))
         calls = []
-        record = nl.run_job(job, lambda *a: calls.append(a), clock=lambda: 0.0)
+        record = nl.run_job(job, lambda *a: calls.append(a),
+                            clock=lambda: 0.0, cleanup=NO_CLEANUP)
         self.assertEqual(record["status"], "refused")
         self.assertEqual(calls, [])
         self.assertTrue(any("below the 32 floor" in v
@@ -540,33 +792,65 @@ class TestGpuLockIsHeld(unittest.TestCase):
         nl.run_job(self._job(),
                    lambda arm, i, slot: events.append(("measure", arm.name))
                    or {"generation_tps": 5.0},
-                   clock=lambda: 0.0, gpu_lock=FakeLock)
+                   clock=lambda: 0.0, gpu_lock=FakeLock, cleanup=NO_CLEANUP)
 
         self.assertEqual(events[0][0], "acquired")
         self.assertEqual(events[-1][0], "released")
         self.assertIn("night lane", events[0][1])
         self.assertTrue(any(e[0] == "measure" for e in events))
 
+    def test_the_cleanup_pass_happens_inside_the_lock(self):
+        # Inside, so the MemAvailable it records describes the machine
+        # the run actually got, and so two cleanups cannot race.
+        events = []
+
+        class FakeLock:
+            def __init__(self, timeout=None, note=None):
+                pass
+
+            def __enter__(self):
+                events.append("acquired")
+                return self
+
+            def __exit__(self, *exc):
+                events.append("released")
+                return False
+
+        nl.run_job(self._job(), lambda *a: {"generation_tps": 5.0},
+                   clock=lambda: 0.0, gpu_lock=FakeLock,
+                   cleanup=lambda: events.append("cleanup") or {})
+        self.assertEqual(events[:2], ["acquired", "cleanup"])
+        self.assertEqual(events[-1], "released")
+
     def test_it_takes_the_same_lock_modelctl_lane_gpu_lock_takes(self):
         import modelctl_lanes
         with mock.patch.object(modelctl_lanes, "gpu_lock") as fake:
             nl.run_job(self._job(), lambda *a: {"generation_tps": 5.0},
-                       clock=lambda: 0.0)
+                       clock=lambda: 0.0, cleanup=NO_CLEANUP)
         fake.assert_called_once()
         self.assertEqual(fake.call_args.kwargs["timeout"],
                          nl.GPU_LOCK_WAIT_SECONDS)
 
-    def test_a_held_lock_is_a_refusal_and_nothing_is_measured(self):
+    def test_the_lock_is_waited_on_for_hours_not_a_minute(self):
+        # The one remaining form of waiting. It has to outlast any bench
+        # a session might start, or "wait rather than refuse" is a wait
+        # that refuses at 60 seconds.
+        self.assertGreaterEqual(nl.GPU_LOCK_WAIT_SECONDS, 3600)
+
+    def test_a_lock_that_never_frees_is_a_failure_naming_the_holder(self):
+        # Not a skip. A night that measured nothing because somebody
+        # held the GPU lock for six hours is something to wake up to.
         import modelctl_lanes
         calls = []
         with modelctl_lanes.gpu_lock(note="a lane bench"):
             record = nl.run_job(self._job(),
                                 lambda *a: calls.append(a) or {},
-                                clock=lambda: 0.0, gpu_lock_wait=0.2)
-        self.assertEqual(record["status"], "refused")
+                                clock=lambda: 0.0, gpu_lock_wait=0.2,
+                                cleanup=NO_CLEANUP)
+        self.assertEqual(record["status"], "failed")
         self.assertEqual(calls, [])
-        self.assertTrue(any("GPU lock is held" in v
-                            for v in record["violations"]))
+        self.assertIn("a lane bench", record["error"])
+        self.assertIn(str(os.getpid()), record["error"])
 
     def test_a_job_that_cannot_run_refuses_without_taking_the_lock(self):
         job = nl.NightLaneJob(id="x", title="t", question="q", criterion="c",
@@ -574,7 +858,8 @@ class TestGpuLockIsHeld(unittest.TestCase):
                               arms=(nl.Arm(name="only", profile="p"),))
         import modelctl_lanes
         with mock.patch.object(modelctl_lanes, "gpu_lock") as fake:
-            record = nl.run_job(job, lambda *a: {}, clock=lambda: 0.0)
+            record = nl.run_job(job, lambda *a: {}, clock=lambda: 0.0,
+                                cleanup=NO_CLEANUP)
         self.assertEqual(record["status"], "refused")
         fake.assert_not_called()
 
@@ -585,23 +870,40 @@ class TestRunJob(unittest.TestCase):
         values = {"deterministic-on": 6.0, "deterministic-off": 7.0}
         record = nl.run_job(
             job, lambda arm, i, slot: {"generation_tps": values[arm.name]},
-            clock=lambda: 0.0)
+            clock=lambda: 0.0, cleanup=NO_CLEANUP)
         self.assertEqual(record["status"], "recorded")
         self.assertEqual(record["comparison"]["pairs_complete"], 5)
         self.assertEqual(record["comparison"]["per_pair"][0]["delta"], 1.0)
         self.assertEqual(record["comparison"]["sign_test"]["n"], 5)
 
+    def test_the_record_carries_what_the_cleanup_pass_did(self):
+        # The morning's question is "what ran, and on what machine". The
+        # cleanup pass is half that answer and it goes in the evidence.
+        job = nl.job_by_id("sdpa-reproducibility-2026-08-02")
+        record = nl.run_job(
+            job, lambda *a: {"max_abs_dlogprob": 0.0}, clock=lambda: 0.0,
+            cleanup=lambda: {"scratch_bytes": 842_000_000,
+                             "processes_reaped": [{"pid": 41}],
+                             "mem_available_delta_bytes": 900_000_000})
+        self.assertEqual(record["cleanup"]["scratch_bytes"], 842_000_000)
+        self.assertEqual(record["status"], "recorded")
+        with tempfile.TemporaryDirectory() as d:
+            path = nl.file_evidence(job, record, "2026-08-02", directory=d)
+            filed = json.loads(Path(path).read_text())
+        self.assertEqual(filed["record"]["cleanup"]["processes_reaped"],
+                         [{"pid": 41}])
+
     def test_a_paired_job_needs_exactly_two_arms(self):
         job = nl.NightLaneJob(id="x", title="t", question="q", criterion="c",
                               measures=("m",), mode="paired", pairs=2,
                               arms=(nl.Arm(name="only", profile="p"),))
-        self.assertEqual(nl.run_job(job, lambda *a: {},
-                                    clock=lambda: 0.0)["status"], "refused")
+        self.assertEqual(nl.run_job(job, lambda *a: {}, clock=lambda: 0.0,
+                                    cleanup=NO_CLEANUP)["status"], "refused")
 
     def test_a_battery_runs_every_arm_the_declared_number_of_times(self):
         job = nl.job_by_id("re-anchor-c1-c2-c3-2026-08-02")
         record = nl.run_job(job, lambda arm, i, slot: {"generation_tps": 5.0},
-                            clock=lambda: 0.0)
+                            clock=lambda: 0.0, cleanup=NO_CLEANUP)
         self.assertEqual(sorted(record["arms"]),
                          ["C1-static", "C2-cache", "C3-cache-hybrid"])
         for arm in record["arms"].values():
@@ -615,7 +917,8 @@ class TestRunJob(unittest.TestCase):
                 raise RuntimeError("server exited rc=134")
             return {"generation_tps": 5.0}
 
-        record = nl.run_job(job, measure, clock=lambda: 0.0)
+        record = nl.run_job(job, measure, clock=lambda: 0.0,
+                            cleanup=NO_CLEANUP)
         self.assertIn("rc=134", record["arms"]["C2-cache"]["runs"][2]["error"])
         # The arm's other runs, and the other two arms, still happen.
         self.assertEqual(len(record["arms"]["C2-cache"]["runs"]), 5)
@@ -624,7 +927,7 @@ class TestRunJob(unittest.TestCase):
     def test_every_run_carries_its_own_load_trace(self):
         job = nl.job_by_id("re-anchor-c1-c2-c3-2026-08-02")
         record = nl.run_job(job, lambda *a: {"generation_tps": 5.0},
-                            clock=lambda: 0.0)
+                            clock=lambda: 0.0, cleanup=NO_CLEANUP)
         for arm in record["arms"].values():
             for run in arm["runs"]:
                 self.assertIn("samples", run["load"])
@@ -632,13 +935,13 @@ class TestRunJob(unittest.TestCase):
     def test_every_record_carries_the_criterion_it_was_judged_by(self):
         job = nl.job_by_id("sdpa-reproducibility-2026-08-02")
         record = nl.run_job(job, lambda *a: {"max_abs_dlogprob": 0.0},
-                            clock=lambda: 0.0)
+                            clock=lambda: 0.0, cleanup=NO_CLEANUP)
         self.assertEqual(record["criterion"], job.criterion)
 
     def test_the_load_summary_says_it_was_folded_from_per_run_traces(self):
         job = nl.job_by_id("sdpa-reproducibility-2026-08-02")
         record = nl.run_job(job, lambda *a: {"max_abs_dlogprob": 0.0},
-                            clock=lambda: 0.0)
+                            clock=lambda: 0.0, cleanup=NO_CLEANUP)
         self.assertIn("note", record["load_summary"])
 
     def test_cancellation_stops_a_battery_partway(self):
@@ -652,7 +955,8 @@ class TestRunJob(unittest.TestCase):
 
         job = nl.job_by_id("re-anchor-c1-c2-c3-2026-08-02")
         record = nl.run_job(job, lambda *a: {"generation_tps": 1.0},
-                            ctx=Ctx(), clock=lambda: 0.0)
+                            ctx=Ctx(), clock=lambda: 0.0,
+                            cleanup=NO_CLEANUP)
         total = sum(len(a["runs"]) for a in record["arms"].values())
         self.assertLess(total, 15)
         self.assertTrue(record["notes"])

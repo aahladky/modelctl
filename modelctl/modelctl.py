@@ -4405,6 +4405,35 @@ def _headless_write_evidence(log):
     return path
 
 
+# `headless verify` drops the desktop to weigh the VRAM that comes back,
+# and a reading taken beside a resident model is a reading of both. It
+# therefore keeps a quietness gate -- and owns it here, at the one call
+# site that wants one, rather than sharing the night lane's. The night
+# lane's version of this refused benchmarks on a busy machine and was
+# removed on 2026-08-02: conditions there are recorded, not obeyed.
+# --force is the way past this one, and there is no hidden third state.
+HEADLESS_VERIFY_LOADAVG_CEILING = 1.5
+
+
+def _headless_verify_blockers(conditions):
+    """Why `headless verify` will not measure right now. Empty means go."""
+    blockers = []
+    if conditions.llama_swap_running:
+        blockers.append("llama-swap is holding "
+                        + ", ".join(conditions.llama_swap_running))
+    for note in conditions.unreadable:
+        if note.startswith("llama-swap:"):
+            blockers.append(f"llama-swap could not be reached ({note}), so "
+                            f"it cannot be shown idle")
+    load = conditions.loadavg_1m
+    if load is None:
+        blockers.append("loadavg could not be read, so it cannot be shown low")
+    elif load > HEADLESS_VERIFY_LOADAVG_CEILING:
+        blockers.append(f"loadavg(1m) {load:.2f} is above the "
+                        f"{HEADLESS_VERIFY_LOADAVG_CEILING:.2f} ceiling")
+    return blockers
+
+
 def cmd_headless(args):
     """Drop the rig to a text console on demand, and bring it back.
 
@@ -4454,11 +4483,11 @@ def cmd_headless(args):
             return 0 if not log.get("errors") else 1
         if not getattr(args, "force", False):
             import modelctl_nightlane
-            window = modelctl_nightlane.window_state()
-            if not window.open:
+            blockers = _headless_verify_blockers(modelctl_nightlane.observe())
+            if blockers:
                 print("headless verify: the machine is not quiet enough to "
                       "measure on.", file=sys.stderr)
-                for reason in window.reasons:
+                for reason in blockers:
                     print(f"  - {reason}", file=sys.stderr)
                 print("  re-run with --force to measure anyway.",
                       file=sys.stderr)
@@ -4756,6 +4785,17 @@ def _print_lane_row(row):
         print(f"    flags: {'; '.join(row['flags'])}")
 
 
+def _print_scratch_removed(removed):
+    """What teardown reclaimed. Printed because it used to be nothing."""
+    if not removed:
+        return
+    total = sum(entry["bytes"] for entry in removed)
+    print(f"build scratch removed: {len(removed)} director(ies), "
+          f"{_format_size(total)}")
+    for entry in removed:
+        print(f"  {entry['path']}  {_format_size(entry['bytes'])}")
+
+
 def cmd_lane(args):
     """Parallel work lanes.
 
@@ -4796,6 +4836,7 @@ def cmd_lane(args):
             print(f"lane removed, branch deleted, ports "
                   f"{report['ports_freed'][0]}-{report['ports_freed'][1]} "
                   f"freed")
+            _print_scratch_removed(report.get("scratch_removed"))
             return 0
 
         if action in ("list", "sweep"):
@@ -4808,18 +4849,29 @@ def cmd_lane(args):
                 return 0
             flagged = [r for r in rows if r["flags"]]
             print(f"\n{len(flagged)} of {len(rows)} lane(s) flagged.")
-            if not args.delete:
-                print("sweep never deletes on its own: name a lane with "
-                      "--delete to remove it.")
-                return 0
             rc = 0
             for slug in args.delete:
                 try:
-                    lanes.delete(slug, force=args.force)
+                    state = lanes.delete(slug, force=args.force)
                     print(f"deleted {slug}")
+                    _print_scratch_removed(state.get("scratch_removed"))
                 except lanes.LaneError as e:
                     print(f"lane sweep: {e}", file=sys.stderr)
                     rc = 1
+            if args.orphans:
+                removed = lanes.sweep_scratch_orphans(keep=args.keep)
+                print(f"\norphaned scratch: "
+                      f"{len(removed)} director(ies) removed")
+                for entry in removed:
+                    print(f"  {entry['path']}  {_format_size(entry['bytes'])}"
+                          f"  (lane {entry['slug']} no longer exists)")
+                if removed:
+                    print(f"  freed "
+                          f"{_format_size(sum(e['bytes'] for e in removed))}")
+            elif not args.delete:
+                print("sweep never deletes on its own: name a lane with "
+                      "--delete to remove it, or --orphans to collect "
+                      "scratch whose lane is gone.")
             return rc
 
         if action == "env":
@@ -5493,7 +5545,7 @@ def build_arg_parser():
     p_headless_verify.add_argument(
         "--force", action="store_true",
         help="measure even when llama-swap is holding a model or the load "
-             "is above the lane's ceiling")
+             "is above this command's ceiling")
     p_headless_verify.add_argument(
         "--run", action="store_true",
         help=argparse.SUPPRESS)   # the detached worker's own entry point
@@ -5560,6 +5612,14 @@ def build_arg_parser():
     p_lane_sweep.add_argument("--delete", action="append", default=[],
                               metavar="SLUG",
                               help="delete this lane (repeatable)")
+    p_lane_sweep.add_argument(
+        "--orphans", action="store_true",
+        help="delete build scratch whose lane no longer exists (every lane "
+             "that ran CI before 2026-08-02 left ~850 MB of it in tmpfs)")
+    p_lane_sweep.add_argument(
+        "--keep", action="append", default=[], metavar="SLUG",
+        help="spare this slug's scratch from --orphans, for work the "
+             "ledger cannot see (repeatable)")
     p_lane_sweep.add_argument(
         "--force", action="store_true",
         help="delete even with unlanded commits or a live session")

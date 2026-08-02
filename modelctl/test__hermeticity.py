@@ -59,6 +59,22 @@ if not os.environ.get("MODELCTL_HOME"):
 # The legacy alias would override the redirect for modules that honor it.
 os.environ.pop("MODELCTL_STATE_DIR", None)
 
+# Build scratch, redirected for the same reason and with more at stake:
+# `lane sweep --orphans` and the night lane's cleanup pass DELETE
+# directories under the scratch root, and unredirected that root is the
+# one holding the main checkout's CI build trees. The override also
+# turns off the legacy /tmp scan in modelctl_lanes.scratch_search_dirs,
+# so no test can reach the machine's /tmp either.
+#
+# Assigned, not setdefault: MODELCTL_HOME above honours an explicit
+# setting because a caller may legitimately want the suite's state in a
+# named place, but there is no version of "run the tests against the
+# real build scratch" worth supporting, and an ambient export of this
+# variable (a lane measuring on tmpfs, say) would otherwise aim the
+# suite's deletions at it.
+os.environ["MODELCTL_CI_SCRATCH_ROOT"] = str(
+    Path(os.environ["MODELCTL_HOME"]) / "ci-scratch")
+
 # Setup banners GET <base>/models on page renders; point them at the
 # discard port (nothing listens there, connect fails instantly) instead
 # of the production llama-swap service. Must precede the modelctl and
@@ -122,6 +138,19 @@ class TestSuiteHermeticity(unittest.TestCase):
         self.assertEqual(modelctl.LLAMA_SWAP_BASE_URL, base)
         import modelctl_web.app as web_app
         self.assertEqual(web_app.LLAMA_SWAP_BASE, base)
+
+    def test_ci_scratch_root_is_redirected(self):
+        # The suite exercises code that deletes whole directories under
+        # this root (lane teardown, `sweep --orphans`, the night lane's
+        # cleanup pass). Unredirected, a run would eat the main
+        # checkout's CI build trees.
+        import modelctl_lanes
+        root = Path(modelctl_lanes.scratch_base())
+        self.assertTrue(str(root).startswith(os.environ["MODELCTL_HOME"]),
+                        f"suite could delete real build scratch under {root}")
+        self.assertNotIn(modelctl_lanes.LEGACY_SCRATCH_BASE,
+                         modelctl_lanes.scratch_search_dirs(),
+                         "suite would sweep the machine's /tmp")
 
     def test_xpu_smi_is_stubbed_out(self):
         # get_gpu_inventory / capture_hardware_snapshot shell out to
