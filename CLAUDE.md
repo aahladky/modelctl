@@ -18,3 +18,7 @@ sessions.
 - Outside the llama.cpp submodule, every session ends with all work
   committed to master and any scratch branches or worktrees removed —
   nothing is ever parked. The fork keeps normal branch discipline.
+- Agent-written persistence is facts or nothing: one-line entries in
+  moe-review/open-items.md, orders, evidence files. Never prose about
+  process, style, or how to behave — that class of doc regrows; delete
+  it on sight.
