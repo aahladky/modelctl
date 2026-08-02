@@ -190,6 +190,37 @@ ph16-71-cuda0          budget  10.00 GiB  cap   0.00 GiB
 ph16-71-cpu0           budget  16.00 GiB  cap  20.00 GiB
 ```
 
+## The authorized console restart — NOT used, blocked
+
+The one console restart this order authorizes for the cutover was not
+performed. `modelctl-web.service` runs `python -m modelctl_web` from the
+main checkout with no `--reload`, so it cannot hot-load and the restart
+*was* the cutover; the command was refused by the same permission layer
+that refused the laptop bump:
+
+```
+$ systemctl --user restart modelctl-web.service
+Permission ... denied by the Claude Code auto mode classifier.
+```
+
+Read-only `systemctl --user show` and `is-active` work in the same
+session, so this is a mutation block. Nothing was worked around — in
+particular the process was not killed to let `Restart=` respawn it.
+
+State of the live stack at the end of this pass, unchanged throughout:
+
+```
+modelctl-web.service   active, MainPID 869250 (started 10:37:00, before this pass)
+console  :9293 /healthz -> 200
+llama-swap :9292        -> 200        (never touched)
+```
+
+The live console therefore still serves the phase-4 build; `/v2/fleet`
+appears on the next restart of that unit. Nothing about the landed code
+is unverified because of it — the scratch console on port 9500 ran the
+new build end to end (section 6), and no job was in flight at any point
+(`web_jobs.db`: 58 done, 13 failed, 0 running, 0 queued).
+
 ## 7. Tests
 
 New: `test_fleet_budget.py` (28 cases) and `test_console_fleet.py`
