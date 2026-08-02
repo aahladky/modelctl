@@ -1,0 +1,470 @@
+"""Fleet RPC nodes: registry, wire probe, and optional planner targets.
+
+Hermetic by construction. The only thing here that would otherwise touch
+a network is `probe_node`, and its socket factory is injected -- these
+tests drive it against an in-memory fake that speaks the same framing
+`ggml-rpc-server` does, so the assertions are about the real wire format
+without a real wire.
+
+The load-bearing test in this file is
+`TestFallbackIsByteIdentical`: with every node absent, the compiled plan
+set must be indistinguishable from a checkout that has no fleet at all.
+An "optional" target that quietly perturbs the local plans is not
+optional.
+"""
+import json
+import os
+import struct
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import modelctl_fleet as fleet
+import modelctl_plans
+
+
+PIN = "85b7e6556b6b83026d1a17df2635bc1173db1f97"
+OTHER_PIN = "0000000000000000000000000000000000000000"
+
+
+def a_node(name="ph16-71", host="192.168.0.76", port=50052, pin=PIN,
+           device="CUDA0", budget=8 << 30, total=12 << 30, enabled=True):
+    return fleet.FleetNode(
+        name=name, host=host, port=port, variant="cuda", pin=pin,
+        enabled=enabled,
+        devices=(fleet.FleetDevice(name=device, kind="gpu",
+                                   total_bytes=total, budget_bytes=budget),))
+
+
+class FakeSocket:
+    """Speaks the ggml-rpc framing well enough to answer one HELLO.
+
+    request : cmd (1 byte) | size (8 bytes LE) | payload
+    response:               size (8 bytes LE) | payload
+    """
+
+    def __init__(self, major=5, minor=0, patch=0, truncate=False,
+                 wrong_size=False):
+        self.version = (major, minor, patch)
+        self.truncate = truncate
+        self.wrong_size = wrong_size
+        self.sent = b""
+        self._out = b""
+        self.closed = False
+
+    def sendall(self, data):
+        self.sent += data
+        cmd = data[0]
+        assert cmd == fleet.RPC_CMD_HELLO, f"unexpected command {cmd}"
+        (size,) = struct.unpack("<Q", data[1:9])
+        assert size == fleet.RPC_CONN_CAPS_SIZE
+        body = bytes(self.version) + b"\x00" + bytes(fleet.RPC_CONN_CAPS_SIZE)
+        declared = 7 if self.wrong_size else len(body)
+        self._out = struct.pack("<Q", declared) + body
+
+    def recv(self, n):
+        chunk, self._out = self._out[:n], self._out[n:]
+        if self.truncate:
+            # Hand back the length prefix, then hang up before the body --
+            # the failure a node killed mid-handshake produces.
+            self._out = b""
+            self.truncate = False
+        return chunk
+
+    def close(self):
+        self.closed = True
+
+
+class FleetStateBase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="fleet-test-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(
+            self.tmp, ignore_errors=True))
+        self.fleet_path = Path(self.tmp) / "fleet.json"
+        self.presence_path = Path(self.tmp) / "fleet-presence.json"
+        for attr, val in (("FLEET_PATH", self.fleet_path),
+                          ("PRESENCE_PATH", self.presence_path)):
+            p = mock.patch.object(fleet, attr, val)
+            p.start()
+            self.addCleanup(p.stop)
+        p = mock.patch.dict(os.environ, {"MODELCTL_FLEET_PIN": PIN})
+        p.start()
+        self.addCleanup(p.stop)
+
+
+class TestRegistryRoundTrip(FleetStateBase):
+    def test_save_then_load_preserves_every_field(self):
+        node = a_node()
+        fleet.save_fleet([node])
+        (back,) = fleet.load_fleet()
+        self.assertEqual(back, node)
+        self.assertEqual(back.endpoint, "192.168.0.76:50052")
+
+    def test_a_corrupt_registry_reads_as_no_fleet(self):
+        # A broken registry must not break every launch path that
+        # consults it -- "no fleet" is always a safe answer.
+        self.fleet_path.write_text("{not json")
+        self.assertEqual(fleet.load_fleet(), [])
+
+    def test_a_malformed_node_is_skipped_not_fatal(self):
+        self.fleet_path.write_text(json.dumps(
+            {"nodes": [{"host": "h"}, a_node().to_dict()]}))
+        nodes = fleet.load_fleet()
+        self.assertEqual([n.name for n in nodes], ["ph16-71"])
+
+    def test_admission_keys_cannot_collide_with_a_local_device(self):
+        key = fleet.admission_key("ph16-71", "CUDA0")
+        self.assertEqual(key, "RPC:ph16-71:CUDA0")
+        self.assertTrue(fleet.is_remote_key(key))
+        self.assertFalse(fleet.is_remote_key("CUDA0"))
+
+
+class TestWireProbe(FleetStateBase):
+    def test_hello_sends_the_documented_framing(self):
+        sock = FakeSocket()
+        major, minor, patch = fleet.hello(sock)
+        self.assertEqual((major, minor, patch), (5, 0, 0))
+        self.assertEqual(sock.sent[0], 14)              # RPC_CMD_HELLO
+        self.assertEqual(struct.unpack("<Q", sock.sent[1:9])[0], 24)
+        # All-zero caps: a probe advertises no transport upgrade.
+        self.assertEqual(sock.sent[9:], bytes(24))
+
+    def test_reachable_node_at_the_pin_is_usable(self):
+        pr = fleet.probe_node(a_node(), connect=lambda h, p, t: FakeSocket())
+        self.assertTrue(pr.reachable)
+        self.assertEqual(pr.protocol, "5.0.0")
+        self.assertTrue(pr.pin_agrees)
+        self.assertTrue(pr.usable)
+
+    def test_a_refused_connection_is_reported_not_raised(self):
+        def refuse(h, p, t):
+            raise ConnectionRefusedError("nothing listening")
+        pr = fleet.probe_node(a_node(), connect=refuse)
+        self.assertFalse(pr.reachable)
+        self.assertFalse(pr.usable)
+        self.assertIn("ConnectionRefusedError", pr.detail)
+
+    def test_a_node_on_a_different_commit_is_reachable_but_not_usable(self):
+        pr = fleet.probe_node(a_node(pin=OTHER_PIN),
+                              connect=lambda h, p, t: FakeSocket())
+        self.assertTrue(pr.reachable)
+        self.assertFalse(pr.pin_agrees)
+        self.assertFalse(pr.usable)
+        self.assertIn("this checkout pins", pr.detail)
+
+    def test_a_wrong_sized_hello_response_is_not_a_matching_server(self):
+        pr = fleet.probe_node(a_node(),
+                              connect=lambda h, p, t: FakeSocket(wrong_size=True))
+        self.assertFalse(pr.reachable)
+        self.assertIn("not a matching ggml-rpc-server", pr.detail)
+
+    def test_a_closed_socket_mid_response_does_not_hang_or_raise(self):
+        pr = fleet.probe_node(a_node(),
+                              connect=lambda h, p, t: FakeSocket(truncate=True))
+        self.assertFalse(pr.reachable)
+
+    def test_the_socket_is_closed_even_when_the_handshake_fails(self):
+        sock = FakeSocket(wrong_size=True)
+        fleet.probe_node(a_node(), connect=lambda h, p, t: sock)
+        self.assertTrue(sock.closed)
+
+
+class TestPresenceIsTheStoredPlanningInput(FleetStateBase):
+    def test_planning_never_opens_a_socket(self):
+        fleet.save_fleet([a_node()])
+
+        def explode(*a, **k):
+            raise AssertionError("planning opened a socket")
+
+        with mock.patch.object(fleet.socket, "create_connection", explode):
+            self.assertEqual(fleet.usable_nodes(), [])
+
+    def test_an_unprobed_node_is_absent_not_present(self):
+        fleet.save_fleet([a_node()])
+        self.assertEqual(fleet.usable_nodes(), [])
+
+    def test_a_recorded_present_node_is_usable(self):
+        fleet.save_fleet([a_node()])
+        fleet.refresh_presence(connect=lambda h, p, t: FakeSocket(), now=1000.0)
+        names = [n.name for n in fleet.usable_nodes(now=1000.0)]
+        self.assertEqual(names, ["ph16-71"])
+
+    def test_a_stale_presence_record_expires_to_absent(self):
+        fleet.save_fleet([a_node()])
+        fleet.refresh_presence(connect=lambda h, p, t: FakeSocket(), now=1000.0)
+        late = 1000.0 + fleet.PRESENCE_TTL_SECONDS + 1
+        self.assertEqual(fleet.usable_nodes(now=late), [])
+
+    def test_a_disabled_node_is_never_usable_however_present(self):
+        fleet.save_fleet([a_node(enabled=False)])
+        fleet.refresh_presence(connect=lambda h, p, t: FakeSocket(), now=1000.0)
+        self.assertEqual(fleet.usable_nodes(now=1000.0), [])
+
+    def test_budgets_are_the_declared_ceiling_not_what_the_node_reports(self):
+        fleet.save_fleet([a_node(budget=8 << 30, total=12 << 30)])
+        fleet.refresh_presence(connect=lambda h, p, t: FakeSocket(), now=1000.0)
+        budgets = fleet.admission_budgets(now=1000.0)
+        self.assertEqual(budgets, {"RPC:ph16-71:CUDA0": 8 << 30})
+
+
+class TestContiguousPlacement(unittest.TestCase):
+    def test_range_matches_only_the_named_layers(self):
+        import re
+        pattern = fleet.contiguous_range(16, 19) % "RPC0"
+        rx = re.compile(pattern.rsplit("=", 1)[0])
+        for good in ("blk.16.", "blk.17.", "blk.18.", "blk.19."):
+            self.assertTrue(rx.search(good), good)
+        for bad in ("blk.15.", "blk.20.", "blk.160.", "blk.1."):
+            self.assertFalse(rx.search(bad), bad)
+
+    def test_an_empty_range_is_refused(self):
+        with self.assertRaises(ValueError):
+            fleet.contiguous_range(10, 9)
+
+    def test_placement_args_are_the_canonical_tokens(self):
+        args = fleet.placement_args({
+            "endpoints": ["192.168.0.76:50052"],
+            "placements": [{"buffer_type": "RPC0[192.168.0.76:50052]",
+                            "first_layer": 2, "last_layer": 3}]})
+        self.assertEqual(args[:2], ["--rpc", "192.168.0.76:50052"])
+        self.assertEqual(args[2], "-ot")
+        self.assertEqual(args[3], r"blk\.(2|3)\.=RPC0[192.168.0.76:50052]")
+
+    def test_no_endpoints_emits_nothing(self):
+        self.assertEqual(fleet.placement_args({"endpoints": []}), [])
+
+    def test_device_names_are_global_across_endpoints(self):
+        eps = ["a:1", "b:2", "c:3"]
+        self.assertEqual(fleet.device_name_for(eps, "a:1"), "RPC0")
+        self.assertEqual(fleet.device_name_for(eps, "b:2"), "RPC1")
+        self.assertEqual(fleet.device_name_for(eps, "c:3"), "RPC2")
+
+    def test_buffer_types_are_per_endpoint_not_global(self):
+        # The distinction -ot cares about, and the one that produced
+        # "unknown buffer type" when this first went over the wire:
+        # attaching two single-device nodes gives two buffer types BOTH
+        # called RPC0, told apart only by the bracketed endpoint --
+        # while their device names are RPC0 and RPC1.
+        self.assertEqual(fleet.buffer_type_for("192.168.0.76:50052"),
+                         "RPC0[192.168.0.76:50052]")
+        self.assertEqual(fleet.buffer_type_for("192.168.0.76:50053"),
+                         "RPC0[192.168.0.76:50053]")
+        eps = ["192.168.0.76:50052", "192.168.0.76:50053"]
+        self.assertEqual(fleet.device_name_for(eps, eps[1]), "RPC1")
+        self.assertNotEqual(fleet.buffer_type_for(eps[1]),
+                            fleet.device_name_for(eps, eps[1]))
+
+
+class TestClaimReattribution(unittest.TestCase):
+    """Remotely-placed bytes leave the local card and land on the node key."""
+
+    def _claim(self):
+        return modelctl_plans.ResourceClaim(
+            vram_bytes={"CUDA0": 10 << 30}, ram_bytes=0, storage_mode="mmap",
+            expected_context=8192,
+            vram_static_bytes={"CUDA0": 8 << 30},
+            vram_kv_bytes={"CUDA0": 1 << 30},
+            vram_overhead_bytes={"CUDA0": 1 << 30})
+
+    def test_moved_bytes_are_not_charged_twice(self):
+        merged = {"rpc": {"admission": {"RPC:n:CUDA0": 4 << 30}}}
+        out = modelctl_plans._apply_rpc_placement(self._claim(), merged)
+        self.assertEqual(out.vram_static_bytes["CUDA0"], 4 << 30)
+        self.assertEqual(out.vram_bytes["CUDA0"], 6 << 30)
+        self.assertEqual(out.vram_bytes["RPC:n:CUDA0"], 4 << 30)
+
+    def test_kv_and_overhead_stay_local(self):
+        merged = {"rpc": {"admission": {"RPC:n:CUDA0": 8 << 30}}}
+        out = modelctl_plans._apply_rpc_placement(self._claim(), merged)
+        # All static weight moved; KV + overhead remain on the local card.
+        self.assertEqual(out.vram_static_bytes["CUDA0"], 0)
+        self.assertEqual(out.vram_bytes["CUDA0"], 2 << 30)
+
+    def test_a_claim_with_no_rpc_config_is_returned_untouched(self):
+        c = self._claim()
+        self.assertIs(modelctl_plans._apply_rpc_placement(c, {}), c)
+
+
+class TestAdmissionRefusesOverBudget(FleetStateBase):
+    """Per-node budgets ride the existing admission machinery."""
+
+    def _usable_with_fleet(self, budget):
+        fleet.save_fleet([a_node(budget=budget)])
+        fleet.refresh_presence(connect=lambda h, p, t: FakeSocket())
+        return fleet.admission_budgets()
+
+    def test_remote_budget_appears_in_the_same_usable_map(self):
+        self._usable_with_fleet(8 << 30)
+        import modelctl_hardware
+        snap = modelctl_hardware.HardwareSnapshot(
+            captured_at=0.0, fingerprint="x", gpus=(), ram_total_bytes=0,
+            ram_available_bytes=0, ram_reserve_bytes=0, storage=(),
+            backend_fingerprints={})
+        usable = modelctl_plans._usable_vram_map(snap)
+        self.assertEqual(usable.get("RPC:ph16-71:CUDA0"), 8 << 30)
+
+    def test_a_claim_over_the_node_budget_overflows(self):
+        usable = {"RPC:ph16-71:CUDA0": 4 << 30}
+        claim = modelctl_plans.ResourceClaim(
+            vram_bytes={"RPC:ph16-71:CUDA0": 6 << 30}, ram_bytes=0,
+            storage_mode="mmap", expected_context=8192,
+            vram_overhead_bytes={"RPC:ph16-71:CUDA0": 2 << 30})
+        over = modelctl_plans._admission_overflow(claim, usable)
+        self.assertIn("RPC:ph16-71:CUDA0", over)
+
+    def test_a_claim_inside_the_node_budget_is_admitted(self):
+        usable = {"RPC:ph16-71:CUDA0": 8 << 30}
+        claim = modelctl_plans.ResourceClaim(
+            vram_bytes={"RPC:ph16-71:CUDA0": 3 << 30}, ram_bytes=0,
+            storage_mode="mmap", expected_context=8192,
+            vram_overhead_bytes={"RPC:ph16-71:CUDA0": 2 << 30})
+        self.assertEqual(
+            modelctl_plans._admission_overflow(claim, usable), {})
+
+
+class TestFallbackIsByteIdentical(FleetStateBase):
+    """With the node absent, the plan set matches a fleet-free checkout.
+
+    This is the whole "optional target" claim, stated as an assertion.
+    """
+
+    def _profile(self):
+        return {
+            "name": "fixture", "backend": "llama-cpp",
+            "model_path": "/nonexistent/fixture.gguf",
+            "config": {"ctx": 4096, "flash_attn": "on", "device": "CUDA0",
+                       "cache_type_k": "q8_0", "cache_type_v": "q8_0",
+                       "fit": "off"},
+        }
+
+    def _snapshot(self):
+        import modelctl_hardware
+        return modelctl_hardware.HardwareSnapshot(
+            captured_at=0.0, fingerprint="fp", gpus=(), ram_total_bytes=64 << 30,
+            ram_available_bytes=32 << 30, ram_reserve_bytes=0, storage=(),
+            backend_fingerprints={})
+
+    def _compile(self):
+        return modelctl_plans.compile_launch_plans(
+            self._profile(), self._snapshot())
+
+    def test_no_registry_and_absent_node_compile_identically(self):
+        without = [(p.label, p.argv, p.id) for p in self._compile()]
+
+        # Same checkout, node registered and enabled -- but never probed,
+        # so presence says absent.
+        fleet.save_fleet([a_node()])
+        absent = [(p.label, p.argv, p.id) for p in self._compile()]
+
+        self.assertEqual(without, absent)
+
+    def test_an_unreachable_node_adds_no_plans(self):
+        fleet.save_fleet([a_node()])
+        baseline = [(p.label, p.argv, p.id) for p in self._compile()]
+
+        def refuse(h, p, t):
+            raise ConnectionRefusedError("down")
+        fleet.refresh_presence(connect=refuse)
+
+        self.assertEqual([(p.label, p.argv, p.id) for p in self._compile()],
+                         baseline)
+
+    def test_a_node_on_the_wrong_commit_adds_no_plans(self):
+        fleet.save_fleet([a_node(pin=OTHER_PIN)])
+        baseline_no_presence = [(p.label, p.argv, p.id)
+                                for p in self._compile()]
+        fleet.refresh_presence(connect=lambda h, p, t: FakeSocket())
+        self.assertEqual([(p.label, p.argv, p.id) for p in self._compile()],
+                         baseline_no_presence)
+
+    def test_no_rpc_tokens_leak_into_local_plans(self):
+        fleet.save_fleet([a_node()])
+        fleet.refresh_presence(connect=lambda h, p, t: FakeSocket())
+        for plan in self._compile():
+            if plan.source == "fleet-rpc":
+                continue
+            self.assertNotIn("--rpc", plan.argv, plan.label)
+
+
+class TestRpcPlansAppearWhenTheNodeIs(FleetStateBase):
+    """The present-node path, driven off a synthetic GGUF layout.
+
+    The layout is faked rather than read from a real model: what is under
+    test is the placement arithmetic and argv, not the GGUF parser.
+    """
+
+    # A dense 8-layer model: 1 GiB of weights per layer plus 1 GiB of
+    # embeddings/output. Shaped to gguf_model_layout's full contract so
+    # _make_claim sees the same keys a real parse would hand it.
+    LAYOUT = {"arch": "fixture", "meta": {}, "block_count": 8,
+              "is_moe": False, "weight_bytes": 9 << 30,
+              "non_expert_bytes": 9 << 30, "other_bytes": 1 << 30,
+              "layer_bytes": 8 << 30, "expert_bytes_per_layer": {},
+              "has_shexp": False, "unknown_type_tensors": 0}
+
+    def _profile(self):
+        return {
+            "name": "fixture", "backend": "llama-cpp",
+            "model_path": "/nonexistent/fixture.gguf",
+            "config": {"ctx": 4096, "flash_attn": "on", "device": "CUDA0",
+                       "cache_type_k": "q8_0", "cache_type_v": "q8_0",
+                       "fit": "off"},
+        }
+
+    def _rpc_plans(self, budget):
+        fleet.save_fleet([a_node(budget=budget)])
+        fleet.refresh_presence(connect=lambda h, p, t: FakeSocket())
+        import modelctl_hardware
+        snap = modelctl_hardware.HardwareSnapshot(
+            captured_at=0.0, fingerprint="fp", gpus=(), ram_total_bytes=64 << 30,
+            ram_available_bytes=32 << 30, ram_reserve_bytes=0, storage=(),
+            backend_fingerprints={})
+        with mock.patch("os.path.exists", return_value=True), \
+             mock.patch("modelctl_vram.gguf_model_layout",
+                        return_value=self.LAYOUT):
+            plans = modelctl_plans._compile_rpc_plans(
+                self._profile(), snap, None)
+        return plans
+
+    def test_a_present_node_yields_a_trailing_contiguous_range(self):
+        # 8 layers, 1 GiB each. A 3 GiB budget takes the last 3.
+        (plan,) = self._rpc_plans(3 << 30)
+        rpc = plan.decision_data["rpc"]
+        self.assertEqual((rpc["first_layer"], rpc["last_layer"]), (5, 7))
+        self.assertEqual(rpc["node"], "ph16-71")
+        self.assertEqual(rpc["client_device"], "RPC0")
+
+    def test_the_argv_carries_the_endpoint_and_the_range(self):
+        (plan,) = self._rpc_plans(3 << 30)
+        argv = list(plan.argv)
+        self.assertIn("--rpc", argv)
+        self.assertEqual(argv[argv.index("--rpc") + 1], "192.168.0.76:50052")
+        # -ot takes the buffer type, endpoint and all -- not "RPC0".
+        self.assertIn(r"blk\.(5|6|7)\.=RPC0[192.168.0.76:50052]", argv)
+
+    def test_the_range_never_swallows_every_layer(self):
+        # A budget far larger than the model still leaves layers local.
+        (plan,) = self._rpc_plans(999 << 30)
+        rpc = plan.decision_data["rpc"]
+        self.assertGreater(rpc["first_layer"], 0)
+        self.assertEqual(rpc["layers"], 7)
+
+    def test_a_budget_too_small_for_one_layer_yields_no_plan(self):
+        self.assertEqual(self._rpc_plans(1 << 20), [])
+
+    def test_the_plan_is_labelled_by_where_the_layers_went(self):
+        (plan,) = self._rpc_plans(3 << 30)
+        self.assertEqual(plan.label, "layers 5-7 on 192.168.0.76:50052")
+
+    def test_the_remote_claim_is_charged_to_the_node_key(self):
+        (plan,) = self._rpc_plans(3 << 30)
+        self.assertIn("RPC:ph16-71:CUDA0", plan.claim.vram_bytes)
+
+    def test_the_plan_warns_that_the_local_plans_remain(self):
+        (plan,) = self._rpc_plans(3 << 30)
+        self.assertTrue(any("local-only" in w for w in plan.warnings))
+
+
+if __name__ == "__main__":
+    unittest.main()

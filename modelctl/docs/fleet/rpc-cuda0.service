@@ -1,0 +1,35 @@
+[Unit]
+Description=llama.cpp RPC server (CUDA / RTX 4080 Laptop, sm_89) -- moe-serving fleet node ph16-71
+Documentation=file:/home/aaron/rpc/cuda/build/bin/build-manifest.json
+After=network.target
+
+[Service]
+Type=simple
+# Tensor cache on the laptop NVMe (nvme0n1p2, / -- /home is not a
+# separate mount). rpc-server appends "rpc/" to this prefix.
+Environment=LLAMA_CACHE=/home/aaron/rpc/cache/cuda0/
+# -H binds the LAN address explicitly: the ProtonVPN tunnel (10.2.0.2)
+# and loopback are never served. Do not change this to 0.0.0.0 --
+# rpc-server has no authentication of any kind.
+ExecStart=/home/aaron/rpc/cuda/build/bin/ggml-rpc-server \
+    -H 192.168.0.76 -p 50052 -d CUDA0 -t 4 -c
+Restart=always
+RestartSec=5
+
+# Caps required by the work order. cgroup v2 delegates cpu/memory/pids
+# to the user manager on this box, so these are enforced, not decorative.
+MemoryMax=20G
+CPUQuota=2000%
+Nice=10
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/home/aaron/rpc/cache
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+
+[Install]
+WantedBy=default.target

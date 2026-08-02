@@ -2385,6 +2385,15 @@ def build_server_args(profile, capabilities=None):
     elif cfg.get("device"):
         args.extend(["--device", cfg['device']])
 
+    # Remote fleet placement. Emitted HERE, in the one argv builder every
+    # launch surface derives from, so the preview, run.sh, the llama-swap
+    # entry, the worker and the smoke all carry the identical --rpc and
+    # -ot tokens. A profile with no "rpc" config produces no tokens at
+    # all, which is what makes a fleet-free plan byte-identical.
+    if cfg.get("rpc"):
+        import modelctl_fleet
+        args.extend(modelctl_fleet.placement_args(cfg["rpc"]))
+
     if profile.get("mmproj_path"):
         args.extend(["--mmproj", str(profile['mmproj_path'])])
     ctk, ctv = _resolve_cache_types(cfg)

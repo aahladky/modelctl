@@ -1,0 +1,30 @@
+[Unit]
+Description=llama.cpp RPC server (CPU / i9-13900HX) -- moe-serving fleet node ph16-71
+Documentation=file:/home/aaron/rpc/cpu/build/bin/build-manifest.json
+After=network.target
+
+[Service]
+Type=simple
+Environment=LLAMA_CACHE=/home/aaron/rpc/cache/cpu0/
+# -t 20 matches CPUQuota=2000%: more worker threads than the quota
+# allows just adds scheduler contention against a hard ceiling.
+ExecStart=/home/aaron/rpc/cpu/build/bin/ggml-rpc-server \
+    -H 192.168.0.76 -p 50053 -d CPU -t 20 -c
+Restart=always
+RestartSec=5
+
+MemoryMax=20G
+CPUQuota=2000%
+Nice=10
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/home/aaron/rpc/cache
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+
+[Install]
+WantedBy=default.target

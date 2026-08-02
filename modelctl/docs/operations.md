@@ -105,3 +105,31 @@ LAN-accessible, plain HTTP, single shared token). This is a
 trusted-home-LAN default; exposure to untrusted networks is
 unsupported. Loopback-only: `MODELCTL_WEB_BIND=127.0.0.1:9293`.
 llama-swap binds loopback only.
+
+Fleet RPC nodes are the sharpest edge here: `ggml-rpc-server` has no
+authentication at all, and ph16-71's two ports are currently reachable
+from the whole `192.168.0.0/24` subnet, not just the rig. The rules that
+would fix that are written but unapplied — see `docs/fleet/README.md`
+and `docs/fleet/ph16-71-ufw.sh`.
+
+## Fleet nodes
+
+Remote RPC nodes are **optional** planning targets. Registering one
+cannot change any launch that worked without it: the planner adds
+fleet variants on top of the local plan set, and with every node absent
+the compiled plans are byte-identical to a fleet-free checkout.
+
+* Registry: `$MODELCTL_HOME/fleet.json` (`modelctl_fleet`).
+* Presence: `$MODELCTL_HOME/fleet-presence.json`, written only by an
+  explicit `refresh_presence()`. Planning reads it and never opens a
+  socket, so plan compilation stays deterministic and the test suite
+  stays hermetic. A node nobody has probed is treated as absent.
+* A node is used only when it is enabled, reachable, and its recorded
+  build pin equals this checkout's llama.cpp pin. A node on a different
+  commit is reported, not used.
+* Per-node budgets are operator-declared ceilings and are admitted
+  through the same `_usable_vram_map` / `_admission_overflow` path local
+  GPUs use, under a namespaced device key (`RPC:<node>:<device>`).
+
+Node-specific detail, including the security caveat and the rebuild
+procedure when the pin moves: `docs/fleet/README.md`.

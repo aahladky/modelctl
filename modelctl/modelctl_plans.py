@@ -14,6 +14,7 @@ Candidate sources:
     C. Single-GPU plans (one per eligible GPU)
     D. Multi-GPU split plans (capacity-ratio variants)
     E. CPU-spill plans (partial offload)
+    F. Remote fleet plans (a contiguous layer range on an RPC node)
 
 Plan IDs are stable hashes of the normalized plan representation.
 """
@@ -22,7 +23,7 @@ import re
 import json
 import math
 import os
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 
 import modelctl
 import modelctl_tiers
@@ -232,6 +233,14 @@ def _plan_label(config, source, gpu_names=None):
 
     if source == "current-profile":
         return "current profile"
+    if source == "fleet-rpc":
+        pl = ((config.get("rpc") or {}).get("placements") or [{}])[0]
+        first, last = pl.get("first_layer"), pl.get("last_layer")
+        # The buffer type carries the endpoint in brackets; the label
+        # wants the endpoint, since that is what names the machine.
+        buf = pl.get("buffer_type", "RPC")
+        where = buf.partition("[")[2].rstrip("]") or buf
+        return f"layers {first}-{last} on {where}"
     if source == "tier-planner":
         tier = config.get("_tier", "?")
         return f"tier {tier} plan"
@@ -575,8 +584,48 @@ def _usable_vram_map(hardware):
     except Exception:
         frac = 0.90
     import modelctl_hardware as _hw
-    return {g.device: max(0, int(g.total_bytes * frac) - g.reserve_bytes)
-            for g in _hw.enabled_gpus(hardware)}
+    usable = {g.device: max(0, int(g.total_bytes * frac) - g.reserve_bytes)
+              for g in _hw.enabled_gpus(hardware)}
+    # Remote fleet devices join the same map, so a remote placement is
+    # admitted -- or refused, or degraded -- by the identical code path a
+    # local card goes through. The budget is the operator's declared
+    # ceiling, NOT limit_pct of what the node reports: we do not get to
+    # decide how much of someone else's machine to take.
+    try:
+        import modelctl_fleet
+        usable.update(modelctl_fleet.admission_budgets())
+    except Exception:
+        pass
+    return usable
+
+
+def _apply_rpc_placement(claim, merged):
+    """Re-attribute remotely-placed weight bytes from local devices to the
+    node's admission key.
+
+    Without this a fleet plan would be charged twice: once on the local
+    card the layers no longer live on, and once against the node budget.
+    The local side keeps its KV cache and overhead -- only static weight
+    bytes move, because only weights are what the -ot rule relocated.
+    """
+    adm = ((merged or {}).get("rpc") or {}).get("admission") or {}
+    if not adm:
+        return claim
+    static = dict(claim.vram_static_bytes)
+    vram = dict(claim.vram_bytes)
+    remaining = sum(adm.values())
+    # Debit the device carrying the most static weight: that is where the
+    # relocated layers were otherwise going to sit.
+    for dev in sorted(static, key=lambda d: -static[d]):
+        if remaining <= 0:
+            break
+        take = min(static[dev], remaining)
+        static[dev] = static[dev] - take
+        vram[dev] = max(0, vram.get(dev, 0) - take)
+        remaining -= take
+    for key, byts in adm.items():
+        vram[key] = int(byts)
+    return replace(claim, vram_bytes=vram, vram_static_bytes=static)
 
 
 def _admission_overflow(claim, usable):
@@ -710,7 +759,16 @@ def _make_plan(profile, config, source, hardware, extra_warnings=(), decision=No
     A planner-emitted config must never be able to crash at launch for
     VRAM admission reasons."""
     merged = {**profile.get("config", {}), **config}
-    claim = _make_claim(profile, merged, hardware, capabilities)
+
+    def _claim_for(prof, mrg):
+        # Every claim in this function goes through here: the degradation
+        # steps below rebuild the claim, and a rebuild that forgot the
+        # remote re-attribution would silently charge the moved layers to
+        # the local card again.
+        return _apply_rpc_placement(
+            _make_claim(prof, mrg, hardware, capabilities), mrg)
+
+    claim = _claim_for(profile, merged)
 
     admission = None
     adm_warnings = []
@@ -735,8 +793,7 @@ def _make_plan(profile, config, source, hardware, extra_warnings=(), decision=No
                     profile, claim, usable, capabilities)
                 if new_mc is not None:
                     profile = {**profile, "moe_cache": new_mc}
-                    claim = _make_claim(profile, merged, hardware,
-                                        capabilities)
+                    claim = _claim_for(profile, merged)
                     for dev in sorted(overflow):
                         req = requested_cache.get(dev, 0)
                         got = claim.vram_cache_bytes.get(dev, 0)
@@ -762,8 +819,7 @@ def _make_plan(profile, config, source, hardware, extra_warnings=(), decision=No
                     merged.get("extra", ""), layout, overflow)
                 if moved:
                     merged = {**merged, "extra": new_extra}
-                    claim = _make_claim(profile, merged, hardware,
-                                        capabilities)
+                    claim = _claim_for(profile, merged)
                     for dev, layers in sorted(moved.items()):
                         degradations.append({
                             "action": "spill_experts", "device": dev,
@@ -833,6 +889,12 @@ def _make_plan(profile, config, source, hardware, extra_warnings=(), decision=No
         # Cache configuration is part of plan identity: a budget or policy
         # change must produce a different plan ID.
         "moe_cache": profile.get("moe_cache", {}),
+        # Remote placement likewise. Without this, a fleet plan and the
+        # local plan it was derived from normalize identically and
+        # collide on ID -- the second one would be silently dropped by
+        # compile_launch_plans' dedupe, which is exactly the plan a user
+        # asked for.
+        "rpc": merged.get("rpc", {}),
         "env": sorted(profile.get("env") or []),
     }
     pid = _plan_id(normalized)
@@ -1262,7 +1324,109 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
                                decision={"ngl": ngl, "gpu": primary_gpu.device},
                                capabilities=caps_for_args))
 
+    # F. Remote fleet variants -- strictly additive.
+    #
+    # Everything above is the local plan set. These are extra candidates
+    # that exist only while a node is registered, enabled, and recorded
+    # present at the pinned commit. With no such node this loop adds
+    # nothing and `plans` is byte-identical to a fleet-free checkout,
+    # which is the property test_fleet_rpc pins down.
+    for rpc_plan in _compile_rpc_plans(profile, hardware, caps_for_args):
+        add(rpc_plan)
+
     return plans
+
+
+def _rpc_layer_budget(profile, budget_bytes):
+    """How many trailing layers fit in a remote device's budget.
+
+    Returns (n_layers, per_layer_bytes, block_count) or (0, 0, 0) when
+    the model's layout is unknown -- an estimate is not good enough to
+    place tensors on another machine with.
+    """
+    model_path = profile.get("model_path", "")
+    if not model_path or not os.path.exists(model_path) or budget_bytes <= 0:
+        return 0, 0, 0
+    try:
+        layout = modelctl_vram.gguf_model_layout(model_path)
+    except Exception:
+        return 0, 0, 0
+    if not layout or not layout.get("block_count"):
+        return 0, 0, 0
+    n = layout["block_count"]
+    per_layer = (layout["weight_bytes"] - layout["other_bytes"]) / n
+    if per_layer <= 0:
+        return 0, 0, 0
+    fits = int(budget_bytes / per_layer)
+    # Never the whole model: a remote range that swallows every layer
+    # leaves the local side holding nothing but the KV cache, which is
+    # not a serving topology anyone asked for -- and it makes the
+    # local-fallback comparison meaningless.
+    return max(0, min(n - 1, fits)), int(per_layer), n
+
+
+def _compile_rpc_plans(profile, hardware, capabilities):
+    """One plan per usable remote device: a contiguous trailing layer range.
+
+    Contiguous and trailing on purpose. llama.cpp streams activations
+    across the RPC boundary once per contiguous region, so a scattered
+    placement pays the network cost repeatedly per token; a single
+    trailing block crosses the wire twice. The work order allows
+    contiguous ranges only, and this is why.
+    """
+    out = []
+    try:
+        import modelctl_fleet
+    except Exception:
+        return out
+    try:
+        nodes = modelctl_fleet.usable_nodes()
+    except Exception:
+        return out
+    if not nodes:
+        return out
+
+    endpoints = [n.endpoint for n in nodes]
+    for node in nodes:
+        for dev_index, device in enumerate(node.devices):
+            if device.budget_bytes <= 0:
+                continue
+            n_layers, per_layer, block_count = _rpc_layer_budget(
+                profile, device.budget_bytes)
+            if n_layers <= 0:
+                continue
+            first = block_count - n_layers
+            last = block_count - 1
+            rpc_device = modelctl_fleet.device_name_for(
+                endpoints, node.endpoint, dev_index)
+            buf_type = modelctl_fleet.buffer_type_for(
+                node.endpoint, dev_index)
+            key = modelctl_fleet.admission_key(node.name, device.name)
+            rpc_cfg = {
+                "endpoints": endpoints,
+                "placements": [{"buffer_type": buf_type,
+                                "first_layer": first, "last_layer": last}],
+                # Carried so admission can charge the remote budget to the
+                # right key without re-deriving it from the argv.
+                "admission": {key: int(n_layers * per_layer)},
+            }
+            out.append(_make_plan(
+                profile, {"rpc": rpc_cfg}, "fleet-rpc", hardware,
+                extra_warnings=(
+                    f"layers {first}-{last} execute on {node.name} "
+                    f"({device.name}) over the network; the local-only "
+                    f"plans remain available if the node goes away",),
+                decision={"rpc": {
+                    "node": node.name, "endpoint": node.endpoint,
+                    "device": device.name, "client_device": rpc_device,
+                    "buffer_type": buf_type,
+                    "first_layer": first, "last_layer": last,
+                    "layers": n_layers,
+                    "budget_bytes": int(device.budget_bytes),
+                    "claimed_bytes": int(n_layers * per_layer),
+                    "admission_key": key}},
+                capabilities=capabilities))
+    return out
 
 
 def _compute_ngl(weights_bytes, gpu_budget, profile, hardware):
