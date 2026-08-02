@@ -4594,6 +4594,12 @@ def _remote_hands_summary(rh, st):
           f"{grants['refresh_tokens']} refresh token(s) live")
     print(f"allowlist: {', '.join(st['allow_roots'])}")
     print(f"audit:    {st['audit_path']}")
+    sec = st.get("security") or {}
+    print(f"security: funnel {sec.get('funnel', '?')}, "
+          f"{sec.get('audit_lines', 0)} audit line(s), "
+          f"{sec.get('auth_failures_last_hour', 0)} auth failure(s) in the "
+          f"last hour, last "
+          f"{sec.get('last_auth_failure') or 'never'}")
     recent = st["recent"]
     print(f"last {len(recent)} audit entries:"
           if recent else "no audit entries yet")

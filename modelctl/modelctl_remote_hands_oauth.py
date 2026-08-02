@@ -39,9 +39,13 @@ This module must stay a leaf: no modelctl imports.
 """
 import base64
 import hashlib
+import http.client
+import ipaddress
 import json
 import os
 import secrets
+import socket
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -69,6 +73,11 @@ CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback"
 
 CIMD_TIMEOUT = 10
 CIMD_MAX_BYTES = 128 * 1024
+# The CIMD fetch is the one outbound request an unauthenticated caller
+# can make this server perform, and the caller names the destination. 443
+# only: a client_id pointing at :9292 or :22 is not a metadata document,
+# it is a port scan with a JSON parser attached.
+CIMD_ALLOWED_PORTS = (443,)
 
 # An unauthenticated endpoint that writes to disk needs a ceiling. DCR is
 # the fallback path, so this only fills up if CIMD is failing and
@@ -274,6 +283,151 @@ def redirect_uri_allowed(client_id, redirect_uri, registered):
     return _origin(client_id)[:2] == _origin(redirect_uri)[:2]
 
 
+# --- SSRF guard on the CIMD fetch ------------------------------------------
+# `client_id` is an https URL supplied by an unauthenticated caller, and
+# this server dereferences it. Size and time were already bounded and the
+# document has to be self-referential, so nothing comes *back* to the
+# caller -- but the destination was not bounded, which makes the endpoint
+# a blind-SSRF primitive against everything the rig can reach that the
+# internet cannot: llama-swap on 9292, the console on 9293, the tailnet,
+# a cloud metadata service. The fix is destination vetting, and it has to
+# survive DNS rebinding: a name that answers public on the check and
+# private on the fetch defeats a check-then-fetch. So the vetted address
+# is the address connected to, with the certificate still validated
+# against the original hostname.
+
+
+def _ip_block_reason(ip):
+    """The class an address is blocked as, or None if it is routable.
+
+    Ordered most-specific first because IPv4 `is_private` is true for
+    loopback and link-local too, and a report saying "private" when the
+    answer is "127.0.0.1" is a worse log line. v6 addresses that embed a
+    v4 one (4-in-6, 6to4, Teredo) are unwrapped first: `::ffff:127.0.0.1`
+    is a loopback address wearing a hat."""
+    if isinstance(ip, ipaddress.IPv6Address):
+        embedded = ip.ipv4_mapped or ip.sixtofour
+        if embedded is None and ip.teredo:
+            embedded = ip.teredo[1]
+        if embedded is not None:
+            reason = _ip_block_reason(embedded)
+            return f"{reason} via {ip}" if reason else None
+    if ip.is_unspecified:
+        return "unspecified"
+    if ip.is_loopback:
+        return "loopback"
+    if ip.is_link_local:
+        return "link-local"
+    if ip.is_multicast:
+        return "multicast"
+    if ip.is_reserved:
+        return "reserved"
+    if getattr(ip, "is_site_local", False):
+        return "site-local"
+    if ip.is_private:
+        return "private"
+    if not ip.is_global:
+        return "non-global"
+    return None
+
+
+def vet_cimd_target(client_id, resolver=None):
+    """(host, port, [vetted addresses]) for a client_id URL, or raise.
+
+    EVERY address the name resolves to has to be routable, not just the
+    first: a name that answers with one public and one private address
+    would otherwise be a coin flip, and the caller picks the coin."""
+    parts = urllib.parse.urlsplit(client_id)
+    if parts.scheme != "https":
+        raise OAuthError("invalid_client", "client_id must be an https URL")
+    if parts.username or parts.password:
+        raise OAuthError("invalid_client",
+                         "client_id must not carry credentials")
+    try:
+        port = parts.port
+    except ValueError:
+        raise OAuthError("invalid_client", "client_id has an invalid port")
+    port = 443 if port is None else port
+    if port not in CIMD_ALLOWED_PORTS:
+        raise OAuthError("invalid_client",
+                         f"client_id port {port} is not allowed "
+                         f"(https on {CIMD_ALLOWED_PORTS[0]} only)")
+    host = parts.hostname
+    if not host:
+        raise OAuthError("invalid_client", "client_id has no host")
+    resolve = resolver or socket.getaddrinfo
+    try:
+        infos = resolve(host, port, type=socket.SOCK_STREAM)
+    except (OSError, socket.gaierror) as e:
+        raise OAuthError("invalid_client", f"cannot resolve {host}: {e}")
+    addresses = []
+    for info in infos or []:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except (IndexError, TypeError, ValueError):
+            continue
+        reason = _ip_block_reason(ip)
+        if reason:
+            raise OAuthError(
+                "invalid_client",
+                f"client_id host {host} resolves to a {reason} address; "
+                f"only publicly routable destinations are fetched")
+        addresses.append(ip)
+    if not addresses:
+        raise OAuthError("invalid_client", f"cannot resolve {host}")
+    return host, port, addresses
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS to one vetted IP, with the certificate checked against the
+    name. Connecting by address is what closes the rebind window; passing
+    the hostname as `server_hostname` is what keeps that from also
+    disabling verification."""
+
+    def __init__(self, host, *args, pinned_ip=None, **kwargs):
+        super().__init__(host, *args, **kwargs)
+        self._pinned_ip = pinned_ip
+
+    def connect(self):
+        self.sock = socket.create_connection(
+            (str(self._pinned_ip), self.port), self.timeout,
+            self.source_address)
+        self.sock = self._context.wrap_socket(self.sock,
+                                              server_hostname=self.host)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+
+    def __init__(self, pinned_ip, context=None):
+        super().__init__(context=context or ssl.create_default_context())
+        self._pinned_ip = pinned_ip
+
+    def https_open(self, req):
+        return self.do_open(self._new_connection, req)
+
+    def _new_connection(self, host, **kwargs):
+        return _PinnedHTTPSConnection(host, pinned_ip=self._pinned_ip,
+                                      context=self._context, **kwargs)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Redirects are not followed.
+
+    Following one would re-open the destination question after it was
+    settled, and nothing is lost by refusing: the document must name the
+    exact URL it was fetched from, so a redirect that changes the URL
+    fails the self-referentiality check anyway. Returning None here makes
+    urllib raise the 3xx as an HTTPError instead of chasing it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _pinned_opener(pinned_ip):
+    return urllib.request.build_opener(
+        _PinnedHTTPSHandler(pinned_ip), _NoRedirect).open
+
+
 def cimd_request(client_id):
     """The GET this server makes for a client_id document.
 
@@ -291,18 +445,24 @@ def cimd_request(client_id):
     return req
 
 
-def fetch_cimd(client_id, opener=None):
+def fetch_cimd(client_id, opener=None, resolver=None):
     """Resolve a Client ID Metadata Document.
 
     Self-referentiality is the only thing that makes this safe to trust:
     the document must claim the exact URL it was served from, so a
     client_id cannot point at somebody else's document and inherit its
-    redirect_uris."""
+    redirect_uris.
+
+    The destination is vetted before anything is sent, and the vetted
+    address is the one connected to -- see `vet_cimd_target`. An explicit
+    `opener` skips the pinning (it is the test seam and the caller has
+    already chosen the transport), but never skips the vetting."""
     if not client_id.startswith("https://"):
         raise OAuthError("invalid_client",
                          "client_id must be an https URL or a registered id")
+    _, _, addresses = vet_cimd_target(client_id, resolver=resolver)
     try:
-        open_url = opener or urllib.request.urlopen
+        open_url = opener or _pinned_opener(addresses[0])
         with open_url(cimd_request(client_id), timeout=CIMD_TIMEOUT) as resp:
             raw = resp.read(CIMD_MAX_BYTES + 1)
     except (urllib.error.URLError, OSError, ValueError) as e:
@@ -320,7 +480,8 @@ def fetch_cimd(client_id, opener=None):
     return doc
 
 
-def resolve_client(client_id, redirect_uri, opener=None, state=None):
+def resolve_client(client_id, redirect_uri, opener=None, state=None,
+                   resolver=None):
     """(client_name, redirect_uris) for a client, or raise.
 
     CIMD first, then the DCR store. A registered client_id is an opaque
@@ -328,7 +489,7 @@ def resolve_client(client_id, redirect_uri, opener=None, state=None):
     if not client_id:
         raise OAuthError("invalid_request", "client_id is required")
     if client_id.startswith("https://"):
-        doc = fetch_cimd(client_id, opener=opener)
+        doc = fetch_cimd(client_id, opener=opener, resolver=resolver)
         registered = doc.get("redirect_uris") or []
         name = doc.get("client_name") or ""
     else:

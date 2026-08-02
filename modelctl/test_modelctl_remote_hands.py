@@ -10,6 +10,8 @@ import base64
 import hashlib
 import json
 import os
+import re
+import socket
 import tempfile
 import threading
 import time
@@ -24,6 +26,32 @@ import modelctl_remote_hands as rh
 import modelctl_remote_hands_oauth as oauth
 
 TOKEN = "a" * 64
+
+# example.com's addresses, used as literals for "a routable destination".
+# The documentation ranges (203.0.113.0/24, 2001:db8::/32) would be the
+# obvious choice and are the wrong one: `ipaddress` classifies them as
+# private, so the guard blocks them -- correctly, since they are not
+# destinations either. Nothing is ever connected to here; the opener and
+# socket.create_connection are both stubbed.
+PUBLIC_V4 = "93.184.216.34"
+PUBLIC_V6 = "2606:2800:220:1:248:1893:25c8:1946"
+
+
+def stub_resolver(*addresses, calls=None):
+    """A getaddrinfo stand-in.
+
+    Every CIMD test uses one: the SSRF guard resolves before it fetches,
+    and a suite that hit the real resolver would be a suite that needs
+    DNS to pass. `calls` collects each lookup so a test can prove how
+    many times the name was resolved."""
+    addresses = addresses or (PUBLIC_V4,)
+
+    def resolve(host, port, **kwargs):
+        if calls is not None:
+            calls.append((host, port))
+        return [(socket.AF_INET6 if ":" in a else socket.AF_INET,
+                 socket.SOCK_STREAM, 6, "", (a, port)) for a in addresses]
+    return resolve
 
 
 class RemoteHandsBase(unittest.TestCase):
@@ -52,6 +80,12 @@ class RemoteHandsBase(unittest.TestCase):
         # one-time-use assertion pass for the wrong reason.
         oauth._CODES.clear()
         self.addCleanup(oauth._CODES.clear)
+        # The limiters are module-level and deliberately do not persist,
+        # which also means they leak between tests in one process: a
+        # lockout tripped by one test would 429 the next one's first
+        # request.
+        rh.reset_rate_limits()
+        self.addCleanup(rh.reset_rate_limits)
         self.addCleanup(self._restore)
 
     def _restore(self):
@@ -483,11 +517,49 @@ class FunnelTests(RemoteHandsBase):
             return 0, "", ""
         return runner, calls
 
-    def config_json(self, *ports):
+    def config_json(self, *ports, tcp=None):
         handlers = {f"/{i}": {"Proxy": f"http://127.0.0.1:{p}"}
                     for i, p in enumerate(ports)}
-        return json.dumps({"Web": {"aaron-2.tailb51646.ts.net:443":
-                                   {"Handlers": handlers}}})
+        config = {"Web": {"aaron-2.tailb51646.ts.net:443":
+                          {"Handlers": handlers}}}
+        if tcp is not None:
+            config["TCP"] = tcp
+        return json.dumps(config)
+
+    def test_tls_termination_is_not_a_second_publication(self):
+        """The shape tailscale actually writes for a funnel on 443.
+
+        Counting `{"HTTPS": true}` as a target made `off` refuse its own
+        config and demand --force -- which trains the operator to reach
+        for the one flag that WOULD clobber a real foreign config. This
+        is the live config as of 2026-08-02."""
+        config = json.loads(self.config_json(9294, tcp={"443":
+                                                        {"HTTPS": True}}))
+        self.assertEqual(rh.funnel_targets(config=config),
+                         ["http://127.0.0.1:9294"])
+        self.assertTrue(rh.funnel_exposed(port=9294, config=config))
+
+    def test_off_tears_down_its_own_funnel_without_force(self):
+        runner, calls = self.fake([
+            (["funnel", "status"],
+             (0, self.config_json(9294, tcp={"443": {"HTTPS": True}}), "")),
+        ])
+        ok, detail = rh.funnel_off(port=9294, runner=runner)
+        self.assertTrue(ok, detail)
+        self.assertIn(["funnel", "reset"], calls)
+
+    def test_a_raw_tcp_forward_is_still_foreign(self):
+        """A TCPForward is a second thing published on the same node, and
+        `reset` would take it down too."""
+        runner, calls = self.fake([
+            (["funnel", "status"],
+             (0, self.config_json(9294, tcp={"22": {"TCPForward":
+                                                    "127.0.0.1:22"}}), "")),
+        ])
+        ok, detail = rh.funnel_off(port=9294, runner=runner)
+        self.assertFalse(ok)
+        self.assertIn("127.0.0.1:22", detail)
+        self.assertNotIn(["funnel", "reset"], calls)
 
     def test_off_refuses_to_clobber_someone_elses_serve_config(self):
         runner, calls = self.fake([
@@ -662,11 +734,18 @@ class CimdTests(RemoteHandsBase):
 
     CLIENT = "https://claude.ai/oauth/client-metadata"
 
+    def fetch(self, doc, client_id=None, **kwargs):
+        """Every fetch in this class goes through a stub resolver: the
+        SSRF guard resolves before it fetches, and the suite does not get
+        to depend on DNS."""
+        kwargs.setdefault("resolver", stub_resolver())
+        return oauth.fetch_cimd(client_id or self.CLIENT,
+                                opener=fake_cimd(doc), **kwargs)
+
     def test_self_referential_document_is_accepted(self):
         doc = {"client_id": self.CLIENT,
                "redirect_uris": [oauth.CLAUDE_CALLBACK]}
-        got = oauth.fetch_cimd(self.CLIENT, opener=fake_cimd(doc))
-        self.assertEqual(got["client_id"], self.CLIENT)
+        self.assertEqual(self.fetch(doc)["client_id"], self.CLIENT)
 
     def test_non_self_referential_document_is_refused(self):
         """Without this, any URL serving someone else's document could
@@ -674,7 +753,7 @@ class CimdTests(RemoteHandsBase):
         doc = {"client_id": "https://evil.test/other",
                "redirect_uris": ["https://evil.test/cb"]}
         with self.assertRaises(oauth.OAuthError) as ctx:
-            oauth.fetch_cimd(self.CLIENT, opener=fake_cimd(doc))
+            self.fetch(doc)
         self.assertEqual(ctx.exception.code, "invalid_client")
 
     def test_fetch_sends_a_real_user_agent(self):
@@ -697,28 +776,217 @@ class CimdTests(RemoteHandsBase):
             seen["req"] = req
             return fake_cimd({"client_id": self.CLIENT,
                               "redirect_uris": []})(req, timeout)
-        oauth.fetch_cimd(self.CLIENT, opener=opener)
+        oauth.fetch_cimd(self.CLIENT, opener=opener,
+                         resolver=stub_resolver())
         self.assertIsInstance(seen["req"], urllib.request.Request)
         self.assertEqual(seen["req"].full_url, self.CLIENT)
 
     def test_non_https_client_id_is_refused(self):
         with self.assertRaises(oauth.OAuthError):
-            oauth.fetch_cimd("http://claude.ai/x", opener=fake_cimd({}))
+            self.fetch({}, client_id="http://claude.ai/x")
 
     def test_non_json_document_is_refused(self):
         with self.assertRaises(oauth.OAuthError):
-            oauth.fetch_cimd(self.CLIENT, opener=fake_cimd(b"<html>"))
+            self.fetch(b"<html>")
 
     def test_oversized_document_is_refused(self):
         blob = b'{"client_id":"' + b"x" * (oauth.CIMD_MAX_BYTES + 10) + b'"}'
         with self.assertRaises(oauth.OAuthError):
-            oauth.fetch_cimd(self.CLIENT, opener=fake_cimd(blob))
+            self.fetch(blob)
 
     def test_unreachable_document_is_refused(self):
         def opener(url, timeout=None):
             raise urllib.error.URLError("boom")
         with self.assertRaises(oauth.OAuthError):
-            oauth.fetch_cimd(self.CLIENT, opener=opener)
+            oauth.fetch_cimd(self.CLIENT, opener=opener,
+                             resolver=stub_resolver())
+
+
+# --- OAuth: the CIMD fetch as an SSRF primitive ---------------------------
+
+class CimdSsrfTests(RemoteHandsBase):
+    """`client_id` is an attacker-chosen URL that this server GETs.
+
+    Everything here is about the DESTINATION. The response is already
+    bounded in size and time and has to be self-referential to be
+    believed, so what an attacker gets out of this is not the body -- it
+    is a request, from inside the rig's network position, to a host the
+    internet cannot reach."""
+
+    CLIENT = "https://claude.ai/oauth/client-metadata"
+
+    def doc(self, client_id=None):
+        return {"client_id": client_id or self.CLIENT, "redirect_uris": []}
+
+    # --- the blocked classes, one test each -------------------------------
+
+    BLOCKED = {
+        "loopback v4": "127.0.0.1",
+        "loopback v6": "::1",
+        "rfc1918 10/8": "10.1.2.3",
+        "rfc1918 172.16/12": "172.20.0.5",
+        "rfc1918 192.168/16": "192.168.1.9",
+        "link-local / cloud metadata": "169.254.169.254",
+        "link-local v6": "fe80::1",
+        "unique local v6": "fd00::1",
+        "carrier-grade NAT / tailnet": "100.64.0.1",
+        "unspecified": "0.0.0.0",
+        "multicast": "224.0.0.1",
+        "4-in-6 loopback": "::ffff:127.0.0.1",
+        "documentation range": "203.0.113.10",
+    }
+
+    def test_every_internal_address_class_is_refused(self):
+        for label, address in self.BLOCKED.items():
+            with self.subTest(label):
+                fetched = []
+                with self.assertRaises(oauth.OAuthError) as ctx:
+                    oauth.fetch_cimd(
+                        self.CLIENT,
+                        opener=lambda *a, **k: fetched.append(1),
+                        resolver=stub_resolver(address))
+                self.assertEqual(ctx.exception.code, "invalid_client")
+                self.assertFalse(fetched, f"{label}: the GET still fired")
+
+    def test_a_public_address_is_allowed_through(self):
+        """The guard has to let the real client_id document work."""
+        for address in (PUBLIC_V4, PUBLIC_V6):
+            with self.subTest(address):
+                got = oauth.fetch_cimd(self.CLIENT,
+                                       opener=fake_cimd(self.doc()),
+                                       resolver=stub_resolver(address))
+                self.assertEqual(got["client_id"], self.CLIENT)
+
+    def test_one_private_answer_poisons_the_whole_name(self):
+        """A name that answers with a public AND a private address is not
+        half-safe: the caller picks which one gets connected to."""
+        with self.assertRaises(oauth.OAuthError):
+            oauth.fetch_cimd(self.CLIENT, opener=fake_cimd(self.doc()),
+                             resolver=stub_resolver(PUBLIC_V4, "127.0.0.1"))
+
+    def test_a_literal_internal_ip_is_refused_without_dns(self):
+        for client_id in ("https://127.0.0.1/x", "https://[::1]/x",
+                          "https://192.168.0.1/x"):
+            with self.subTest(client_id):
+                with self.assertRaises(oauth.OAuthError):
+                    oauth.fetch_cimd(client_id, opener=fake_cimd(self.doc()),
+                                     resolver=socket.getaddrinfo)
+
+    def test_non_443_ports_are_refused(self):
+        """9292 is llama-swap and 9293 is the console; a client_id
+        pointing at either is a port probe, not a metadata document."""
+        for port in (9292, 9293, 9294, 22, 8080):
+            with self.subTest(port):
+                with self.assertRaises(oauth.OAuthError) as ctx:
+                    oauth.fetch_cimd(f"https://claude.ai:{port}/x",
+                                     opener=fake_cimd(self.doc()),
+                                     resolver=stub_resolver())
+                self.assertIn("port", ctx.exception.description)
+
+    def test_the_default_port_is_still_fine(self):
+        client_id = "https://claude.ai:443/x"
+        got = oauth.fetch_cimd(client_id,
+                               opener=fake_cimd(self.doc(client_id)),
+                               resolver=stub_resolver())
+        self.assertEqual(got["client_id"], client_id)
+
+    def test_credentials_in_the_client_id_are_refused(self):
+        """No credentials in URLs, in either direction."""
+        with self.assertRaises(oauth.OAuthError):
+            oauth.fetch_cimd("https://user:pw@claude.ai/x",
+                             opener=fake_cimd(self.doc()),
+                             resolver=stub_resolver())
+
+    def test_a_supplied_opener_does_not_skip_the_guard(self):
+        """The opener is a test seam. It must not be a way past the only
+        check that decides where the request goes."""
+        with self.assertRaises(oauth.OAuthError):
+            oauth.fetch_cimd(self.CLIENT, opener=fake_cimd(self.doc()),
+                             resolver=stub_resolver("10.0.0.1"))
+
+    def test_resolve_client_carries_the_guard(self):
+        """The guard has to be on the path the handler actually calls."""
+        with self.assertRaises(oauth.OAuthError):
+            oauth.resolve_client(self.CLIENT, oauth.CLAUDE_CALLBACK,
+                                 opener=fake_cimd(self.doc()),
+                                 resolver=stub_resolver("127.0.0.1"))
+
+    # --- rebinding --------------------------------------------------------
+
+    def test_the_connection_goes_to_the_vetted_address(self):
+        """The rebind defence, stated as the thing it actually does: the
+        socket is opened to the address that passed the check, so a
+        second DNS answer between check and connect has nothing to swap.
+        """
+        seen = []
+
+        def create_connection(address, *a, **kw):
+            seen.append(address)
+            raise OSError("stopped before any bytes were sent")
+
+        with mock.patch.object(oauth.socket, "create_connection",
+                               create_connection):
+            with self.assertRaises(oauth.OAuthError):
+                oauth.fetch_cimd(self.CLIENT,
+                                 resolver=stub_resolver(PUBLIC_V4))
+        self.assertEqual(seen, [(PUBLIC_V4, 443)])
+
+    def test_the_name_is_resolved_once(self):
+        """Two resolutions is the rebind window. There is one."""
+        calls = []
+        with mock.patch.object(oauth.socket, "create_connection",
+                               mock.Mock(side_effect=OSError("no"))):
+            with self.assertRaises(oauth.OAuthError):
+                oauth.fetch_cimd(self.CLIENT,
+                                 resolver=stub_resolver(PUBLIC_V4,
+                                                        calls=calls))
+        self.assertEqual(len(calls), 1, calls)
+
+    def test_the_certificate_is_still_checked_against_the_name(self):
+        """Connecting by address must not become connecting without
+        verification: the hostname is what goes into SNI."""
+        wrapped = {}
+
+        class _Ctx:
+            def wrap_socket(self, sock, server_hostname=None):
+                wrapped["server_hostname"] = server_hostname
+                raise OSError("stopped after the handshake was set up")
+
+        conn = oauth._PinnedHTTPSConnection("claude.ai", pinned_ip=PUBLIC_V4)
+        conn._context = _Ctx()
+        with mock.patch.object(oauth.socket, "create_connection",
+                               lambda *a, **k: object()):
+            with self.assertRaises(OSError):
+                conn.connect()
+        self.assertEqual(wrapped["server_hostname"], "claude.ai")
+
+    def test_redirects_are_not_followed(self):
+        """A redirect re-opens the destination question after it was
+        settled. Refusing costs nothing: the document has to name the URL
+        it was fetched from, so a redirect fails self-referentiality
+        anyway."""
+        self.assertIsNone(oauth._NoRedirect().redirect_request(
+            None, None, 302, "Found", {}, "http://169.254.169.254/"))
+        handlers = oauth._pinned_opener(PUBLIC_V4).__self__.handlers
+        self.assertTrue(any(isinstance(h, oauth._NoRedirect)
+                            for h in handlers))
+        self.assertFalse(any(type(h) is urllib.request.HTTPRedirectHandler
+                             for h in handlers))
+
+    def test_block_reason_names_the_class(self):
+        """The log has to say what was refused, or the line is noise."""
+        import ipaddress
+        cases = {"127.0.0.1": "loopback", "10.0.0.1": "private",
+                 "169.254.169.254": "link-local", "224.0.0.1": "multicast",
+                 "0.0.0.0": "unspecified", "fd00::1": "private",
+                 PUBLIC_V4: None, PUBLIC_V6: None}
+        for address, expected in cases.items():
+            with self.subTest(address):
+                reason = oauth._ip_block_reason(ipaddress.ip_address(address))
+                if expected is None:
+                    self.assertIsNone(reason)
+                else:
+                    self.assertIn(expected, reason)
 
 
 class RedirectUriTests(RemoteHandsBase):
@@ -1183,7 +1451,7 @@ class OAuthHttpTests(ServerFixture):
         # fetch and its self-referentiality check are covered by
         # CimdTests.
         with mock.patch.object(oauth, "fetch_cimd",
-                               lambda cid, opener=None: doc):
+                               lambda cid, opener=None, resolver=None: doc):
             status, body, _ = self.get("/authorize?" + urllib.parse.urlencode({
                 "response_type": "code", "client_id": client_id,
                 "redirect_uri": oauth.CLAUDE_CALLBACK,
@@ -1226,6 +1494,716 @@ class OAuthHttpTests(ServerFixture):
         self.full_flow()
         blob = Path(os.environ["MODELCTL_REMOTE_HANDS_AUDIT_PATH"]).read_text()
         self.assertNotIn(TOKEN, blob)
+
+
+# --- the request-level audit log ------------------------------------------
+
+class RequestAuditTests(ServerFixture):
+    """One line per HTTP request, whatever happened to it.
+
+    The tool-level lines were already here and they only cover calls that
+    reached a tool. Everything a scanner does -- a 401, a malformed body,
+    a verb with no handler -- reached this port and left no record, which
+    made "nothing in the log" ambiguous between "quiet" and "not
+    logging"."""
+
+    def raw(self, method="GET", path="/mcp", headers=None, body=None):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            data=body, method=method)
+        for key, value in (headers or {}).items():
+            req.add_header(key, value)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, resp.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    def requests_logged(self):
+        return [e for e in self.audit_lines() if e.get("event") == "request"]
+
+    def test_an_authenticated_call_and_a_rejected_one_both_appear(self):
+        """The pair the order asks the smoke to show."""
+        self.rpc("tools/list")
+        self.raw(headers={"Authorization": "Bearer " + "b" * 64})
+        lines = self.requests_logged()
+        self.assertEqual([e["outcome"] for e in lines], ["ok", "unauthorized"])
+        self.assertEqual(lines[0]["auth"], "static-token")
+        self.assertEqual(lines[1]["auth"], "rejected")
+        self.assertEqual([e["status"] for e in lines], [200, 401])
+
+    def test_the_line_carries_method_path_and_peer(self):
+        self.raw(method="GET", path="/nope")
+        entry = self.requests_logged()[0]
+        self.assertEqual(entry["method"], "GET")
+        self.assertEqual(entry["path"], "/nope")
+        self.assertEqual(entry["peer"], "127.0.0.1")
+
+    def test_both_peer_and_forwarded_for_are_recorded(self):
+        """Behind the funnel the socket peer is always tailscaled on
+        loopback. Logging only that is logging nothing; logging only the
+        header is trusting the caller. Both, labelled."""
+        self.raw(headers={"X-Forwarded-For": "198.51.100.7, 10.0.0.1"})
+        entry = self.requests_logged()[0]
+        self.assertEqual(entry["peer"], "127.0.0.1")
+        self.assertEqual(entry["xff"], "198.51.100.7, 10.0.0.1")
+
+    def test_a_tools_call_names_the_tool_and_digests_the_arguments(self):
+        target = self.allowed / "audited.txt"
+        self.rpc("tools/call", {"name": "write_file",
+                                "arguments": {"path": str(target),
+                                              "content": "secret content"}})
+        request = self.requests_logged()[0]
+        self.assertEqual(request["tool"], "write_file")
+        self.assertEqual(request["args_sha256"],
+                         rh.args_digest({"path": str(target),
+                                         "content": "secret content"}))
+        tool_lines = [e for e in self.audit_lines() if e.get("event") == "tool"]
+        self.assertEqual([e["tool"] for e in tool_lines], ["write_file"])
+
+    def test_arguments_never_appear_in_any_line(self):
+        target = self.allowed / "audited.txt"
+        self.rpc("tools/call", {"name": "write_file",
+                                "arguments": {"path": str(target),
+                                              "content": "swordfish"}})
+        blob = Path(os.environ["MODELCTL_REMOTE_HANDS_AUDIT_PATH"]).read_text()
+        self.assertNotIn("swordfish", blob)
+
+    def test_a_rejected_call_is_logged_without_its_body_being_parsed(self):
+        """The tool name is deliberately absent from a 401 line.
+
+        Naming it would mean json.loads-ing an unauthenticated body just
+        to fill in a log field, which trades the "no work before auth"
+        property for a nicer log. The line still says who asked, for
+        what path, and that it was refused -- which is what the 401 is
+        evidence of."""
+        self.post({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                   "params": {"name": "run_command",
+                              "arguments": {"command": "id"}}}, token=None)
+        entry = self.requests_logged()[0]
+        self.assertEqual(entry["outcome"], "unauthorized")
+        self.assertEqual(entry["tool"], "-")
+        self.assertEqual(entry["path"], "/mcp")
+        self.assertEqual(entry["method"], "POST")
+
+    def test_a_malformed_body_is_logged(self):
+        status, _ = self.raw(method="POST", path="/mcp", body=b"{not json",
+                             headers={"Authorization": f"Bearer {TOKEN}",
+                                      "Content-Type": "application/json"})
+        self.assertEqual(status, 400)
+        entry = self.requests_logged()[0]
+        self.assertEqual(entry["outcome"], "malformed")
+        self.assertEqual(entry["status"], 400)
+
+    def test_a_verb_with_no_handler_is_logged(self):
+        status, _ = self.raw(method="PUT", path="/mcp", body=b"{}")
+        self.assertEqual(status, 501)
+        entry = self.requests_logged()[0]
+        self.assertEqual(entry["method"], "PUT")
+        self.assertEqual(entry["outcome"], "error")
+
+    def test_the_oauth_surface_is_logged_as_public_not_as_authenticated(self):
+        self.raw(path="/.well-known/oauth-authorization-server")
+        entry = self.requests_logged()[0]
+        self.assertEqual(entry["auth"], "public")
+        self.assertEqual(entry["status"], 200)
+
+    def test_the_token_endpoint_logs_both_a_request_and_an_oauth_line(self):
+        data = urllib.parse.urlencode({"grant_type": "nope"}).encode()
+        self.raw(method="POST", path="/token", body=data,
+                 headers={"Content-Type":
+                          "application/x-www-form-urlencoded"})
+        events = [(e.get("event"), e.get("tool")) for e in self.audit_lines()]
+        self.assertIn(("request", "oauth/nope"), events)
+        self.assertIn(("oauth", "oauth/nope"), events)
+
+    def test_the_line_is_on_disk_before_the_client_has_its_answer(self):
+        """Written at end_headers, not after the body: otherwise "make a
+        call, show the line" is a race rather than a check."""
+        for _ in range(20):
+            self.rpc("ping")
+        self.assertEqual(len(self.requests_logged()), 20)
+
+    def test_a_bearer_token_is_never_written_to_the_log(self):
+        self.rpc("tools/list")
+        self.raw(headers={"Authorization": "Bearer " + "b" * 64})
+        blob = Path(os.environ["MODELCTL_REMOTE_HANDS_AUDIT_PATH"]).read_text()
+        self.assertNotIn(TOKEN, blob)
+        self.assertNotIn("b" * 64, blob)
+
+
+class RedactionTests(RemoteHandsBase):
+    """The audit log has to be safe to read out loud."""
+
+    def test_the_live_operator_token_is_replaced_by_value(self):
+        text = rh.redact_text(f"tried {TOKEN} and failed")
+        self.assertNotIn(TOKEN, text)
+        self.assertIn(rh.REDACTED, text)
+
+    def test_credential_shaped_pairs_are_replaced(self):
+        for text in ("access_token=abc123", "Authorization: Bearer xyz",
+                     "client_secret = hunter2", "api-key:zzz"):
+            with self.subTest(text):
+                self.assertIn(rh.REDACTED, rh.redact_text(text))
+
+    def test_self_announcing_values_are_replaced(self):
+        for text in ("got hf_abcdef", "sk-livekey", "ghp_1234567890"):
+            with self.subTest(text):
+                self.assertIn(rh.REDACTED, rh.redact_text(text))
+
+    def test_ordinary_text_is_left_alone(self):
+        text = "path is outside the allowlist: /etc/shadow"
+        self.assertEqual(rh.redact_text(text), text)
+
+    def test_the_mapping_form_matches_the_diagnostics_redactor(self):
+        out = rh.redact_mapping({"MODELCTL_TOKEN": "abc", "HOME": "/home/a"})
+        self.assertEqual(out["MODELCTL_TOKEN"], rh.REDACTED)
+        self.assertEqual(out["HOME"], "/home/a")
+
+    def test_a_detail_field_is_redacted_on_the_way_into_the_log(self):
+        rh.audit("t", "denied", args={}, detail=f"operator_token={TOKEN}")
+        blob = Path(os.environ["MODELCTL_REMOTE_HANDS_AUDIT_PATH"]).read_text()
+        self.assertNotIn(TOKEN, blob)
+
+
+# --- rate limiting and lockout --------------------------------------------
+
+class TokenBucketTests(unittest.TestCase):
+    """A fake clock, because a rate limiter tested against the real one
+    is a test that fails on a loaded machine."""
+
+    def test_burst_then_refill(self):
+        bucket = rh.TokenBucket(rate=1.0, burst=3)
+        self.assertTrue(all(bucket.take("a", now=100) for _ in range(3)))
+        self.assertFalse(bucket.take("a", now=100))
+        self.assertTrue(bucket.take("a", now=101.01))
+
+    def test_sources_do_not_share_a_bucket(self):
+        bucket = rh.TokenBucket(rate=1.0, burst=1)
+        self.assertTrue(bucket.take("a", now=100))
+        self.assertFalse(bucket.take("a", now=100))
+        self.assertTrue(bucket.take("b", now=100))
+
+    def test_the_table_is_capped(self):
+        """Keys are attacker-supplied, so the table must not be a way to
+        spend the server's memory."""
+        bucket = rh.TokenBucket(rate=1.0, burst=2, maximum=16)
+        for i in range(500):
+            bucket.take(f"src-{i}", now=100)
+        self.assertLessEqual(len(bucket._state), 16)
+
+
+class LockoutTests(unittest.TestCase):
+
+    def test_it_takes_the_threshold_to_trip(self):
+        lock = rh.Lockout(threshold=3, base=10, maximum=100)
+        self.assertEqual(lock.failure("a", now=0), 0.0)
+        self.assertEqual(lock.failure("a", now=0), 0.0)
+        self.assertEqual(lock.failure("a", now=0), 10.0)
+        self.assertGreater(lock.retry_after("a", now=0), 0)
+
+    def test_backoff_doubles_and_is_capped(self):
+        lock = rh.Lockout(threshold=1, base=10, maximum=40)
+        self.assertEqual([lock.failure("a", now=0) for _ in range(5)],
+                         [10.0, 20.0, 40.0, 40.0, 40.0])
+
+    def test_it_recovers_when_the_ban_expires(self):
+        lock = rh.Lockout(threshold=1, base=10, maximum=100)
+        lock.failure("a", now=0)
+        self.assertGreater(lock.retry_after("a", now=5), 0)
+        self.assertEqual(lock.retry_after("a", now=11), 0)
+
+    def test_a_success_clears_the_streak(self):
+        """Or a connector that fluffs one refresh stays penalised."""
+        lock = rh.Lockout(threshold=2, base=10, maximum=100)
+        lock.failure("a", now=0)
+        lock.success("a")
+        self.assertEqual(lock.failure("a", now=0), 0.0)
+
+    def test_sources_are_independent(self):
+        lock = rh.Lockout(threshold=1, base=10, maximum=100)
+        lock.failure("a", now=0)
+        self.assertEqual(lock.retry_after("b", now=0), 0)
+
+
+class SourceKeyTests(unittest.TestCase):
+    """Which string the limiters count against."""
+
+    def handler(self, headers, peer="127.0.0.1"):
+        handler = rh._Handler.__new__(rh._Handler)
+        handler.headers = headers
+        handler.client_address = (peer, 1234)
+        return handler
+
+    def test_the_last_forwarded_hop_is_the_key(self):
+        """A proxy appends the peer it saw, so the last entry is the one
+        our funnel wrote; everything before it is caller-supplied. Keying
+        on the first would let an attacker pick a fresh bucket per
+        request by prepending noise."""
+        handler = self.handler({"X-Forwarded-For": "1.1.1.1, 198.51.100.7"})
+        self.assertEqual(handler._source_key(), "xff:198.51.100.7")
+
+    def test_a_forwarded_header_from_a_non_loopback_peer_is_ignored(self):
+        """Only the funnel is a proxy. A direct LAN caller claiming to
+        forward for someone else is just a caller."""
+        handler = self.handler({"X-Forwarded-For": "1.1.1.1"},
+                               peer="192.168.1.5")
+        self.assertEqual(handler._source_key(), "peer:192.168.1.5")
+
+    def test_loopback_with_no_header_is_indistinguishable(self):
+        handler = self.handler({})
+        self.assertFalse(handler._source_is_distinguishable())
+
+    def test_a_forwarded_header_makes_the_source_distinguishable(self):
+        handler = self.handler({"X-Forwarded-For": "198.51.100.7"})
+        self.assertTrue(handler._source_is_distinguishable())
+
+
+class RateCheckTests(RemoteHandsBase):
+
+    def test_an_indistinguishable_source_is_never_locked_out(self):
+        """Otherwise a stranger's failed guesses lock out the connector,
+        because behind a funnel with no X-Forwarded-For they share a key.
+        The global bucket is what covers that case."""
+        for _ in range(rh.LOCKOUT_THRESHOLD * 3):
+            rh.LOCKOUT.failure("peer:127.0.0.1")
+        allowed, _, _ = rh.rate_check("peer:127.0.0.1", distinguishable=False)
+        self.assertTrue(allowed)
+
+    def test_a_distinguishable_source_is_locked_out(self):
+        for _ in range(rh.LOCKOUT_THRESHOLD):
+            rh.LOCKOUT.failure("xff:198.51.100.7")
+        allowed, retry, reason = rh.rate_check("xff:198.51.100.7")
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "locked-out")
+        self.assertGreater(retry, 0)
+
+    def test_the_global_bucket_is_a_ceiling_even_without_a_source(self):
+        allowed = [rh.rate_check("peer:127.0.0.1", distinguishable=False)[0]
+                   for _ in range(int(rh.GLOBAL_BURST) + 5)]
+        self.assertIn(False, allowed, "the global bucket never ran out")
+
+
+class LockoutHttpTests(ServerFixture):
+    """The lockout over the wire, with a forged X-Forwarded-For standing
+    in for the funnel's."""
+
+    SOURCE = "198.51.100.7"
+
+    def setUp(self):
+        super().setUp()
+        # A real ban is 30s and doubles; the test asserts the mechanism,
+        # not the constants.
+        self._saved_lockout = (rh.LOCKOUT.threshold, rh.LOCKOUT.base)
+        rh.LOCKOUT.threshold, rh.LOCKOUT.base = 3, 0.4
+        # The 150ms constant-time floor is a dozen requests' worth of
+        # sleeping in a test that only cares about counting.
+        self._delay, rh.AUTH_FAILURE_DELAY = rh.AUTH_FAILURE_DELAY, 0.0
+        self.addCleanup(self._restore_limits)
+
+    def _restore_limits(self):
+        rh.LOCKOUT.threshold, rh.LOCKOUT.base = self._saved_lockout
+        rh.AUTH_FAILURE_DELAY = self._delay
+
+    def attempt(self, source=None, token="b" * 64):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/mcp",
+            data=json.dumps({"jsonrpc": "2.0", "id": 1,
+                             "method": "tools/list"}).encode(), method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("X-Forwarded-For", source or self.SOURCE)
+        if token:
+            req.add_header("Authorization", f"Bearer {token}")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, dict(resp.headers)
+        except urllib.error.HTTPError as e:
+            e.read()
+            return e.code, dict(e.headers)
+
+    def test_repeated_failures_trip_a_tempban(self):
+        codes = [self.attempt()[0] for _ in range(5)]
+        self.assertEqual(codes[:3], [401, 401, 401])
+        self.assertEqual(codes[3:], [429, 429])
+
+    def test_the_ban_carries_retry_after(self):
+        for _ in range(3):
+            self.attempt()
+        status, headers = self.attempt()
+        self.assertEqual(status, 429)
+        self.assertTrue(int(headers["Retry-After"]) >= 1)
+
+    def test_the_ban_expires(self):
+        for _ in range(3):
+            self.attempt()
+        self.assertEqual(self.attempt()[0], 429)
+        time.sleep(0.5)
+        self.assertEqual(self.attempt()[0], 401)
+
+    def test_another_source_is_unaffected(self):
+        for _ in range(4):
+            self.attempt()
+        self.assertEqual(self.attempt(source="203.0.113.9")[0], 401)
+
+    def test_a_valid_credential_clears_the_streak(self):
+        for _ in range(2):
+            self.attempt()
+        self.assertEqual(self.attempt(token=TOKEN)[0], 200)
+        self.assertEqual([self.attempt()[0] for _ in range(2)], [401, 401])
+
+    def test_a_banned_source_reaches_no_tool(self):
+        target = self.allowed / "must-not-exist"
+        for _ in range(4):
+            self.attempt()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/mcp",
+            data=json.dumps({"jsonrpc": "2.0", "id": 1,
+                             "method": "tools/call",
+                             "params": {"name": "write_file",
+                                        "arguments": {"path": str(target),
+                                                      "content": "x"}}}
+                            ).encode(), method="POST")
+        req.add_header("X-Forwarded-For", self.SOURCE)
+        req.add_header("Authorization", f"Bearer {TOKEN}")
+        try:
+            urllib.request.urlopen(req, timeout=10)
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 429)
+        self.assertFalse(target.exists())
+
+    def test_the_ban_is_audited(self):
+        for _ in range(4):
+            self.attempt()
+        outcomes = [e["outcome"] for e in self.audit_lines()
+                    if e.get("event") == "request"]
+        self.assertIn("rate-limited", outcomes)
+
+
+class AuthorizeRateLimitTests(ServerFixture):
+    """The unauthenticated OAuth surface, where the caller picks the cost
+    of each request and there is no credential to stop them earlier."""
+
+    def setUp(self):
+        super().setUp()
+        self._delay, rh.AUTH_FAILURE_DELAY = rh.AUTH_FAILURE_DELAY, 0.0
+        self.addCleanup(setattr, rh, "AUTH_FAILURE_DELAY", self._delay)
+
+    def hit(self, path="/token", source="198.51.100.8"):
+        data = urllib.parse.urlencode({"grant_type": "refresh_token",
+                                       "refresh_token": "nope"}).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}", data=data, method="POST")
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        req.add_header("X-Forwarded-For", source)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status
+        except urllib.error.HTTPError as e:
+            e.read()
+            return e.code
+
+    def test_the_token_endpoint_is_rate_limited(self):
+        codes = [self.hit() for _ in range(int(rh.AUTH_BURST) + 6)]
+        self.assertIn(429, codes)
+
+    def test_the_authorize_page_is_rate_limited(self):
+        """It performs an outbound fetch for a CIMD client. Unlimited
+        would make this endpoint a request amplifier as well as an SSRF
+        one."""
+        codes = []
+        for _ in range(int(rh.AUTH_BURST) + 6):
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{self.port}/authorize?client_id=rh-x",
+                method="GET")
+            req.add_header("X-Forwarded-For", "198.51.100.9")
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    codes.append(resp.status)
+            except urllib.error.HTTPError as e:
+                e.read()
+                codes.append(e.code)
+        self.assertIn(429, codes)
+
+
+class ConstantTimeFailureTests(ServerFixture):
+
+    def consent(self, fields):
+        data = urllib.parse.urlencode(fields).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/authorize", data=data,
+            method="POST")
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *a, **kw):
+                return None
+        try:
+            with urllib.request.build_opener(NoRedirect).open(
+                    req, timeout=10) as resp:
+                return resp.status, resp.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    def base_fields(self, **overrides):
+        fields = {"client_id": "rh-does-not-exist",
+                  "redirect_uri": "http://localhost/callback",
+                  "code_challenge": challenge_for("v" * 43),
+                  "code_challenge_method": "S256", "state": "st-1",
+                  "operator_token": TOKEN}
+        fields.update(overrides)
+        return fields
+
+    def banner(self, body):
+        """The one part of the page that could report a reason.
+
+        The rest of it echoes the caller's own client_id and redirect_uri
+        back at them, so comparing whole pages would only prove that
+        different input produces different output."""
+        match = re.search(r'<p class="warn">(.*?)</p>', body, re.S)
+        return match.group(1) if match else None
+
+    def register(self):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/register",
+            data=json.dumps({"redirect_uris": ["http://localhost/callback"]}
+                            ).encode(), method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())["client_id"]
+
+    def test_every_consent_failure_gives_the_same_answer(self):
+        """Unknown client, unregistered redirect_uri, wrong secret: three
+        different failures, one response. The reason goes to the audit
+        log, which is where the operator looks and the attacker does
+        not."""
+        client = self.register()
+        failures = [
+            self.consent(self.base_fields()),                        # unknown
+            self.consent(self.base_fields(client_id=client,
+                                          operator_token="b" * 64)),  # secret
+            self.consent(self.base_fields(client_id=client,
+                                          redirect_uri="https://evil/cb")),
+        ]
+        self.assertEqual([status for status, _ in failures], [401, 401, 401])
+        banners = {self.banner(body) for _, body in failures}
+        self.assertEqual(len(banners), 1, banners)
+        self.assertEqual(banners.pop(), "That did not match.")
+
+    def test_no_failure_page_names_the_reason(self):
+        client = self.register()
+        for fields in (self.base_fields(),
+                       self.base_fields(client_id=client,
+                                        operator_token="b" * 64)):
+            _, body = self.consent(fields)
+            for word in ("unknown", "invalid_client", "invalid_request",
+                         "not registered", "token"):
+                self.assertNotIn(word, self.banner(body))
+
+    def test_the_real_reason_reaches_the_audit_log(self):
+        self.consent(self.base_fields())
+        details = [e.get("detail", "") for e in self.audit_lines()]
+        self.assertTrue(any("unknown client" in d for d in details), details)
+
+    def test_a_failure_takes_at_least_the_floor(self):
+        started = time.time()
+        self.consent(self.base_fields(operator_token="b" * 64))
+        self.assertGreaterEqual(time.time() - started, rh.AUTH_FAILURE_DELAY)
+
+    def test_the_token_endpoint_keeps_its_rfc_error_codes(self):
+        """Flattening these would strand the connector: Claude
+        re-authorizes only on invalid_grant and gives up on anything
+        else. The description is dropped; the code is not."""
+        data = urllib.parse.urlencode({"grant_type": "refresh_token",
+                                       "refresh_token": "nope"}).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/token", data=data, method="POST")
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        try:
+            urllib.request.urlopen(req, timeout=10)
+            self.fail("expected 400")
+        except urllib.error.HTTPError as e:
+            body = json.loads(e.read().decode())
+        self.assertEqual(body["error"], "invalid_grant")
+        self.assertNotIn("error_description", body)
+
+
+# --- bearer hardening ------------------------------------------------------
+
+class BearerHardeningTests(ServerFixture):
+
+    # Every path that answers without a credential, and why it has to.
+    PUBLIC_PATHS = (
+        ("GET", "/.well-known/oauth-protected-resource"),
+        ("GET", "/.well-known/oauth-protected-resource/mcp"),
+        ("GET", "/.well-known/oauth-authorization-server"),
+        ("GET", "/.well-known/oauth-authorization-server/mcp"),
+        ("GET", "/authorize"),
+        ("POST", "/authorize"),
+        ("POST", "/token"),
+        ("POST", "/register"),
+    )
+
+    def probe(self, method, path):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            data=b"" if method == "POST" else None, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, dict(resp.headers)
+        except urllib.error.HTTPError as e:
+            e.read()
+            return e.code, dict(e.headers)
+
+    def test_the_unauthenticated_surface_is_exactly_this_list(self):
+        """A new endpoint routed before the auth gate should fail here
+        rather than in a log six weeks later.
+
+        The property is "does not demand a bearer credential", not "does
+        not answer 401": POST /authorize with a junk body answers 401
+        because the consent failed, and that 401 carries no challenge."""
+        for method, path in self.PUBLIC_PATHS:
+            with self.subTest(f"{method} {path}"):
+                status, headers = self.probe(method, path)
+                self.assertNotIn("WWW-Authenticate", headers,
+                                 f"{method} {path} demanded a credential")
+                self.assertNotEqual(status, 404)
+
+    def test_everything_else_needs_a_credential(self):
+        for method, path in (("GET", "/mcp"), ("GET", "/"),
+                             ("GET", "/admin"), ("GET", "/.well-known/x"),
+                             ("DELETE", "/mcp"), ("DELETE", "/"),
+                             ("POST", "/mcp"), ("POST", "/anything"),
+                             ("POST", "/authorizex"), ("POST", "/tokens")):
+            with self.subTest(f"{method} {path}"):
+                self.assertEqual(self.probe(method, path)[0], 401)
+
+    def test_every_verb_with_a_handler_is_covered(self):
+        """Enumerated from the class, so adding do_PUT without an auth
+        check fails this test instead of shipping."""
+        verbs = sorted(name[3:] for name in dir(rh._Handler)
+                       if name.startswith("do_"))
+        self.assertEqual(verbs, ["DELETE", "GET", "POST"])
+        for verb in verbs:
+            with self.subTest(verb):
+                self.assertEqual(self.probe(verb, "/mcp")[0], 401)
+
+    def test_every_401_carries_the_discovery_pointer(self):
+        for method, path in (("GET", "/mcp"), ("GET", "/"),
+                             ("DELETE", "/mcp"), ("POST", "/mcp")):
+            with self.subTest(f"{method} {path}"):
+                status, headers = self.probe(method, path)
+                self.assertEqual(status, 401)
+                header = headers.get("WWW-Authenticate", "")
+                self.assertTrue(header.startswith("Bearer "))
+                self.assertIn("resource_metadata=", header)
+                self.assertIn(f'scope="{oauth.SCOPE}"', header)
+
+    def test_the_401_carries_nothing_else(self):
+        """`WWW-Authenticate` is the only header the flow needs off a
+        401; a token or a hint about which credential was wrong would be
+        the server helping."""
+        _, headers = self.probe("GET", "/mcp")
+        self.assertNotIn("Set-Cookie", headers)
+        body_keys = {"error", "error_description"}
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/mcp")
+        try:
+            urllib.request.urlopen(req, timeout=10)
+        except urllib.error.HTTPError as e:
+            self.assertEqual(set(json.loads(e.read().decode())), body_keys)
+
+    def test_the_consent_401_does_not_send_a_bearer_challenge(self):
+        """It is an HTML form for a human, not a bearer-protected
+        resource; a challenge there would start an OAuth flow inside an
+        OAuth flow."""
+        data = urllib.parse.urlencode({
+            "client_id": "rh-nope", "redirect_uri": "http://localhost/callback",
+            "code_challenge": challenge_for("v" * 43),
+            "code_challenge_method": "S256",
+            "operator_token": "b" * 64}).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/authorize", data=data,
+            method="POST")
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        try:
+            urllib.request.urlopen(req, timeout=10)
+            self.fail("expected 401")
+        except urllib.error.HTTPError as e:
+            e.read()
+            self.assertEqual(e.code, 401)
+            self.assertNotIn("WWW-Authenticate", dict(e.headers))
+
+    def test_an_empty_env_token_is_not_a_token(self):
+        """The file case is covered above; the env case is the one a unit
+        file can produce by exporting an unset variable."""
+        os.environ["MODELCTL_REMOTE_HANDS_TOKEN"] = "   "
+        Path(os.environ["MODELCTL_REMOTE_HANDS_TOKEN_PATH"]).write_text("")
+        self.assertIsNone(rh.read_token())
+        self.assertFalse(rh.authorized({"authorization": "Bearer "}))
+        self.assertFalse(rh.authorized({"authorization": "Bearer    "}))
+
+    def test_an_expired_access_token_is_refused_over_http(self):
+        tokens = oauth.issue_tokens("client")
+        self.assertEqual(self.rpc("tools/list",
+                                  token=tokens["access_token"])[0], 200)
+        state = json.loads(oauth.state_path().read_text())
+        for entry in state["access"].values():
+            entry["expires"] = time.time() - 1
+        oauth._write_state(state)
+        self.assertEqual(self.rpc("tools/list",
+                                  token=tokens["access_token"])[0], 401)
+
+    def test_the_access_token_ttl_is_short_and_refreshable(self):
+        self.assertLessEqual(oauth.ACCESS_TTL, 3600)
+        self.assertGreater(oauth.REFRESH_TTL, oauth.ACCESS_TTL)
+
+
+# --- exposure hygiene ------------------------------------------------------
+
+class SecurityStatusTests(RemoteHandsBase):
+
+    def test_audit_stats_counts_lines_and_recent_auth_failures(self):
+        now = time.time()
+        rh.audit("-", "unauthorized", args={}, now=now - 10)
+        rh.audit("-", "unauthorized", args={}, now=now - 7200)
+        rh.audit("read_file", "ok", args={}, now=now - 5)
+        stats = rh.audit_stats(now=now)
+        self.assertEqual(stats["lines"], 3)
+        self.assertEqual(stats["auth_failures_last_hour"], 1)
+        self.assertTrue(stats["last_auth_failure"])
+
+    def test_rate_limited_counts_as_an_auth_failure(self):
+        now = time.time()
+        rh.audit("-", "rate-limited", args={}, now=now - 10)
+        self.assertEqual(rh.audit_stats(now=now)["auth_failures_last_hour"], 1)
+
+    def test_no_log_is_zero_not_an_error(self):
+        stats = rh.audit_stats()
+        self.assertEqual(stats["lines"], 0)
+        self.assertIsNone(stats["last_auth_failure"])
+
+    def test_status_carries_the_security_line(self):
+        rh.audit("-", "unauthorized", args={})
+
+        def runner(*args, **kwargs):
+            if list(args)[:2] == ["funnel", "status"]:
+                return 0, json.dumps({"Web": {"h:443": {"Handlers": {
+                    "/": {"Proxy": "http://127.0.0.1:9294"}}}}}), ""
+            return 1, "", ""
+
+        with mock.patch.object(rh, "service_active", lambda: False), \
+                mock.patch.object(rh, "service_uptime", lambda: None), \
+                mock.patch.object(rh, "port_listening", lambda **kw: False):
+            st = rh.status(port=9294, runner=runner)
+        self.assertEqual(st["security"]["funnel"], "up")
+        self.assertEqual(st["security"]["audit_lines"], 1)
+        self.assertEqual(st["security"]["auth_failures_last_hour"], 1)
+        self.assertTrue(st["security"]["last_auth_failure"])
+
+    def test_status_says_down_when_nothing_is_funneled(self):
+        with mock.patch.object(rh, "service_active", lambda: False), \
+                mock.patch.object(rh, "service_uptime", lambda: None), \
+                mock.patch.object(rh, "port_listening", lambda **kw: False):
+            st = rh.status(port=9294, runner=lambda *a, **k: (1, "", ""))
+        self.assertEqual(st["security"]["funnel"], "down")
 
 
 if __name__ == "__main__":
