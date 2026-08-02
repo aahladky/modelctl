@@ -30,8 +30,12 @@ llamacpp:moe_cache_learning{device="SYCL1"} 1
 """
 
 
+EMPTY_NODE_STATS = {"nodes": [], "age_seconds": None, "ok": False,
+                    "present": 0, "pins_agree": True, "protocol": ""}
+
+
 def make_collector(store=None, metrics_text=METRICS_TEXT, runtime=None,
-                   profiles=None):
+                   profiles=None, node_stats=None):
     runtime = runtime if runtime is not None else {
         "m1": {"model_id": "m1", "state": "ready", "state_class": "ok",
                "registered": True, "running": True, "pid": 42, "port": 8999,
@@ -55,7 +59,13 @@ def make_collector(store=None, metrics_text=METRICS_TEXT, runtime=None,
         metrics_fn=lambda port: metrics_text,
         swap_probe_fn=lambda: {
             "swap": {"ok": True, "latency_ms": 3, "detail": ":9292"},
-            "api": {"ok": True, "latency_ms": 5, "detail": ""}})
+            "api": {"ok": True, "latency_ms": 5, "detail": ""}},
+        # Faked like every other boundary in this factory. Left real, it
+        # reads the machine's own fleet registry -- and on a box that has
+        # one, starts an ssh poller against another machine from a unit
+        # test. The block's real behaviour lives in
+        # test_console_nodestats, which fakes the subprocess instead.
+        node_stats_fn=node_stats or (lambda: (EMPTY_NODE_STATS, None)))
 
 
 class TestParsing(unittest.TestCase):
@@ -99,7 +109,13 @@ class TestCollector(unittest.TestCase):
         snap = make_collector().snapshot()
         self.assertEqual(
             set(snap),
-            {"ts", "services", "gpus", "ram", "models", "jobs", "errors"})
+            {"ts", "services", "gpus", "ram", "models", "jobs", "node_stats",
+             "errors"})
+        # The block is present and empty (this factory fakes it, above)
+        # -- and empty is NOT an error: an install with no remote node
+        # has no card to draw. The block's own behaviour is covered in
+        # test_console_nodestats.
+        self.assertEqual(snap["node_stats"]["nodes"], [])
         # A healthy tick names no failed section: `errors` is how a page
         # tells an empty section from a section whose probe died.
         self.assertEqual(snap["errors"], {})

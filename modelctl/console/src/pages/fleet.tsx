@@ -21,6 +21,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { ConfirmButton, submitAction } from "../lib/actions";
 import { Info } from "../lib/info";
+import { Meter } from "../lib/meter";
 import { toast } from "../lib/toasts";
 import { fetchFleet, fmtAgo, fmtGiB, probeFleet, probeNode, setNodeBudget }
   from "../lib/api";
@@ -50,10 +51,18 @@ const PRESENCE: Record<PresenceState,
   },
 };
 
+/* The chip is state and stays visible; what the state MEANS is
+   education and hides until asked ("help is summoned, state is visible;
+   education hides until asked, state never does"). The blurb used to be
+   a sentence of body text under every card, which put five paragraphs of
+   teaching copy in the always-visible layer. */
 function Presence({ node }: { node: FleetNodeRow }) {
   const p = PRESENCE[node.presence.state] ?? PRESENCE.STALE;
   return (
-    <span class={p.chip}><span class="dot"></span>{p.label}</span>
+    <span style="display:inline-flex;align-items:center;gap:.35em">
+      <span class={p.chip}><span class="dot"></span>{p.label}</span>
+      <Info label={`what "${p.label}" means`}>{p.blurb}</Info>
+    </span>
   );
 }
 
@@ -169,9 +178,6 @@ function Device({ node, device, staleNames, onDone }: {
   staleNames: string[];
   onDone: () => void;
 }) {
-  const pct = device.ceiling_bytes
-    ? Math.min(100, (device.budget_bytes / device.ceiling_bytes) * 100)
-    : 0;
   return (
     <div style="margin:.8rem 0 0">
       <div class="label">
@@ -181,14 +187,24 @@ function Device({ node, device, staleNames, onDone }: {
         </span>
         <span class="sub num">{fmtGiB(device.budget_bytes, 2)} GiB budget</span>
       </div>
-      <div class="meterbar">
-        <div class="fill" style={`width:${pct}%`}></div>
-      </div>
-      {/* three numbers, never collapsed into one: what we may spend, what
-          the ceiling allows, what the device physically has */}
+      <Meter value={device.budget_bytes} max={device.ceiling_bytes}
+             label={`${node.name} ${device.name} budget`}
+             valuetext={`${fmtGiB(device.budget_bytes, 2)} GiB budgeted of a `
+                        + `${fmtGiB(device.ceiling_bytes, 2)} GiB ceiling `
+                        + `(${device.ceiling_basis})`} />
+      {/* The numbers that differ, never collapsed: what we may spend,
+          what the ceiling allows, what the device physically has. When
+          the ceiling IS the device total, printing it twice invites the
+          reader to look for a distinction that is not there -- so one
+          number. Both are kept exactly when they disagree, which is the
+          laptop CPU case where the cgroup, not the RAM, is the limit. */}
       <div class="sub">
-        ceiling {fmtGiB(device.ceiling_bytes, 2)} GiB ({device.ceiling_basis})
-        {" · "}device total {fmtGiB(device.total_bytes, 2)} GiB
+        {device.ceiling_bytes === device.total_bytes
+          ? <>ceiling {fmtGiB(device.ceiling_bytes, 2)} GiB
+              {" "}({device.ceiling_basis})</>
+          : <>ceiling {fmtGiB(device.ceiling_bytes, 2)} GiB
+              {" "}({device.ceiling_basis}){" · "}
+              device total {fmtGiB(device.total_bytes, 2)} GiB</>}
         {device.cap_bytes > 0
           ? ` · unit cap ${fmtGiB(device.cap_bytes, 2)} GiB` : ""}
       </div>
@@ -196,7 +212,11 @@ function Device({ node, device, staleNames, onDone }: {
         ? <BudgetField node={node} device={device} staleNames={staleNames}
                        onDone={onDone} />
         : <div class="sub" style="margin-top:.35rem">
-            read-only here — {device.edit_note}
+            read-only here{" "}
+            <Info label="why this budget is read-only">
+              {device.edit_note}. <a href="/v2/settings">Open settings</a> to
+              change either number.
+            </Info>
           </div>}
     </div>
   );
@@ -209,7 +229,6 @@ function NodeCard({ node, staleNames, onDone }: {
 }) {
   const [busy, setBusy] = useState(false);
   const state = node.presence.state;
-  const p = PRESENCE[state] ?? PRESENCE.STALE;
   /* Anything but PRESENT gets the stale widget treatment: a node that is
      not a planning target must not be able to look like one at a
      glance. */
@@ -240,7 +259,6 @@ function NodeCard({ node, staleNames, onDone }: {
         </span>
         <Presence node={node} />
       </div>
-      <div class="sub">{p.blurb}</div>
       {node.location === "remote" && (
         <>
           <Pin node={node} />
@@ -254,7 +272,13 @@ function NodeCard({ node, staleNames, onDone }: {
           </div>
         </>
       )}
-      {node.note && <div class="sub" style="margin-top:.25rem">{node.note}</div>}
+      {/* node.note is no longer rendered. It was operator prose in the
+          always-visible layer, and the two notes in the registry
+          hardcoded a MemoryMax that the unit had since outgrown -- the
+          card printed "MemoryMax=20G" two rows above the correct 26.00
+          GiB ceiling it had just computed. The live poll on the operate
+          page reports these truthfully now, so the strings were emptied
+          rather than re-rendered somewhere quieter. */}
       {node.devices.length === 0 && (
         <div class="sub" style="margin-top:.5rem">no devices recorded</div>
       )}
@@ -276,12 +300,17 @@ function StaleBanner({ rows }: { rows: StaleProfileRow[] }) {
   if (rows.length === 0) return null;
   return (
     <div class="widget">
-      <div class="label"><span>stored planning inputs out of step</span></div>
-      <p class="sub" style="margin:.3rem 0 .5rem">
-        These profiles recorded a fleet budget that is no longer the one in
-        force. Their stored plans still place against the old number —
-        that is the point of recorded inputs — until they are replanned.
-      </p>
+      <div class="label">
+        <span>
+          stored planning inputs out of step{" "}
+          <Info label="what out of step means here">
+            These profiles recorded a fleet budget that is no longer the
+            one in force. Their stored plans still place against the old
+            number — that is the point of recorded inputs — until they
+            are replanned.
+          </Info>
+        </span>
+      </div>
       <table>
         <thead><tr><th>profile</th><th>device</th><th class="num">recorded</th>
           <th class="num">now</th></tr></thead>
@@ -309,15 +338,17 @@ function NightLane({ view }: { view: FleetView }) {
     <div class="widget">
       <div class="label">
         <span>night-lane comparisons that need a node</span>
-        <span class="sub">read-only</span>
+        <span class="sub" style="display:inline-flex;align-items:center;gap:.35em">
+          read-only
+          <Info label="why this table is read-only">
+            Pre-registered comparisons whose arms require a fleet node.
+            Moving a budget under an enabled one changes what it
+            measures. Enabling is not offered here: a pre-registration is
+            a commitment, and a surface that can flip it in passing is
+            one that invalidates it in passing.
+          </Info>
+        </span>
       </div>
-      <p class="sub" style="margin:.3rem 0 .5rem">
-        Pre-registered comparisons whose arms require a fleet node. Moving
-        a budget under an enabled one changes what it measures. Enabling
-        is not offered here: a pre-registration is a commitment, and a
-        surface that can flip it in passing is one that invalidates it in
-        passing.
-      </p>
       <table>
         <thead>
           <tr><th>job</th><th>needs</th><th>mode</th><th>state</th></tr>

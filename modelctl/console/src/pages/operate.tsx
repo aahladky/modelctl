@@ -3,13 +3,15 @@
    live region flips to the stale treatment (dashed border, last-known
    value + timestamp + retry countdown) instead of blanking. */
 import { useEffect, useRef, useState } from "preact/hooks";
+import type { ComponentChildren } from "preact";
 import { useStream } from "../lib/stream";
 import { Spark, push } from "../lib/spark";
 import { Info } from "../lib/info";
+import { Meter } from "../lib/meter";
 import { ConfirmButton, submitAction } from "../lib/actions";
 import { fmtClock, fmtGiB, fmtUp, loadModel, unloadAll, unloadModel }
   from "../lib/api";
-import type { ModelRow, Tick } from "../lib/types";
+import type { ModelRow, NodeStatRow, NodeStats, Tick } from "../lib/types";
 
 type Series = Record<string, number[]>;
 
@@ -45,6 +47,109 @@ function StaleSub({ lastAt, retryIn }: { lastAt: number | null; retryIn: number 
     <div class="sub">
       last known {lastAt != null ? fmtClock(lastAt) : "—"} ·{" "}
       <span>{retryIn != null ? `retrying in ${retryIn}s` : "reconnecting…"}</span>
+    </div>
+  );
+}
+
+const DASH = "—";
+
+/* One remote node inside the fleet card. Separated from its neighbour by
+   a hairline rather than by its own widget: a node's health is the same
+   class of fact as a GPU's VRAM, so it belongs in one more cell of the
+   existing grid, not in a row of its own.
+
+   Every number here can be absent, and absent renders as an em dash --
+   never 0. fmtGiB already does that for byte counts; the util/temp/load
+   fields are checked against null explicitly for the same reason. A card
+   that prints "gpu 0%" when it means "we could not ask the GPU" is
+   lying at exactly the glance this card exists to serve. */
+function NodeBlock({ n, first }: { n: NodeStatRow; first: boolean }) {
+  const sep = first
+    ? undefined
+    : "border-top:1px solid var(--border);margin-top:.7rem;padding-top:.7rem";
+  const gpu = n.kind === "gpu";
+  const title = (
+    <span>{n.name} <span class="sub">{gpu ? n.device : "cpu"}</span></span>
+  );
+
+  /* No ssh host in the registry: there is nothing to poll and nothing to
+     meter. The row still renders, because presence and the budget are
+     registry facts and are knowable without touching the machine. */
+  if (!n.polled) {
+    return (
+      <div style={sep}>
+        <div class="label">
+          {title}
+          <span class="num">{fmtGiB(n.budget_bytes)} GiB budget</span>
+        </div>
+        <div class="sub">
+          {n.present ? "present" : "not a planning target"} · no ssh host
+          recorded — presence and budget only
+        </div>
+      </div>
+    );
+  }
+
+  const value = gpu ? n.gpu_used_bytes : n.unit_memory_bytes;
+  const max = gpu ? n.gpu_total_bytes : n.unit_memory_max_bytes;
+  const what = gpu ? "VRAM" : "cgroup memory";
+  const subLine = gpu
+    ? ["vram",
+       `gpu ${n.gpu_util_pct == null ? DASH : `${n.gpu_util_pct}%`}`,
+       `${n.gpu_temp_c == null ? DASH : n.gpu_temp_c} C`]
+    : ["cgroup",
+       `load ${n.host_load1 == null ? DASH : n.host_load1.toFixed(2)}`,
+       `${n.host_nproc == null ? DASH : n.host_nproc} threads`];
+  const secondLine = gpu
+    ? `unit ${fmtGiB(n.unit_memory_bytes, 2)} / `
+      + `${fmtGiB(n.unit_memory_max_bytes, 0)} GiB cap`
+    : `host ${fmtGiB(n.host_mem_available_bytes)} / `
+      + `${fmtGiB(n.host_mem_total_bytes, 0)} GiB available`;
+
+  return (
+    <div style={sep}>
+      <div class="label">
+        {title}
+        <span class="num">{fmtGiB(value)} / {fmtGiB(max, 0)} GiB</span>
+      </div>
+      <Meter value={value} max={max} label={`${n.name} ${what}`}
+             valuetext={`${fmtGiB(value)} of ${fmtGiB(max, 0)} GiB `
+                        + `${what} on ${n.name}`} />
+      <div class="sub">{subLine.join(" · ")}</div>
+      <div class="sub">
+        {secondLine}
+        {n.present ? "" : " · not a planning target"}
+      </div>
+    </div>
+  );
+}
+
+function RemoteFleet({ ns, stale, note }:
+                     { ns: NodeStats; stale: boolean; note: ComponentChildren }) {
+  /* No registered remote node is no card. An empty "remote fleet" widget
+     on a single-machine install is noise, and it is not the same thing
+     as a fleet that exists and could not be read -- that case arrives as
+     nodes with em dashes plus the stale treatment. */
+  if (ns.nodes.length === 0) return null;
+  const hosts = [...new Set(ns.nodes.map((n) => n.host).filter(Boolean))];
+  return (
+    <div class={stale ? "widget stale" : "widget"}>
+      <div class="label">
+        <span>remote fleet <span class="sub">{hosts.join(" · ") || DASH}</span></span>
+        <LiveMark stale={stale} />
+      </div>
+      {/* Pin disagreement gets the error treatment, not a footnote: a
+          mismatched node answers a handshake in milliseconds and reports
+          a healthy protocol version, and it is unusable. */}
+      <div class={ns.pins_agree ? "sub" : "msg error"} style="margin-top:.3rem">
+        {ns.present} present · {ns.pins_agree
+          ? "pins agree"
+          : "PIN MISMATCH — not a planning target"} · RPC {ns.protocol || DASH}
+      </div>
+      {ns.nodes.map((n, i) => (
+        <NodeBlock key={n.name} n={n} first={i === 0} />
+      ))}
+      {note}
     </div>
   );
 }
@@ -86,13 +191,14 @@ function ModelRowView({ m, spark, stale }:
                  `${verb} ${m.name}`).finally(() => setBusy(false));
   };
   return (
-    <tr class="rowlink"
-        onClick={(e) => {
-          if ((e.target as HTMLElement).closest("button")) return;
-          location.href = `/v2/models/${encodeURIComponent(m.name)}`;
-        }}>
+    /* The row keeps its hover treatment, but the navigation is a real
+       <a> in the name cell rather than an onClick on the <tr>. A div
+       pretending to be a link cannot be tabbed to, middle-clicked,
+       opened in a new tab or read out as a link; this restores all
+       four, and costs the row nothing but the cursor. */
+    <tr class="rowhover">
       <td>
-        {m.name}
+        <a href={`/v2/models/${encodeURIComponent(m.name)}`}>{m.name}</a>
         <div class="sub">
           {[m.size_bytes != null ? `${fmtGiB(m.size_bytes)} GiB` : "",
             m.file,
@@ -110,14 +216,23 @@ function ModelRowView({ m, spark, stale }:
           ? <Spark data={spark} height={26} label={`${m.name} tok/s`} />
           : null}
       </td>
-      <td class="actions">
-        {m.running
-          ? <button class={busy ? "busy" : undefined} disabled={busy || stale}
-                    onClick={() => act("unload")}>unload</button>
-          : m.registered && m.enabled
+      {/* the cell stays a cell: `.actions` sets display:flex, which on a
+          <td> drops it out of the row's height equalization, so its
+          border-bottom draws at content height instead of row height and
+          the divider steps mid-row. The flex goes on an inner div and
+          the width moves to the cell. */}
+      <td style="width:120px">
+        <div class="actions">
+          {m.running
             ? <button class={busy ? "busy" : undefined} disabled={busy || stale}
-                      onClick={() => act("load")}>load</button>
-            : null}
+                      aria-label={`unload ${m.name}`}
+                      onClick={() => act("unload")}>unload</button>
+            : m.registered && m.enabled
+              ? <button class={busy ? "busy" : undefined} disabled={busy || stale}
+                        aria-label={`load ${m.name}`}
+                        onClick={() => act("load")}>load</button>
+              : null}
+        </div>
       </td>
     </tr>
   );
@@ -142,6 +257,16 @@ export function Operate() {
   const { services, gpus, ram, models, jobs } = tick;
   const runningJobs = jobs.filter((j) => j.status === "running").length;
   const cacheModels = models.filter((m) => m.cache != null);
+  const nodeStats = tick.node_stats
+    ?? { nodes: [], age_seconds: null, ok: false, present: 0,
+         pins_agree: true, protocol: "" };
+  /* Running first, then by name. The heading below says "registered",
+     not "resident", because that is what the list is -- every profile,
+     running or not. Sorting the running ones to the top is what makes
+     the honest name harmless to read at a glance. (The server already
+     sorts this way; re-sorting here keeps the two from drifting.) */
+  const sortedModels = [...models].sort((a, b) =>
+    Number(b.running) - Number(a.running) || a.name.localeCompare(b.name));
   /* Per-region degradation. The stream can be perfectly healthy while one
      server-side probe throws: `gpus` then arrives empty and `ram` arrives
      zeroed, both indistinguishable from fact. tick.errors names the
@@ -207,9 +332,9 @@ export function Operate() {
                 <span>{g.device} · {g.name}</span>
                 <LiveMark stale={bad("gpus")} />
               </div>
-              <div class="meterbar">
-                <div class="fill" style={`width:${total ? Math.min(100, (used / total) * 100) : 0}%`}></div>
-              </div>
+              <Meter value={used} max={total} label={`${g.device} VRAM`}
+                     valuetext={`${used.toFixed(1)} of ${total.toFixed(0)} GiB `
+                                + `VRAM on ${g.device}`} />
               <div class="big">{used.toFixed(1)}<span class="sub"> / {total.toFixed(0)} GiB VRAM</span></div>
               <Spark data={series[`gpu:${g.device}`] ?? []} min={0} max={total}
                      label={`${g.device} VRAM used`} />
@@ -223,9 +348,15 @@ export function Operate() {
             <span>system RAM</span>
             <LiveMark stale={bad("ram")} />
           </div>
-          <div class="meterbar">
-            <div class="fill" style={`width:${ram.total_bytes ? Math.min(100, (ram.used_bytes / ram.total_bytes) * 100) : 0}%`}></div>
-          </div>
+          {/* a failed meminfo read is 0/0, which must draw empty and
+              announce nothing -- not a full bar next to an em dash */}
+          <Meter value={err["ram"] ? null : ram.used_bytes}
+                 max={err["ram"] ? null : ram.total_bytes}
+                 label="system RAM"
+                 valuetext={err["ram"]
+                   ? "system RAM reading unavailable"
+                   : `${fmtGiB(ram.used_bytes)} of `
+                     + `${fmtGiB(ram.total_bytes, 0)} GiB system RAM used`} />
           <div class="big">
             {/* a failed meminfo read yields 0/0; print an em dash rather
                 than a number that reads as a measurement */}
@@ -236,6 +367,13 @@ export function Operate() {
                  label="RAM used" />
           {sectionNote("ram")}
         </div>
+
+        {/* One more cell in the same grid, same footprint as system RAM.
+            No spark: two 30px sparks in one cell is cramped, and
+            per-node history stays on the fleet page. */}
+        <RemoteFleet ns={nodeStats}
+                     stale={bad("node_stats") || !nodeStats.ok}
+                     note={sectionNote("node_stats")} />
 
         {cacheModels.map((m) => {
           const c = m.cache!;
@@ -254,11 +392,13 @@ export function Operate() {
                 </span>
                 <LiveMark stale={bad("models")} />
               </div>
-              <div class="meterbar">
-                <div class="fill" style={`width:${pct ?? 0}%`}></div>
-              </div>
+              <Meter value={pct} max={pct == null ? null : 100}
+                     label={`${m.name} MoE cache hit ratio`}
+                     valuetext={pct == null
+                       ? `${m.name} cache hit ratio not reported`
+                       : `${pct.toFixed(1)}% cache hit ratio for ${m.name}`} />
               <div class="big">
-                {pct != null ? pct.toFixed(1) : "—"}
+                {pct != null ? pct.toFixed(1) : DASH}
                 <span class="sub"> % hit · {c.learning === null
                   ? "learning state unknown"
                   : c.learning ? "still learning" : "learning done"}</span>
@@ -281,7 +421,10 @@ export function Operate() {
 
       <div class={cls("models")}>
         <div class="label">
-          <h2 style="margin:0">resident models</h2>
+          {/* "registered", not "resident": the list is every profile,
+              and on a machine with nothing loaded a heading that says
+              "resident" sits over a list of stopped models. */}
+          <h2 style="margin:0">registered models</h2>
           {/* the one fleet-wide action, next to the fleet it acts on */}
           <span class="actions">
             <UnloadAll running={models.filter((m) => m.running).length}
@@ -294,23 +437,28 @@ export function Operate() {
                   {" "}{err["models"]}. This is not an empty install.</p>
               : <p class="sub">no profiles registered yet — <a href="/v2/add">add a model</a></p>)
           : (
-            <table>
-              <thead>
-                <tr>
-                  <th>model</th><th>placement</th><th>state</th>
-                  <th class="num">tok/s</th><th style="width:130px">last 60 s</th><th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {models.map((m) => (
-                  <ModelRowView key={m.name} m={m}
-                                spark={series[`tok:${m.name}`] ?? []} stale={stale} />
-                ))}
-              </tbody>
-            </table>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>model</th><th>placement</th><th>state</th>
+                    <th class="num">tok/s</th><th style="width:130px">last 60 s</th>
+                    {/* an empty <th> is a column with no name; the label
+                        is hidden from the eye, not from a reader */}
+                    <th><span class="sr-only">actions</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedModels.map((m) => (
+                    <ModelRowView key={m.name} m={m}
+                                  spark={series[`tok:${m.name}`] ?? []} stale={stale} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         <p class="sub" style="margin:.5rem 0 0">
-          rows update in place over SSE · click a row for the model hub
+          rows update in place over SSE · the model name links to its hub
           (overview · plans · measurements · logs · configure)
         </p>
         {sectionNote("models")}

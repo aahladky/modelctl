@@ -84,6 +84,7 @@ export function Add() {
         {results && results.length === 0 && !searchErr &&
           <p class="sub">no results</p>}
         {results && results.length > 0 && (
+          <div class="table-scroll">
           <table>
             <tbody>
               {results.map((r) => (
@@ -93,7 +94,8 @@ export function Add() {
                       {r.downloads != null ? ` · ${r.downloads} downloads` : ""}
                     </span>
                   </td>
-                  <td class="actions" style="width:120px">
+                  <td style="width:120px">
+                    <div class="actions">
                     <button type="button" disabled={busy} onClick={async () => {
                       setBusy(true);
                       try {
@@ -106,11 +108,13 @@ export function Add() {
                         setBusy(false);
                       }
                     }}>add →</button>
+                    </div>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 
@@ -121,6 +125,7 @@ export function Add() {
           <p class="sub">none active — start one above</p>
         )}
         {wizards && wizards.length > 0 && (
+          <div class="table-scroll">
           <table>
             <tbody>
               {wizards.map((w) => (
@@ -134,7 +139,8 @@ export function Add() {
                     <div class="sub">step: {w.step}
                       {w.profile_name ? ` · profile ${w.profile_name}` : ""}</div>
                   </td>
-                  <td class="actions" style="width:200px">
+                  <td style="width:200px">
+                    <div class="actions">
                     <button type="button"
                             onClick={() => { location.href = `/v2/add/${w.wizard_id}`; }}>
                       resume</button>
@@ -147,11 +153,13 @@ export function Add() {
                         toast("err", "✗ couldn't abandon wizard", String(e), 9000);
                       }
                     }}>abandon</button>
+                    </div>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
     </>

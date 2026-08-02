@@ -277,7 +277,8 @@ LEAVES = ['modelctl_paths.py', 'modelctl_fsutil.py', 'modelctl_errors.py',
           'modelctl_storage.py', 'modelctl_backends.py',
           'modelctl_load.py', 'modelctl_paired.py', 'modelctl_anchors.py',
           'modelctl_display.py', 'modelctl_remote_hands.py',
-          'modelctl_remote_hands_oauth.py', 'modelctl_lanes.py']
+          'modelctl_remote_hands_oauth.py', 'modelctl_lanes.py',
+          'modelctl_nodestats.py']
 bad = []
 for name in LEAVES:
     path = pathlib.Path(name)

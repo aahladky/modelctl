@@ -1,6 +1,7 @@
 """Telemetry for the /v2 console: one SSE stream feeding the operate and
 jobs pages -- service status, per-GPU VRAM, system RAM, per-resident-model
-tok/s, MoE cache hit ratio + learning state, and the job list.
+tok/s, MoE cache hit ratio + learning state, remote fleet node stats, and
+the job list.
 
 Every probe is injectable so tests run hermetically (no xpu-smi, no
 llama-swap, no /proc reads), and every section of a snapshot degrades
@@ -12,12 +13,20 @@ tok/s is a real rate: delta of the worker's tokens_predicted_total
 counter between ticks, not the server's per-request average gauge. The
 gauge is included as tok_s_avg so an idle-but-loaded model still shows
 what it last did.
+
+The remote-node block is the one section that cannot be read inline. Its
+source is another machine over ssh, so modelctl_nodestats owns a timer
+thread and a cache and this module only ever reads that cache -- one
+hung ssh must not stall the front page. The thread is not started at all
+until the registry actually names a remote node.
 """
 import json
 import re
 import threading
 import time
 import urllib.request
+
+import modelctl_nodestats
 
 MOE_METRIC_RE = re.compile(r"llamacpp:moe_cache_(\w+)(\{[^}]*\})?\s+(\S+)")
 DEVICE_LABEL_RE = re.compile(r'device="([^"]*)"')
@@ -161,7 +170,8 @@ class TelemetryCollector:
 
     def __init__(self, store=None,
                  inventory_fn=None, meminfo_fn=None, runtime_fn=None,
-                 profiles_fn=None, metrics_fn=None, swap_probe_fn=None):
+                 profiles_fn=None, metrics_fn=None, swap_probe_fn=None,
+                 node_stats_fn=None, node_poller=None):
         self.store = store
         self._inventory_fn = inventory_fn
         self._meminfo_fn = meminfo_fn or read_meminfo
@@ -169,6 +179,11 @@ class TelemetryCollector:
         self._profiles_fn = profiles_fn
         self._metrics_fn = metrics_fn or fetch_metrics_text
         self._swap_probe_fn = swap_probe_fn
+        self._node_stats_fn = node_stats_fn
+        # Constructed here, started nowhere: building the object is free
+        # and doing it eagerly means two concurrent SSE connections can
+        # never race to create two pollers for one console.
+        self._node_poller = node_poller or modelctl_nodestats.NodeStatsPoller()
         self._prev = {}  # model name -> (tokens_predicted_total, monotonic ts)
         self.started = time.time()
 
@@ -225,6 +240,34 @@ class TelemetryCollector:
         except ModelctlSwapError as e:
             api["detail"] = e.code
         return {"swap": swap, "api": api}
+
+    def _node_stats(self):
+        """(block, error) for the remote fleet. Reads a cache, never ssh.
+
+        The poller's thread is started on the first tick that finds a
+        remote node in the registry and not before: an install with no
+        fleet gets no thread, which is also what makes the test suite
+        (whose redirected MODELCTL_HOME has no registry) incapable of
+        opening a connection from here.
+        """
+        if self._node_stats_fn:
+            return self._node_stats_fn()
+        import modelctl_fleet
+        from . import fleet as fleetview
+        nodes = list(modelctl_fleet.load_fleet())
+        if not nodes:
+            # Not a failure and not a card: an install with no registered
+            # remote node has nothing to show, which is different from a
+            # fleet that exists and cannot be read.
+            return modelctl_nodestats.summarize(
+                [], {"stats": {}, "age_seconds": None, "ok": False}), None
+        self._node_poller.start()
+        snap = self._node_poller.snapshot()
+        rows = modelctl_nodestats.node_rows(
+            nodes, fleetview.presence_state, modelctl_fleet.load_presence(),
+            snap.get("stats"))
+        block = modelctl_nodestats.summarize(rows, snap)
+        return block, (None if block["ok"] else snap.get("error"))
 
     # -- assembly --------------------------------------------------------
     def _placement(self, profile):
@@ -366,8 +409,17 @@ class TelemetryCollector:
         except Exception as e:
             jobs = []
             errors["jobs"] = str(e) or "job store read failed"
+        try:
+            node_stats, node_error = self._node_stats()
+            if node_error:
+                errors["node_stats"] = node_error
+        except Exception as e:
+            node_stats = {"nodes": [], "age_seconds": None, "ok": False,
+                          "present": 0, "pins_agree": True, "protocol": ""}
+            errors["node_stats"] = str(e) or "node stats unavailable"
         return {"ts": time.time(), "services": services, "gpus": gpus,
-                "ram": ram, "models": models, "jobs": jobs, "errors": errors}
+                "ram": ram, "models": models, "jobs": jobs,
+                "node_stats": node_stats, "errors": errors}
 
 
 def sse_stream(collector, interval=2.0, max_seconds=3600, stop=None):

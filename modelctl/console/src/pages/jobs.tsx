@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { useStream } from "../lib/stream";
 import { cancelJob, fetchJob, fmtAgo, fmtClock } from "../lib/api";
 import { Info } from "../lib/info";
+import { Meter } from "../lib/meter";
 import { toast } from "../lib/toasts";
 import type { JobRow } from "../lib/types";
 
@@ -140,9 +141,10 @@ export function Job({ id }: { id: string }) {
         </table>
         {!finished && (
           <>
-            <div class="meterbar" style="max-width:340px">
-              <div class="fill" style={`width:${Math.round(job.progress * 100)}%`}></div>
-            </div>
+            <Meter value={Math.round(job.progress * 100)} max={100}
+                   style="max-width:340px" label={`${job.title} progress`}
+                   valuetext={`${Math.round(job.progress * 100)}% complete`
+                              + (job.detail ? ` · ${job.detail}` : "")} />
             <div class="sub num">
               {`${Math.round(job.progress * 100)}%`}
               {job.detail ? ` · ${job.detail}` : ""}
@@ -211,6 +213,7 @@ export function Jobs() {
         {running.length === 0
           ? <p class="sub">nothing running</p>
           : (
+            <div class="table-scroll">
             <table>
               <tbody>
                 {running.map((j) => (
@@ -222,9 +225,12 @@ export function Jobs() {
                     </td>
                     <td>
                       <JobLink job={j} /> <span class="sub">· lane {j.lane}</span>
-                      <div class="meterbar" style="max-width:340px">
-                        <div class="fill" style={`width:${Math.round(j.progress * 100)}%`}></div>
-                      </div>
+                      <Meter value={Math.round(j.progress * 100)} max={100}
+                             style="max-width:340px"
+                             label={`${j.title} progress`}
+                             valuetext={`${Math.round(j.progress * 100)}% complete`
+                                        + (j.detail ? ` · ${j.detail}` : "")} />
+
                       <div class="sub num">
                         {/* percentage AND detail: the two answer different
                             questions ("how far" vs "doing what"), and the
@@ -236,9 +242,15 @@ export function Jobs() {
                       </div>
                       <LogTail text={j.result_tail} />
                     </td>
-                    <td class="actions" style="width:150px">
+                    {/* the cell stays a cell -- `.actions` sets
+                        display:flex, which on a <td> drops it out of row
+                        height equalization and steps its border-bottom
+                        mid-row. Flex on an inner div, width on the td. */}
+                    <td style="width:150px">
+                      <div class="actions">
                       <button class={pending[j.id] ? "btn-danger busy" : "btn-danger"}
                               disabled={!!pending[j.id] || !j.cancellable}
+                              aria-label={`cancel ${j.title}`}
                               onClick={() => request(j, "cancel")}>
                         cancel
                       </button>
@@ -249,11 +261,13 @@ export function Jobs() {
                         <div class="sub">this lane's jobs cannot be cancelled
                           once started</div>
                       )}
+                      </div>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            </div>
           )}
       </div>
 
@@ -262,6 +276,7 @@ export function Jobs() {
         {queued.length === 0
           ? <p class="sub">queue is empty</p>
           : (
+            <div class="table-scroll">
             <table>
               <tbody>
                 {queued.map((j, i) => (
@@ -277,17 +292,21 @@ export function Jobs() {
                         · lane {j.lane}{j.detail ? ` · ${j.detail}` : ""}
                       </span>
                     </td>
-                    <td class="actions" style="width:120px">
+                    <td style="width:120px">
+                      <div class="actions">
                       <button class={pending[j.id] ? "busy" : undefined}
                               disabled={!!pending[j.id]}
+                              aria-label={`dequeue ${j.title}`}
                               onClick={() => request(j, "dequeue")}>
                         dequeue
                       </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            </div>
           )}
       </div>
 
@@ -296,6 +315,7 @@ export function Jobs() {
         {history.length === 0
           ? <p class="sub">no finished jobs yet</p>
           : (
+            <div class="table-scroll">
             <table>
               <tbody>
                 {history.map((j) => {
@@ -315,12 +335,15 @@ export function Jobs() {
                           {j.finished ? ` · ${fmtAgo(j.finished)}` : ""}
                         </span>
                       </td>
-                      <td class="actions" style="width:120px"></td>
+                      {/* history has no actions: an empty cell, not a
+                          flex container pretending to be one */}
+                      <td style="width:120px"></td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
+            </div>
           )}
       </div>
     </>

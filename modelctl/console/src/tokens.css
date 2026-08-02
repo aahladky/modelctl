@@ -49,6 +49,15 @@
     --shadow: 0 1px 3px rgba(0, 0, 0, .4);
   }
 }
+/* Native controls (scrollbars, form widgets, the canvas behind them)
+   follow the FORCED theme, not only the system one. `html {
+   color-scheme: light dark }` below tells the UA "either is fine", which
+   is right for the system-preference case and wrong the moment the user
+   picks one: a forced light theme could still get dark scrollbars and
+   dark date pickers because the OS said dark. These two pin it. */
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+
 /* explicit user choice */
 :root[data-theme="dark"] {
   --bg: #14171a;
@@ -175,8 +184,14 @@ th, td { text-align: left; padding: .45rem .5rem; border-bottom: 1px solid var(-
 tr:last-child td { border-bottom: none; }
 th { color: var(--muted); font-weight: 600; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; }
 td.num, th.num { text-align: right; }
+/* .rowlink is a row that really is clickable (a <tr> with a handler), so
+   it keeps the pointer. .rowhover is a row whose link lives in a cell --
+   same hover treatment, no pointer, because a pointer over the four
+   fifths of the row that do not navigate is a promise the row no longer
+   keeps. */
 tbody tr.rowlink { cursor: pointer; }
-tbody tr.rowlink:hover td { background: var(--accent-wash); }
+tbody tr.rowlink:hover td,
+tbody tr.rowhover:hover td { background: var(--accent-wash); }
 tr.unhappen td { animation: flash-err 1.2s ease-out 2; }
 @keyframes flash-err { 30% { background: var(--err-wash); } }
 
@@ -272,6 +287,24 @@ input[type=number] { font-family: var(--mono); }
 }
 .tag.measured { color: var(--ok); border-color: var(--ok); }
 .tag.estimated { color: var(--warn); border-color: var(--warn); }
+
+/* Wide tables scroll inside their own box instead of pushing the page
+   sideways. The max-width query below reflows the sidebar and the grid
+   and does nothing at all for a table -- a six-column table with a
+   placement string in it is simply wider than a phone, and without this
+   the whole document scrolled horizontally. overscroll-behavior-inline
+   keeps a swipe that reaches the end of the table from turning into a
+   browser back-gesture. */
+.table-scroll { overflow-x: auto; overscroll-behavior-inline: contain; }
+.table-scroll > table { min-width: 760px; }
+
+/* Visible to a screen reader, not to the eye. For labels that exist to
+   name a thing whose purpose is obvious by sight -- the actions column's
+   header, which is an empty <th> otherwise. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+}
 
 /* narrow screens: legible, not redesigned (desktop LAN tool) */
 @media (max-width: 860px) {

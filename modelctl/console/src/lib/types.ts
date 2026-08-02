@@ -54,6 +54,54 @@ export interface ModelRow {
   cache: CacheStats | null;
 }
 
+/* One remote fleet node as the operate page's `remote fleet` card sees
+   it: what the registry knows (identity, budget, presence, pin) merged
+   with what the ssh poller last read off the machine.
+
+   Every telemetry field is optional and nullable on purpose. The card
+   renders an em dash for a field it does not have, and MUST NOT render a
+   zero -- "the GPU is 0% busy" and "we could not ask" are different
+   facts. The server leaves the key out rather than sending 0; these
+   types are what stops a renderer from quietly filling it back in. */
+export interface NodeStatRow {
+  name: string;
+  kind: "gpu" | "cpu";
+  host: string;
+  unit: string;
+  device: string;
+  budget_bytes: number | null;
+  presence: PresenceState;
+  present: boolean;
+  pin_agrees: boolean;
+  protocol: string;
+  /* false when the registry records no ssh host: the row still renders,
+     from presence and budget alone. */
+  polled: boolean;
+  active_state?: string | null;
+  unit_memory_bytes?: number | null;
+  unit_memory_max_bytes?: number | null;
+  host_load1?: number | null;
+  host_nproc?: number | null;
+  host_mem_total_bytes?: number | null;
+  host_mem_available_bytes?: number | null;
+  gpu_used_bytes?: number | null;
+  gpu_total_bytes?: number | null;
+  gpu_util_pct?: number | null;
+  gpu_temp_c?: number | null;
+}
+
+export interface NodeStats {
+  nodes: NodeStatRow[];
+  /* age of the oldest cached per-host reading, or null before the first
+     one lands. `ok` is already false past the staleness threshold — the
+     age is here so the card can say how stale. */
+  age_seconds: number | null;
+  ok: boolean;
+  present: number;
+  pins_agree: boolean;
+  protocol: string;
+}
+
 export type JobStatus =
   | "queued"
   | "running"
@@ -85,6 +133,7 @@ export interface Tick {
   ram: RamRow;
   models: ModelRow[];
   jobs: JobRow[];
+  node_stats: NodeStats;
   /* section -> why it is missing. A section that threw server-side yields
      its empty shape, which is indistinguishable from the truth of a
      machine with no GPUs; this is how a region tells the two apart and

@@ -19,7 +19,10 @@ function ThemeButton() {
   useEffect(() => onSystemThemeChange(() => bump((n) => n + 1)), []);
   const dark = effectiveTheme() === "dark";
   return (
-    <button class="theme-btn" type="button"
+    /* aria-pressed: the button is a toggle with a state, not an action
+       that happens to change appearance. Without it the control
+       announces the same way whichever theme is in force. */
+    <button class="theme-btn" type="button" aria-pressed={dark}
             title={`Switch to ${dark ? "light" : "dark"} theme (persists)`}
             onClick={() => {
               toggleTheme();
@@ -30,29 +33,50 @@ function ThemeButton() {
   );
 }
 
+/* The glyphs are decoration. Wrapped so a screen reader reads "operate",
+   not "black square containing white square operate". */
+function Glyph({ children }: { children: ComponentChildren }) {
+  return <span aria-hidden="true">{children}</span>;
+}
+
 function Side() {
   const { path } = useLocation();
   const { tick } = useStream();
   const running = tick ? tick.jobs.filter((j) => j.status === "running").length : 0;
-  const here = (p: string) => (path === p ? "item here" : "item");
+  /* preact-iso strips trailing slashes before it hands `path` over
+     (router.js: `u.pathname.replace(/\/+$/g, '') || '/'`), so on /v2/ it
+     reports "/v2". An exact match against "/v2/" therefore never fired
+     and the operate item never highlighted. Match both spellings. */
+  const same = (p: string) => path === p || path === p.replace(/\/+$/, "");
+  const here = (p: string) => (same(p) ? "item here" : "item");
   const under = (p: string) =>
-    (path === p || path.startsWith(p + "/") ? "item here" : "item");
+    (same(p) || path.startsWith(p + "/") ? "item here" : "item");
+  /* aria-current marks the active item as the current page rather than
+     leaving the distinction to background colour alone. */
+  const cur = (p: string, fn: (s: string) => string) =>
+    (fn(p) === "item here" ? "page" : undefined);
   return (
     <aside class="side">
       <div class="brand">modelctl</div>
-      <a class={here("/v2/")} href="/v2/">▣ operate</a>
+      <a class={here("/v2/")} aria-current={cur("/v2/", here)} href="/v2/">
+        <Glyph>▣</Glyph> operate</a>
       {/* next to operate, not under settings: where a model can run is an
           operational question, and the rig is one of the nodes on it */}
-      <a class={under("/v2/fleet")} href="/v2/fleet">⬡ fleet</a>
-      <a class={under("/v2/models")} href="/v2/models">◇ model hub</a>
-      <a class={under("/v2/add")} href="/v2/add">＋ add</a>
+      <a class={under("/v2/fleet")} aria-current={cur("/v2/fleet", under)}
+         href="/v2/fleet"><Glyph>⬡</Glyph> fleet</a>
+      <a class={under("/v2/models")} aria-current={cur("/v2/models", under)}
+         href="/v2/models"><Glyph>◇</Glyph> model hub</a>
+      <a class={under("/v2/add")} aria-current={cur("/v2/add", under)}
+         href="/v2/add"><Glyph>＋</Glyph> add</a>
       {/* `under`, not `here`: a per-job page is still the jobs section */}
-      <a class={under("/v2/jobs")} href="/v2/jobs">
-        ≡ jobs{running > 0 && <span class="badge">{running}</span>}
+      <a class={under("/v2/jobs")} aria-current={cur("/v2/jobs", under)}
+         href="/v2/jobs">
+        <Glyph>≡</Glyph> jobs{running > 0 && <span class="badge">{running}</span>}
       </a>
       <span class="spacer"></span>
-      <a class={here("/v2/settings")} href="/v2/settings">⚙ settings</a>
-      <a class="item" href="/logout">← logout</a>
+      <a class={here("/v2/settings")} aria-current={cur("/v2/settings", here)}
+         href="/v2/settings"><Glyph>⚙</Glyph> settings</a>
+      <a class="item" href="/logout"><Glyph>←</Glyph> logout</a>
     </aside>
   );
 }

@@ -17,7 +17,15 @@ interface Props {
 
 export function Spark({ data, min, max, height, label }: Props) {
   const W = 200, H = 34, P = 2;
-  if (data.length < 2) return <svg class="spark" style={height ? { height } : undefined} aria-label={label} />;
+  /* role="img" + a <title>: an <svg> is a generic grouping element to a
+     screen reader, and aria-label alone on one is inconsistently
+     announced. The title is the accessible name browsers agree on. */
+  if (data.length < 2) {
+    return (
+      <svg class="spark" style={height ? { height } : undefined}
+           role="img" aria-label={label}><title>{label}</title></svg>
+    );
+  }
   const dLo = Math.min(...data);
   const dHi = Math.max(...data);
   // 15% headroom either side of the observed window, then clamped into
@@ -35,7 +43,9 @@ export function Spark({ data, min, max, height, label }: Props) {
   });
   return (
     <svg class="spark" style={height ? { height } : undefined}
-         viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-label={label}>
+         viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none"
+         role="img" aria-label={label}>
+      <title>{label}</title>
       <polygon class="fillarea"
                points={`${P},${H - P} ${pts.join(" ")} ${W - P},${H - P}`} />
       <polyline points={pts.join(" ")} />

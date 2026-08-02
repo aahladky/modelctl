@@ -152,6 +152,20 @@ class TestSuiteHermeticity(unittest.TestCase):
                          modelctl_lanes.scratch_search_dirs(),
                          "suite would sweep the machine's /tmp")
 
+    def test_no_real_fleet_registry_is_reachable(self):
+        # The console's node-stats poller decides which hosts to ssh to
+        # by reading this registry. Unredirected, a test that builds a
+        # TelemetryCollector and takes one snapshot starts a background
+        # thread that opens ssh connections to another machine on the
+        # LAN -- from a unit test, every 10 seconds.
+        import modelctl_fleet
+        self.assertTrue(
+            str(modelctl_fleet.FLEET_PATH).startswith(
+                os.environ["MODELCTL_HOME"]),
+            f"suite would read the real fleet registry at "
+            f"{modelctl_fleet.FLEET_PATH} and ssh to its nodes")
+        self.assertEqual(modelctl_fleet.load_fleet(), [])
+
     def test_xpu_smi_is_stubbed_out(self):
         # get_gpu_inventory / capture_hardware_snapshot shell out to
         # xpu-smi; the suite must see this machine's shim, not the real

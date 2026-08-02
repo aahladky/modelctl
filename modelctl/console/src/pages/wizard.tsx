@@ -15,6 +15,7 @@ import {
   wizardTestRun,
 } from "../lib/api";
 import { Info } from "../lib/info";
+import { Meter } from "../lib/meter";
 import { toast } from "../lib/toasts";
 import type {
   GgufAnalysis, JobRow, ModelDetail, PlanRow, RegisterData, RepoContents,
@@ -80,9 +81,10 @@ function JobProgress({ jobId, fallback }:
     <div style="margin:.5rem 0">
       <span class={chip}><span class="dot"></span>{job.status}</span>
       <span class="sub"> {job.title} · lane {job.lane}</span>
-      <div class="meterbar" style="max-width:420px">
-        <div class="fill" style={`width:${Math.round(job.progress * 100)}%`}></div>
-      </div>
+      <Meter value={Math.round(job.progress * 100)} max={100}
+             style="max-width:420px" label={`${job.title} progress`}
+             valuetext={`${Math.round(job.progress * 100)}% complete`
+                        + (job.detail ? ` · ${job.detail}` : "")} />
       <div class="sub num">{job.detail || `${Math.round(job.progress * 100)}%`}</div>
       {job.error && <div class="msg error">✗ {job.error.split("\n")[0]}</div>}
       {job.result_tail.trim() && (

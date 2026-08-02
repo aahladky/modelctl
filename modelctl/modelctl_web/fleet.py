@@ -140,9 +140,11 @@ def _local_node(errors):
                 "ceiling_basis": "reported device total",
                 "admission_key": g.device,
                 "editable": False,
+                # An em dash, not two hyphens: this string is rendered to
+                # a browser, not read in a source file.
                 "edit_note": (f"{int(frac * 100)}% VRAM limit minus a "
                               f"{g.reserve_bytes / (1 << 30):.1f} GiB reserve "
-                              f"-- both on the settings page"),
+                              f"— both on the settings page"),
             })
     except Exception as e:
         errors["local_devices"] = str(e) or "local device inventory failed"
