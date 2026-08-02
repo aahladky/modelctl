@@ -9,8 +9,8 @@ import { Spark, push } from "../lib/spark";
 import { Info } from "../lib/info";
 import { Meter } from "../lib/meter";
 import { ConfirmButton, submitAction } from "../lib/actions";
-import { fmtClock, fmtGiB, fmtUp, loadModel, unloadAll, unloadModel }
-  from "../lib/api";
+import { fmtClock, fmtGiB, fmtUp, loadModel, probeFleet, unloadAll,
+  unloadModel } from "../lib/api";
 import type { ModelRow, NodeStatRow, NodeStats, Tick } from "../lib/types";
 
 type Series = Record<string, number[]>;
@@ -241,6 +241,16 @@ function ModelRowView({ m, spark, stale }:
 export function Operate() {
   const { tick, stale, lastAt, retryIn } = useStream();
   const series = useSeries(stale ? null : tick);
+
+  /* Presence on the remote-fleet card is the last recorded RPC probe,
+     and a probe expires after the 900s presence TTL. Only the fleet
+     page re-probed on open, so within fifteen minutes of a fleet visit
+     this page showed the decayed record beside ten-second-fresh ssh
+     telemetry: "0 present" over a live VRAM meter. Same rule as the
+     fleet page now -- a person opening the page is the probe trigger.
+     Fire and forget: the refreshed record arrives with the next tick,
+     and a probe that fails leaves whatever honest state it found. */
+  useEffect(() => { probeFleet().catch(() => undefined); }, []);
 
   if (!tick) {
     return (
