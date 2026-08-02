@@ -17,6 +17,13 @@ FP = ma.Fingerprint(build_commit="85b7e6556", profile_hash="p1",
                     env_hash="e1", driver="intel-compute-runtime-26.22")
 
 
+def replace_build(fingerprint, commit):
+    return ma.Fingerprint(build_commit=commit,
+                          profile_hash=fingerprint.profile_hash,
+                          env_hash=fingerprint.env_hash,
+                          driver=fingerprint.driver)
+
+
 def _anchor(**kw):
     base = dict(id="a", condition="C1", value=6.0, runs=(6.0, 6.1),
                 fingerprint=FP, recorded="2026-08-02")
@@ -238,10 +245,31 @@ class TestShippedRegistry(unittest.TestCase):
         self.anchors = ma.load_anchors()
         self.by_id = {a.id: a for a in self.anchors}
 
-    def test_it_holds_the_three_conditions_and_the_canary(self):
+    def test_it_holds_both_batteries_and_the_canary(self):
         self.assertEqual(sorted(self.by_id),
-                         ["c1-static-122b", "c2-cache-122b",
-                          "c3-cache-hybrid-122b", "laguna-s2.1-canary"])
+                         ["c1-static-122b", "c1-static-35b",
+                          "c2-cache-122b", "c2-cache-35b",
+                          "c3-cache-hybrid-122b", "c3-cache-hybrid-35b",
+                          "laguna-s2.1-canary"])
+
+    def test_the_35b_battery_did_not_overwrite_the_122b_anchors(self):
+        # A number taken on a different model is not a re-measurement of
+        # the old one. Reusing the id would make every later comparison
+        # against "c1-static-122b" silently about a different model.
+        self.assertAlmostEqual(self.by_id["c1-static-122b"].value, 6.2365,
+                               places=3)
+        self.assertAlmostEqual(self.by_id["c1-static-35b"].value, 38.9832,
+                               places=3)
+        self.assertTrue(self.by_id["c1-static-122b"].void)
+        self.assertFalse(self.by_id["c1-static-35b"].void)
+
+    def test_the_122b_anchors_record_that_their_weights_are_gone(self):
+        # Re-running them is blocked on a missing file, not on finding a
+        # quiet window, and the registry has to say which.
+        for anchor_id in ("c1-static-122b", "c2-cache-122b",
+                          "c3-cache-hybrid-122b"):
+            self.assertIn("deleted from ~/models",
+                          self.by_id[anchor_id].void_reason, anchor_id)
 
     def test_the_2026_08_01_battery_is_void_for_load_contamination(self):
         for anchor_id in ("c1-static-122b", "c2-cache-122b",
@@ -269,15 +297,35 @@ class TestShippedRegistry(unittest.TestCase):
         self.assertFalse(canary.void)
         self.assertEqual(canary.value, 14.20)
 
-    def test_every_battery_anchor_needs_a_run_today(self):
-        # Whatever this machine's current fingerprint is: three are void
-        # and the fourth is exempt, so a battery run now measures all four.
+    def test_the_void_anchors_and_the_canary_always_need_a_run(self):
         # driver is injected rather than probed -- the suite must not
         # shell out to rpm, and the answer must not depend on the box.
         fp = ma.current_fingerprint(build_commit="85b7e6556", driver="d")
         plan = ma.plan_battery(self.anchors, fp)
-        self.assertEqual(plan.reusable, [])
-        self.assertEqual(len(plan.to_run), 4)
+        must_run = {a.id for a, _ in plan.to_run}
+        for anchor_id in ("c1-static-122b", "c2-cache-122b",
+                          "c3-cache-hybrid-122b", "laguna-s2.1-canary"):
+            self.assertIn(anchor_id, must_run)
+
+    def test_a_fresh_anchor_is_reusable_under_its_own_fingerprint(self):
+        # The point of storing a fingerprint: the same conditions mean the
+        # measurement still applies and the hours are not spent again.
+        anchor = self.by_id["c2-cache-35b"]
+        self.assertEqual(ma.staleness(anchor, anchor.fingerprint), [])
+        self.assertFalse(ma.needs_run(anchor, anchor.fingerprint))
+
+    def test_a_fresh_anchor_stales_when_the_build_moves(self):
+        anchor = self.by_id["c2-cache-35b"]
+        moved = replace_build(anchor.fingerprint, "deadbeef")
+        self.assertTrue(ma.needs_run(anchor, moved))
+
+    def test_the_35b_anchors_carry_a_complete_fingerprint(self):
+        for anchor_id in ("c1-static-35b", "c2-cache-35b",
+                          "c3-cache-hybrid-35b"):
+            fp = self.by_id[anchor_id].fingerprint
+            self.assertEqual(fp.build_commit, "85b7e6556", anchor_id)
+            for field in ("profile_hash", "env_hash", "driver"):
+                self.assertTrue(getattr(fp, field), f"{anchor_id}.{field}")
 
     def test_the_cache_conditions_carry_their_recorded_hit_ratios(self):
         for anchor_id in ("c2-cache-122b", "c3-cache-hybrid-122b"):
@@ -288,14 +336,44 @@ class TestShippedRegistry(unittest.TestCase):
         self.assertIsNone(self.by_id["c1-static-122b"]
                           .extra["hit_ratio_per_run"])
 
-    def test_the_effective_cache_budget_is_recorded_as_never_measured(self):
-        # The gap the re-anchor job exists to close: the 2026-08-01
+    def test_the_122b_battery_never_measured_the_effective_cache_budget(self):
+        # The gap the re-anchor job existed to close: the 2026-08-01
         # battery has only the REQUESTED --moe-cache-bytes in its argv.
-        for a in self.anchors:
-            if a.id == "laguna-s2.1-canary":
-                continue
+        for anchor_id in ("c1-static-122b", "c2-cache-122b",
+                          "c3-cache-hybrid-122b"):
+            a = self.by_id[anchor_id]
             self.assertIsNone(a.extra["effective_cache_budget_bytes_per_run"])
-            self.assertIn("not recorded", a.extra["effective_cache_budget_note"])
+            self.assertIn("not recorded",
+                          a.extra["effective_cache_budget_note"])
+
+    def test_the_35b_battery_measured_it_per_run(self):
+        # 2945 slots x 1,458,176 B = 4,294,328,320 B against the
+        # 4,294,967,296 B requested -- a shortfall that had never been in
+        # evidence, because only the request was ever recorded.
+        for anchor_id in ("c2-cache-35b", "c3-cache-hybrid-35b"):
+            a = self.by_id[anchor_id]
+            budgets = a.extra["effective_cache_budget_bytes_per_run"]
+            self.assertTrue(budgets, anchor_id)
+            self.assertEqual(set(budgets), {4294328320}, anchor_id)
+            self.assertEqual(a.extra["requested_cache_budget_bytes"],
+                             4294967296, anchor_id)
+            self.assertLess(budgets[0], a.extra["requested_cache_budget_bytes"])
+
+    def test_the_cacheless_35b_condition_records_no_budget(self):
+        # C1 has no cache flags at all; a budget there would be invented.
+        a = self.by_id["c1-static-35b"]
+        self.assertEqual(set(a.extra["effective_cache_budget_bytes_per_run"]),
+                         {None})
+        self.assertIsNone(a.extra["hit_ratio_per_run"])
+
+    def test_the_hung_c3_run_is_recorded_as_a_shortfall(self):
+        # Four values, not five, and the registry says five were attempted
+        # -- a battery that silently reported the four it got would look
+        # like a clean run.
+        a = self.by_id["c3-cache-hybrid-35b"]
+        self.assertEqual(len(a.runs), 4)
+        self.assertEqual(a.extra["runs_attempted"], 5)
+        self.assertEqual(a.extra["runs_succeeded"], 4)
 
     def test_the_battery_load_is_recorded_as_battery_wide(self):
         c1 = self.by_id["c1-static-122b"]

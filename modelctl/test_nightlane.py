@@ -26,6 +26,21 @@ MAIDEN = ["determinism-cost-c1-static-2026-08-02",
           "sdpa-reproducibility-2026-08-02"]
 
 
+def _job(job_id, enabled=True, **kw):
+    """A synthetic pre-registration.
+
+    The dispatcher's behaviour is a separate fact from what the shipped
+    registry happens to contain, and tests that conflated the two broke
+    the moment the maiden jobs were retired after running.
+    """
+    fields = dict(id=job_id, title=job_id, question="q", criterion="c",
+                  measures=("m",), enabled=enabled,
+                  arms=(nl.Arm(name="a", profile="p"),
+                        nl.Arm(name="b", profile="p")))
+    fields.update(kw)
+    return nl.NightLaneJob(**fields)
+
+
 class TestShippedRegistry(unittest.TestCase):
     def setUp(self):
         self.jobs = nl.load_jobs()
@@ -40,10 +55,18 @@ class TestShippedRegistry(unittest.TestCase):
         for job_id in RPC_PAIRS:
             self.assertFalse(self.by_id[job_id].enabled, job_id)
 
-    def test_the_maiden_jobs_are_queued(self):
+    def test_the_maiden_jobs_are_retired_now_that_they_have_run(self):
+        # A pre-registration that has been executed must not stay enabled,
+        # or the next open window runs it again and the registry stops
+        # describing what is outstanding.
         for job_id in MAIDEN:
-            self.assertTrue(self.by_id[job_id].enabled, job_id)
-        self.assertEqual(sorted(j.id for j in nl.enabled_jobs()), sorted(MAIDEN))
+            job = self.by_id[job_id]
+            self.assertFalse(job.enabled, job_id)
+            self.assertIn("RAN 2026-08-02", job.note, job_id)
+            self.assertIn("2026-08-02-maiden-runs.md", job.note, job_id)
+
+    def test_nothing_is_queued(self):
+        self.assertEqual(nl.enabled_jobs(), [])
 
     def test_every_comparison_job_has_at_least_two_arms(self):
         # A comparison needs something to compare against. The
@@ -156,17 +179,26 @@ class TestBlocking(unittest.TestCase):
 
     def test_the_maiden_jobs_need_no_fleet_node(self):
         # They measure the rig. A maiden job that quietly required ph16-71
-        # would never run and the lane would look idle rather than blocked.
+        # would have been blocked on a node instead of running.
         for job_id in MAIDEN:
             self.assertEqual(nl.job_by_id(job_id).required_nodes, set())
-            self.assertEqual(nl.blocking_reasons(nl.job_by_id(job_id)), [])
 
-    def test_due_jobs_reports_what_it_skipped(self):
+    def test_nothing_in_the_shipped_registry_is_due(self):
         runnable, skipped = nl.due_jobs()
-        self.assertEqual(sorted(j.id for j in runnable), sorted(MAIDEN))
-        self.assertEqual(sorted(j.id for j, _ in skipped), sorted(RPC_PAIRS))
+        self.assertEqual(runnable, [])
+        self.assertEqual(sorted(j.id for j, _ in skipped),
+                         sorted(RPC_PAIRS + MAIDEN))
         for _job, reasons in skipped:
             self.assertTrue(reasons)
+
+    def test_due_jobs_reports_reasons_rather_than_filtering(self):
+        # A lane that quietly ran three of five pre-registrations and
+        # reported three results would look like it ran everything.
+        enabled = _job("live")
+        blocked = _job("held", enabled=False)
+        runnable, skipped = nl.due_jobs([enabled, blocked])
+        self.assertEqual([j.id for j in runnable], ["live"])
+        self.assertEqual(skipped[0][1], ["pre-registered but not enabled"])
 
 
 class _Swap:
@@ -239,7 +271,8 @@ class _Manager:
 
 class TestDispatch(unittest.TestCase):
     def _jobs(self):
-        return nl.load_jobs()
+        return [_job("a"), _job("b"), _job("c"), _job("d"),
+                _job("held", enabled=False)]
 
     def test_a_shut_window_dispatches_nothing(self):
         mgr = _Manager()
@@ -250,16 +283,28 @@ class TestDispatch(unittest.TestCase):
         self.assertEqual(result.submitted, [])
         # Every runnable job appears as skipped-with-a-reason, so a night
         # that dispatched nothing can say why rather than looking idle.
-        skipped = {j for j, _ in result.skipped}
-        self.assertEqual(skipped, set(RPC_PAIRS + MAIDEN))
+        self.assertEqual({j for j, _ in result.skipped},
+                         {"a", "b", "c", "d", "held"})
+        self.assertTrue(any("window is shut" in r
+                            for _j, rs in result.skipped for r in rs))
 
     def test_an_open_window_dispatches_only_the_enabled_jobs(self):
         mgr = _Manager()
         result = nl.dispatch_due(mgr, runner=lambda job, ctx: {},
                                  jobs=self._jobs(),
                                  window=nl.WindowState(True))
-        self.assertEqual(sorted(j for j, _ in result.submitted), sorted(MAIDEN))
-        self.assertEqual(sorted(j for j, _ in result.skipped), sorted(RPC_PAIRS))
+        self.assertEqual(sorted(j for j, _ in result.submitted),
+                         ["a", "b", "c", "d"])
+        self.assertEqual([j for j, _ in result.skipped], ["held"])
+
+    def test_the_shipped_registry_dispatches_nothing_today(self):
+        mgr = _Manager()
+        result = nl.dispatch_due(mgr, runner=lambda job, ctx: {},
+                                 jobs=nl.load_jobs(),
+                                 window=nl.WindowState(True))
+        self.assertEqual(result.submitted, [])
+        self.assertEqual(sorted(j for j, _ in result.skipped),
+                         sorted(RPC_PAIRS + MAIDEN))
 
     def test_dispatch_uses_the_benchmark_lane(self):
         # One worker, so two night jobs can never share the GPUs -- and
@@ -275,7 +320,7 @@ class TestDispatch(unittest.TestCase):
                         window=nl.WindowState(True, (), {"loadavg_1m": 0.3}))
         payload = mgr.submitted[0]["payload"]
         self.assertEqual(payload["window"]["observed"]["loadavg_1m"], 0.3)
-        self.assertIn(payload["night_lane_job"], MAIDEN)
+        self.assertEqual(payload["night_lane_job"], "a")
 
     def test_each_submission_closes_over_its_own_job(self):
         # The late-binding trap: a bare `lambda ctx: runner(job, ctx)` in
@@ -287,7 +332,7 @@ class TestDispatch(unittest.TestCase):
                         jobs=self._jobs(), window=nl.WindowState(True))
         for submission in mgr.submitted:
             submission["fn"](object())
-        self.assertEqual(sorted(seen), sorted(MAIDEN))
+        self.assertEqual(sorted(seen), ["a", "b", "c", "d"])
 
     def test_a_limit_reports_what_it_did_not_dispatch(self):
         mgr = _Manager()
@@ -297,7 +342,7 @@ class TestDispatch(unittest.TestCase):
         self.assertEqual(len(result.submitted), 1)
         deferred = [r for j, r in result.skipped
                     if any("limit of 1" in x for x in r)]
-        self.assertEqual(len(deferred), len(MAIDEN) - 1)
+        self.assertEqual(len(deferred), 3)
 
 
 class TestEvidence(unittest.TestCase):

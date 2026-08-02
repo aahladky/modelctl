@@ -113,9 +113,9 @@
           "note": "The same binary with oneDNN's deterministic primitive attribute off. This arm is known not to reproduce its own logprobs (2026-08-01 record: 1/5 identical, max abs delta-logprob 16.88), so its runs are samples from a distribution and the spread within the arm is part of the record."
         }
       ],
-      "enabled": true,
+      "enabled": false,
       "registered": "2026-08-02",
-      "note": "Replaces the paired-comparison rows in the 2026-08-01 determinism record (-15.20% / -8.01% / -14.87%), which are VOID: they were two blocks of runs differenced across a battery whose loadavg(1m) ran 2.63-17.15 with a mean of 8.99, so the block difference contains the machine as well as the attribute. Runs on build-sycl at fork commit 85b7e6556, verified 2026-08-02 to report that commit, moe_cache_mmap_advise true and GGML_SYCL_DETERMINISTIC default 1.",
+      "note": "Replaces the paired-comparison rows in the 2026-08-01 determinism record (-15.20% / -8.01% / -14.87%), which are VOID: they were two blocks of runs differenced across a battery whose loadavg(1m) ran 2.63-17.15 with a mean of 8.99, so the block difference contains the machine as well as the attribute. Runs on build-sycl at fork commit 85b7e6556, verified 2026-08-02 to report that commit, moe_cache_mmap_advise true and GGML_SYCL_DETERMINISTIC default 1. RAN 2026-08-02 by explicit instruction, ahead of the quiet window this was queued for; the machine had rebooted at 01:10 and was idle. Results and the load traces they were taken under are in modelctl/docs/evidence/2026-08-02-maiden-runs.md. Retired from the queue so the next open window does not run it again.",
       "mode": "paired",
       "pairs": 5
     },
@@ -164,9 +164,9 @@
           "note": "Same binary, oneDNN deterministic attribute off. GGML_OP_OFFLOAD_MOE_MIN_BATCH=1 is the MoE-op threshold and is held equal across both arms; the global GGML_OP_OFFLOAD_MIN_BATCH floor of 32 is untouched by this job."
         }
       ],
-      "enabled": true,
+      "enabled": false,
       "registered": "2026-08-02",
-      "note": "Replaces the paired-comparison rows in the 2026-08-01 determinism record (-15.20% / -8.01% / -14.87%), which are VOID: they were two blocks of runs differenced across a battery whose loadavg(1m) ran 2.63-17.15 with a mean of 8.99, so the block difference contains the machine as well as the attribute. Runs on build-sycl at fork commit 85b7e6556, verified 2026-08-02 to report that commit, moe_cache_mmap_advise true and GGML_SYCL_DETERMINISTIC default 1.",
+      "note": "Replaces the paired-comparison rows in the 2026-08-01 determinism record (-15.20% / -8.01% / -14.87%), which are VOID: they were two blocks of runs differenced across a battery whose loadavg(1m) ran 2.63-17.15 with a mean of 8.99, so the block difference contains the machine as well as the attribute. Runs on build-sycl at fork commit 85b7e6556, verified 2026-08-02 to report that commit, moe_cache_mmap_advise true and GGML_SYCL_DETERMINISTIC default 1. RAN 2026-08-02 by explicit instruction, ahead of the quiet window this was queued for; the machine had rebooted at 01:10 and was idle. Results and the load traces they were taken under are in modelctl/docs/evidence/2026-08-02-maiden-runs.md. Retired from the queue so the next open window does not run it again.",
       "mode": "paired",
       "pairs": 5
     },
@@ -225,9 +225,9 @@
           "note": "Transfer cache plus the hybrid CPU miss tier. C2 and C3 diverge from each other at measured token 65 by design (the CPU tier quantizes activations to Q8_K against the GPU's Q8_1); each reproduces itself. That divergence is not a fault of this run."
         }
       ],
-      "enabled": true,
+      "enabled": false,
       "registered": "2026-08-02",
-      "note": "Replaces the battery in the 2026-08-01 determinism record, which is void for load contamination (loadavg(1m) 2.63-17.15 across 442 samples, recorded battery-wide rather than per run). The stored anchors are in modelctl/anchors.json, currently carrying the void flag and the old values.",
+      "note": "Replaces the battery in the 2026-08-01 determinism record, which is void for load contamination (loadavg(1m) 2.63-17.15 across 442 samples, recorded battery-wide rather than per run). The stored anchors are in modelctl/anchors.json, currently carrying the void flag and the old values. RAN 2026-08-02 by explicit instruction, ahead of the quiet window this was queued for; the machine had rebooted at 01:10 and was idle. Results and the load traces they were taken under are in modelctl/docs/evidence/2026-08-02-maiden-runs.md. Retired from the queue so the next open window does not run it again.",
       "mode": "battery",
       "runs": 5
     },
@@ -260,9 +260,9 @@
           "note": "The shape lives on fork branch agent/sdpa-probe (commit e73d47680), NOT on the pinned commit: it is a script-only change that never touched the binary, and advancing the pin for it would re-stamp the validated pair with a commit that passed no hardware acceptance. The runner must check that branch out before running, and must refuse rather than fall back to the default shape -- the default shape's ~20-token prompt answers a different question."
         }
       ],
-      "enabled": true,
+      "enabled": false,
       "registered": "2026-08-02",
-      "note": "Opens the item the 2026-08-01 record filed under 'Not done': the oneDNN graph SDPA path used for flash attention takes no primitive_attr, so set_deterministic never reaches it. It was deterministic in every run measured that day, at prompt shapes where attention was not the dominant cost. Single-armed on purpose: this asks whether one configuration reproduces itself, which is the question every comparison assumes and none of them asks.",
+      "note": "Opens the item the 2026-08-01 record filed under 'Not done': the oneDNN graph SDPA path used for flash attention takes no primitive_attr, so set_deterministic never reaches it. It was deterministic in every run measured that day, at prompt shapes where attention was not the dominant cost. Single-armed on purpose: this asks whether one configuration reproduces itself, which is the question every comparison assumes and none of them asks. RAN 2026-08-02 by explicit instruction, ahead of the quiet window this was queued for; the machine had rebooted at 01:10 and was idle. Results and the load traces they were taken under are in modelctl/docs/evidence/2026-08-02-maiden-runs.md. Retired from the queue so the next open window does not run it again.",
       "mode": "reproducibility",
       "runs": 3,
       "metric": "max_abs_dlogprob"

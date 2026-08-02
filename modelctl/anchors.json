@@ -61,7 +61,7 @@
         "effective_cache_budget_note": "not recorded by the 2026-08-01 battery: only the requested --moe-cache-bytes is in the argv, never the budget the runtime ended up with"
       },
       "void": true,
-      "void_reason": "load-contaminated: taken across a battery whose loadavg(1m) ran 2.63-17.15 (mean 8.99) over 442 samples, so the conditions were not measured under one machine. Re-anchor before reuse.",
+      "void_reason": "load-contaminated: taken across a battery whose loadavg(1m) ran 2.63-17.15 (mean 8.99) over 442 samples, so the conditions were not measured under one machine. Re-anchor before reuse. The weights this anchor was taken on -- Qwen3.5-122B-A10B-UD-IQ1_M.gguf, 31.87 GiB -- were deleted from ~/models at 01:32 on 2026-08-02, mid-battery. Re-running this anchor is blocked on the file, not on a quiet window. The 35B anchors are a different model and do not replace it.",
       "always_run": false,
       "note": "Qwen3.5-122B-A10B-UD-IQ1_M, 128-token measured decode, greedy seed 42, cache_prompt=false, fresh server per run. profile_hash/env_hash/driver were never recorded for these runs, so they read as unrecorded rather than as a match."
     },
@@ -176,7 +176,7 @@
         "effective_cache_budget_note": "not recorded by the 2026-08-01 battery: only the requested --moe-cache-bytes is in the argv, never the budget the runtime ended up with"
       },
       "void": true,
-      "void_reason": "load-contaminated: taken across a battery whose loadavg(1m) ran 2.63-17.15 (mean 8.99) over 442 samples, so the conditions were not measured under one machine. Re-anchor before reuse.",
+      "void_reason": "load-contaminated: taken across a battery whose loadavg(1m) ran 2.63-17.15 (mean 8.99) over 442 samples, so the conditions were not measured under one machine. Re-anchor before reuse. The weights this anchor was taken on -- Qwen3.5-122B-A10B-UD-IQ1_M.gguf, 31.87 GiB -- were deleted from ~/models at 01:32 on 2026-08-02, mid-battery. Re-running this anchor is blocked on the file, not on a quiet window. The 35B anchors are a different model and do not replace it.",
       "always_run": false,
       "note": "Qwen3.5-122B-A10B-UD-IQ1_M, 128-token measured decode, greedy seed 42, cache_prompt=false, fresh server per run. profile_hash/env_hash/driver were never recorded for these runs, so they read as unrecorded rather than as a match."
     },
@@ -291,9 +291,265 @@
         "effective_cache_budget_note": "not recorded by the 2026-08-01 battery: only the requested --moe-cache-bytes is in the argv, never the budget the runtime ended up with"
       },
       "void": true,
-      "void_reason": "load-contaminated: taken across a battery whose loadavg(1m) ran 2.63-17.15 (mean 8.99) over 442 samples, so the conditions were not measured under one machine. Re-anchor before reuse.",
+      "void_reason": "load-contaminated: taken across a battery whose loadavg(1m) ran 2.63-17.15 (mean 8.99) over 442 samples, so the conditions were not measured under one machine. Re-anchor before reuse. The weights this anchor was taken on -- Qwen3.5-122B-A10B-UD-IQ1_M.gguf, 31.87 GiB -- were deleted from ~/models at 01:32 on 2026-08-02, mid-battery. Re-running this anchor is blocked on the file, not on a quiet window. The 35B anchors are a different model and do not replace it.",
       "always_run": false,
       "note": "Qwen3.5-122B-A10B-UD-IQ1_M, 128-token measured decode, greedy seed 42, cache_prompt=false, fresh server per run. profile_hash/env_hash/driver were never recorded for these runs, so they read as unrecorded rather than as a match."
+    },
+    {
+      "id": "c1-static-35b",
+      "condition": "C1 static placement, default offload threshold, determinism on (-ot ffn_.*_exps=CPU, no cache flags) on Qwen3.5-35B-A3B-UD-IQ4_XS",
+      "metric": "generation_tps",
+      "unit": "tok/s",
+      "value": 38.983160857106476,
+      "runs": [
+        37.42543420813337,
+        38.80458827877095,
+        39.607158870193416,
+        39.53798627475873,
+        39.54063665367592
+      ],
+      "fingerprint": {
+        "build_commit": "85b7e6556",
+        "profile_hash": "e993bb329f369f4e",
+        "env_hash": "c2fa4e67a5021f99",
+        "driver": "intel-compute-runtime-26.22.38646.6-3.fc44"
+      },
+      "recorded": "2026-08-02",
+      "source": "modelctl/docs/evidence/2026-08-02-maiden-runs.md",
+      "load": {
+        "loadavg_1m": {
+          "min": 1.46,
+          "max": 3.23,
+          "mean": 2.368,
+          "n": 15
+        },
+        "note": "sampled per run, not battery-wide"
+      },
+      "extra": {
+        "model_path": "/home/aaron/models/Qwen3.5-35B-A3B-UD-IQ4_XS.gguf",
+        "sd_tok_s": 0.9309114494441144,
+        "prompt_tok_s_per_run": [
+          63.10179754075085,
+          62.964272068619614,
+          63.696941533445965,
+          64.34695880185963,
+          64.63449925156188
+        ],
+        "load_seconds_per_run": [
+          5.009135961532593,
+          5.00748872756958,
+          5.007014274597168,
+          5.007967948913574,
+          5.008033037185669
+        ],
+        "hit_ratio_per_run": null,
+        "slots_per_run": [
+          null,
+          null,
+          null,
+          null,
+          null
+        ],
+        "slots_used_per_run": [
+          null,
+          null,
+          null,
+          null,
+          null
+        ],
+        "effective_cache_budget_bytes_per_run": [
+          null,
+          null,
+          null,
+          null,
+          null
+        ],
+        "requested_cache_budget_bytes": null,
+        "effective_cache_budget_note": "slots x per-slot bytes, read from the server's own moe_cache geometry line -- not the requested --moe-cache-bytes",
+        "env_overrides_recorded": {
+          "GGML_SYCL_DETERMINISTIC": "1"
+        },
+        "binary_recorded": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin/llama-server",
+        "runs_attempted": 5,
+        "runs_succeeded": 5
+      },
+      "void": false,
+      "void_reason": "",
+      "always_run": false,
+      "note": "Measured 2026-08-02 on an idle rig with a load trace per run. Substituted for the 122B after its weights were deleted mid-battery; the two are not comparable and the 122B anchors stay void rather than being replaced."
+    },
+    {
+      "id": "c2-cache-35b",
+      "condition": "C2 transfer cache on, hybrid off, determinism on (--moe-cache-bytes SYCL0=4294967296 slru, admission-misses 2, prefill-admission off; GGML_OP_OFFLOAD_MOE_MIN_BATCH=1) on Qwen3.5-35B-A3B-UD-IQ4_XS",
+      "metric": "generation_tps",
+      "unit": "tok/s",
+      "value": 24.82184405089034,
+      "runs": [
+        24.700472994760602,
+        24.862474581518907,
+        24.86106452359111,
+        24.808720885609315,
+        24.87648726897177
+      ],
+      "fingerprint": {
+        "build_commit": "85b7e6556",
+        "profile_hash": "db79e3b2eb5e7225",
+        "env_hash": "7eb669d487be0e87",
+        "driver": "intel-compute-runtime-26.22.38646.6-3.fc44"
+      },
+      "recorded": "2026-08-02",
+      "source": "modelctl/docs/evidence/2026-08-02-maiden-runs.md",
+      "load": {
+        "loadavg_1m": {
+          "min": 1.86,
+          "max": 3.23,
+          "mean": 2.3926666666666665,
+          "n": 15
+        },
+        "note": "sampled per run, not battery-wide"
+      },
+      "extra": {
+        "model_path": "/home/aaron/models/Qwen3.5-35B-A3B-UD-IQ4_XS.gguf",
+        "sd_tok_s": 0.07259152414945971,
+        "prompt_tok_s_per_run": [
+          57.35783729667298,
+          56.995409278852634,
+          57.221183282051015,
+          57.465860054958256,
+          57.62375355892159
+        ],
+        "load_seconds_per_run": [
+          5.006930351257324,
+          5.007746934890747,
+          5.007363557815552,
+          5.006994962692261,
+          5.007762670516968
+        ],
+        "hit_ratio_per_run": [
+          0.690355,
+          0.690355,
+          0.690355,
+          0.690355,
+          0.690355
+        ],
+        "slots_per_run": [
+          2945,
+          2945,
+          2945,
+          2945,
+          2945
+        ],
+        "slots_used_per_run": [
+          2945.0,
+          2945.0,
+          2945.0,
+          2945.0,
+          2945.0
+        ],
+        "effective_cache_budget_bytes_per_run": [
+          4294328320,
+          4294328320,
+          4294328320,
+          4294328320,
+          4294328320
+        ],
+        "requested_cache_budget_bytes": 4294967296,
+        "effective_cache_budget_note": "slots x per-slot bytes, read from the server's own moe_cache geometry line -- not the requested --moe-cache-bytes",
+        "env_overrides_recorded": {
+          "GGML_SYCL_DETERMINISTIC": "1",
+          "GGML_OP_OFFLOAD_MOE_MIN_BATCH": "1"
+        },
+        "binary_recorded": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin/llama-server",
+        "runs_attempted": 5,
+        "runs_succeeded": 5
+      },
+      "void": false,
+      "void_reason": "",
+      "always_run": false,
+      "note": "Measured 2026-08-02 on an idle rig with a load trace per run. Substituted for the 122B after its weights were deleted mid-battery; the two are not comparable and the 122B anchors stay void rather than being replaced."
+    },
+    {
+      "id": "c3-cache-hybrid-35b",
+      "condition": "C3 transfer cache + hybrid CPU miss tier, determinism on (C2 flags + --moe-hybrid-mode on) on Qwen3.5-35B-A3B-UD-IQ4_XS",
+      "metric": "generation_tps",
+      "unit": "tok/s",
+      "value": 23.70592727458322,
+      "runs": [
+        23.843839245580927,
+        23.87883283249969,
+        23.502595476080874,
+        23.598441544171394
+      ],
+      "fingerprint": {
+        "build_commit": "85b7e6556",
+        "profile_hash": "d39a77b2be6863f5",
+        "env_hash": "7eb669d487be0e87",
+        "driver": "intel-compute-runtime-26.22.38646.6-3.fc44"
+      },
+      "recorded": "2026-08-02",
+      "source": "modelctl/docs/evidence/2026-08-02-maiden-runs.md",
+      "load": {
+        "loadavg_1m": {
+          "min": 0.0,
+          "max": 3.67,
+          "mean": 1.9675000000000002,
+          "n": 12
+        },
+        "note": "sampled per run, not battery-wide"
+      },
+      "extra": {
+        "model_path": "/home/aaron/models/Qwen3.5-35B-A3B-UD-IQ4_XS.gguf",
+        "sd_tok_s": 0.18422182844534707,
+        "prompt_tok_s_per_run": [
+          58.1934376318445,
+          58.145911879870546,
+          57.90136502468046,
+          56.93559678210359
+        ],
+        "load_seconds_per_run": [
+          5.006931781768799,
+          5.007869482040405,
+          5.006547927856445,
+          5.007514238357544
+        ],
+        "hit_ratio_per_run": [
+          0.686022,
+          0.686022,
+          0.686022,
+          0.686022
+        ],
+        "slots_per_run": [
+          2945,
+          2945,
+          2945,
+          2945
+        ],
+        "slots_used_per_run": [
+          2945.0,
+          2945.0,
+          2945.0,
+          2945.0
+        ],
+        "effective_cache_budget_bytes_per_run": [
+          4294328320,
+          4294328320,
+          4294328320,
+          4294328320
+        ],
+        "requested_cache_budget_bytes": 4294967296,
+        "effective_cache_budget_note": "slots x per-slot bytes, read from the server's own moe_cache geometry line -- not the requested --moe-cache-bytes",
+        "env_overrides_recorded": {
+          "GGML_SYCL_DETERMINISTIC": "1",
+          "GGML_OP_OFFLOAD_MOE_MIN_BATCH": "1"
+        },
+        "binary_recorded": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin/llama-server",
+        "runs_attempted": 5,
+        "runs_succeeded": 4
+      },
+      "void": false,
+      "void_reason": "",
+      "always_run": false,
+      "note": "Measured 2026-08-02 on an idle rig with a load trace per run. Substituted for the 122B after its weights were deleted mid-battery; the two are not comparable and the 122B anchors stay void rather than being replaced."
     },
     {
       "id": "laguna-s2.1-canary",

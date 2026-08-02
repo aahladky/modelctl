@@ -1,0 +1,908 @@
+{
+  "job": "re-anchor-c1-c2-c3-2026-08-02",
+  "load_at_start": {
+    "loadavg_1m": 2.12,
+    "loadavg_5m": 2.7,
+    "mem_available_bytes": 30023467008
+  },
+  "load_at_end": {
+    "loadavg_1m": 1.79,
+    "loadavg_5m": 2.6,
+    "mem_available_bytes": 29855870976
+  },
+  "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl/bin/llama-server",
+  "model": "/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf",
+  "record": {
+    "C1": [
+      {
+        "run": 0,
+        "error": "RuntimeError: server exited rc=1 during load; stderr tail:\n0.00.197.710 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)\n0.00.198.517 W srv  llama_server: -----------------\n0.00.198.519 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set\n0.00.198.519 W srv  llama_server: this can be a security risk (cross-origin attacks)\n0.00.198.519 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655\n0.00.198.520 W srv  llama_server: -----------------\n0.00.199.756 I srv    load_model: loading model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.199.801 E gguf_init_from_file: failed to open GGUF file '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf' (No such file or directory)\n0.00.199.863 E llama_model_load: error loading model: llama_model_loader: failed to load model from /home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf\n0.00.199.867 E llama_model_load_from_file_impl: failed to load model\n0.00.199.868 E cmn  common_init_: failed to load model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.199.870 E srv    load_model: failed to load model, '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.199.870 I srv    operator(): operator(): cleaning up before exit...\n0.00.200.694 E srv  llama_server: exiting due to model loading error\n",
+        "load": {
+          "samples": 1,
+          "interval_seconds": 5.0,
+          "started": 1785648777.8152285,
+          "finished": 1785648779.4655433,
+          "missed": 0,
+          "loadavg_1m": {
+            "min": 2.12,
+            "max": 2.12,
+            "mean": 2.12,
+            "n": 1
+          },
+          "loadavg_5m": {
+            "min": 2.7,
+            "max": 2.7,
+            "mean": 2.7,
+            "n": 1
+          },
+          "loadavg_15m": {
+            "min": 2.47,
+            "max": 2.47,
+            "mean": 2.47,
+            "n": 1
+          },
+          "runnable": {
+            "min": 2,
+            "max": 2,
+            "mean": 2.0,
+            "n": 1
+          },
+          "procs": {
+            "min": 1233,
+            "max": 1233,
+            "mean": 1233.0,
+            "n": 1
+          },
+          "mem_available_bytes": {
+            "min": 30023467008,
+            "max": 30023467008,
+            "mean": 30023467008.0,
+            "n": 1
+          },
+          "mem_cached_bytes": {
+            "min": 1265676288,
+            "max": 1265676288,
+            "mean": 1265676288.0,
+            "n": 1
+          },
+          "swap_free_bytes": {
+            "min": 74932150272,
+            "max": 74932150272,
+            "mean": 74932150272.0,
+            "n": 1
+          }
+        }
+      },
+      {
+        "run": 1,
+        "error": "RuntimeError: server exited rc=1 during load; stderr tail:\n0.00.182.770 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)\n0.00.183.578 W srv  llama_server: -----------------\n0.00.183.580 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set\n0.00.183.580 W srv  llama_server: this can be a security risk (cross-origin attacks)\n0.00.183.580 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655\n0.00.183.580 W srv  llama_server: -----------------\n0.00.184.804 I srv    load_model: loading model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.184.845 E gguf_init_from_file: failed to open GGUF file '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf' (No such file or directory)\n0.00.184.914 E llama_model_load: error loading model: llama_model_loader: failed to load model from /home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf\n0.00.184.917 E llama_model_load_from_file_impl: failed to load model\n0.00.184.918 E cmn  common_init_: failed to load model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.184.920 E srv    load_model: failed to load model, '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.184.920 I srv    operator(): operator(): cleaning up before exit...\n0.00.185.434 E srv  llama_server: exiting due to model loading error\n",
+        "load": {
+          "samples": 1,
+          "interval_seconds": 5.0,
+          "started": 1785648779.4656596,
+          "finished": 1785648780.469117,
+          "missed": 0,
+          "loadavg_1m": {
+            "min": 1.95,
+            "max": 1.95,
+            "mean": 1.95,
+            "n": 1
+          },
+          "loadavg_5m": {
+            "min": 2.65,
+            "max": 2.65,
+            "mean": 2.65,
+            "n": 1
+          },
+          "loadavg_15m": {
+            "min": 2.45,
+            "max": 2.45,
+            "mean": 2.45,
+            "n": 1
+          },
+          "runnable": {
+            "min": 2,
+            "max": 2,
+            "mean": 2.0,
+            "n": 1
+          },
+          "procs": {
+            "min": 1255,
+            "max": 1255,
+            "mean": 1255.0,
+            "n": 1
+          },
+          "mem_available_bytes": {
+            "min": 29832495104,
+            "max": 29832495104,
+            "mean": 29832495104.0,
+            "n": 1
+          },
+          "mem_cached_bytes": {
+            "min": 1353629696,
+            "max": 1353629696,
+            "mean": 1353629696.0,
+            "n": 1
+          },
+          "swap_free_bytes": {
+            "min": 75109326848,
+            "max": 75109326848,
+            "mean": 75109326848.0,
+            "n": 1
+          }
+        }
+      },
+      {
+        "run": 2,
+        "error": "RuntimeError: server exited rc=1 during load; stderr tail:\n0.00.190.702 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)\n0.00.191.488 W srv  llama_server: -----------------\n0.00.191.491 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set\n0.00.191.491 W srv  llama_server: this can be a security risk (cross-origin attacks)\n0.00.191.491 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655\n0.00.191.491 W srv  llama_server: -----------------\n0.00.192.703 I srv    load_model: loading model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.192.746 E gguf_init_from_file: failed to open GGUF file '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf' (No such file or directory)\n0.00.192.807 E llama_model_load: error loading model: llama_model_loader: failed to load model from /home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf\n0.00.192.811 E llama_model_load_from_file_impl: failed to load model\n0.00.192.812 E cmn  common_init_: failed to load model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.192.814 E srv    load_model: failed to load model, '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.192.814 I srv    operator(): operator(): cleaning up before exit...\n0.00.193.529 E srv  llama_server: exiting due to model loading error\n",
+        "load": {
+          "samples": 1,
+          "interval_seconds": 5.0,
+          "started": 1785648780.4692185,
+          "finished": 1785648781.473129,
+          "missed": 0,
+          "loadavg_1m": {
+            "min": 1.95,
+            "max": 1.95,
+            "mean": 1.95,
+            "n": 1
+          },
+          "loadavg_5m": {
+            "min": 2.65,
+            "max": 2.65,
+            "mean": 2.65,
+            "n": 1
+          },
+          "loadavg_15m": {
+            "min": 2.45,
+            "max": 2.45,
+            "mean": 2.45,
+            "n": 1
+          },
+          "runnable": {
+            "min": 2,
+            "max": 2,
+            "mean": 2.0,
+            "n": 1
+          },
+          "procs": {
+            "min": 1255,
+            "max": 1255,
+            "mean": 1255.0,
+            "n": 1
+          },
+          "mem_available_bytes": {
+            "min": 29813063680,
+            "max": 29813063680,
+            "mean": 29813063680.0,
+            "n": 1
+          },
+          "mem_cached_bytes": {
+            "min": 1363529728,
+            "max": 1363529728,
+            "mean": 1363529728.0,
+            "n": 1
+          },
+          "swap_free_bytes": {
+            "min": 75111796736,
+            "max": 75111796736,
+            "mean": 75111796736.0,
+            "n": 1
+          }
+        }
+      },
+      {
+        "run": 3,
+        "error": "RuntimeError: server exited rc=1 during load; stderr tail:\n0.00.179.729 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)\n0.00.180.534 W srv  llama_server: -----------------\n0.00.180.535 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set\n0.00.180.535 W srv  llama_server: this can be a security risk (cross-origin attacks)\n0.00.180.535 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655\n0.00.180.536 W srv  llama_server: -----------------\n0.00.181.768 I srv    load_model: loading model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.181.813 E gguf_init_from_file: failed to open GGUF file '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf' (No such file or directory)\n0.00.181.875 E llama_model_load: error loading model: llama_model_loader: failed to load model from /home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf\n0.00.181.878 E llama_model_load_from_file_impl: failed to load model\n0.00.181.879 E cmn  common_init_: failed to load model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.181.881 E srv    load_model: failed to load model, '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.181.882 I srv    operator(): operator(): cleaning up before exit...\n0.00.182.786 E srv  llama_server: exiting due to model loading error\n",
+        "load": {
+          "samples": 1,
+          "interval_seconds": 5.0,
+          "started": 1785648781.4732282,
+          "finished": 1785648782.4771159,
+          "missed": 0,
+          "loadavg_1m": {
+            "min": 1.95,
+            "max": 1.95,
+            "mean": 1.95,
+            "n": 1
+          },
+          "loadavg_5m": {
+            "min": 2.65,
+            "max": 2.65,
+            "mean": 2.65,
+            "n": 1
+          },
+          "loadavg_15m": {
+            "min": 2.45,
+            "max": 2.45,
+            "mean": 2.45,
+            "n": 1
+          },
+          "runnable": {
+            "min": 2,
+            "max": 2,
+            "mean": 2.0,
+            "n": 1
+          },
+          "procs": {
+            "min": 1256,
+            "max": 1256,
+            "mean": 1256.0,
+            "n": 1
+          },
+          "mem_available_bytes": {
+            "min": 29809487872,
+            "max": 29809487872,
+            "mean": 29809487872.0,
+            "n": 1
+          },
+          "mem_cached_bytes": {
+            "min": 1366073344,
+            "max": 1366073344,
+            "mean": 1366073344.0,
+            "n": 1
+          },
+          "swap_free_bytes": {
+            "min": 75121651712,
+            "max": 75121651712,
+            "mean": 75121651712.0,
+            "n": 1
+          }
+        }
+      },
+      {
+        "run": 4,
+        "error": "RuntimeError: server exited rc=1 during load; stderr tail:\n0.00.188.017 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)\n0.00.188.810 W srv  llama_server: -----------------\n0.00.188.811 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set\n0.00.188.811 W srv  llama_server: this can be a security risk (cross-origin attacks)\n0.00.188.812 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655\n0.00.188.812 W srv  llama_server: -----------------\n0.00.190.053 I srv    load_model: loading model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.190.095 E gguf_init_from_file: failed to open GGUF file '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf' (No such file or directory)\n0.00.190.160 E llama_model_load: error loading model: llama_model_loader: failed to load model from /home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf\n0.00.190.163 E llama_model_load_from_file_impl: failed to load model\n0.00.190.164 E cmn  common_init_: failed to load model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.190.166 E srv    load_model: failed to load model, '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.190.166 I srv    operator(): operator(): cleaning up before exit...\n0.00.190.796 E srv  llama_server: exiting due to model loading error\n",
+        "load": {
+          "samples": 1,
+          "interval_seconds": 5.0,
+          "started": 1785648782.477214,
+          "finished": 1785648783.4810936,
+          "missed": 0,
+          "loadavg_1m": {
+            "min": 1.95,
+            "max": 1.95,
+            "mean": 1.95,
+            "n": 1
+          },
+          "loadavg_5m": {
+            "min": 2.65,
+            "max": 2.65,
+            "mean": 2.65,
+            "n": 1
+          },
+          "loadavg_15m": {
+            "min": 2.45,
+            "max": 2.45,
+            "mean": 2.45,
+            "n": 1
+          },
+          "runnable": {
+            "min": 2,
+            "max": 2,
+            "mean": 2.0,
+            "n": 1
+          },
+          "procs": {
+            "min": 1257,
+            "max": 1257,
+            "mean": 1257.0,
+            "n": 1
+          },
+          "mem_available_bytes": {
+            "min": 29844951040,
+            "max": 29844951040,
+            "mean": 29844951040.0,
+            "n": 1
+          },
+          "mem_cached_bytes": {
+            "min": 1378275328,
+            "max": 1378275328,
+            "mean": 1378275328.0,
+            "n": 1
+          },
+          "swap_free_bytes": {
+            "min": 75121954816,
+            "max": 75121954816,
+            "mean": 75121954816.0,
+            "n": 1
+          }
+        }
+      }
+    ],
+    "C2": [
+      {
+        "run": 0,
+        "error": "RuntimeError: server exited rc=1 during load; stderr tail:\n0.00.202.041 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)\n0.00.202.639 I srv  llama_server: MoE expert cache enabled per device: dev0=4294967296 (unnamed devices: none), policy=slru, admission=2\n0.00.202.874 W srv  llama_server: -----------------\n0.00.202.875 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set\n0.00.202.875 W srv  llama_server: this can be a security risk (cross-origin attacks)\n0.00.202.875 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655\n0.00.202.875 W srv  llama_server: -----------------\n0.00.204.056 I srv    load_model: loading model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.204.088 E gguf_init_from_file: failed to open GGUF file '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf' (No such file or directory)\n0.00.204.137 E llama_model_load: error loading model: llama_model_loader: failed to load model from /home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf\n0.00.204.140 E llama_model_load_from_file_impl: failed to load model\n0.00.204.140 E cmn  common_init_: failed to load model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.204.141 E srv    load_model: failed to load model, '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.204.142 I srv    operator(): operator(): cleaning up before exit...\n0.00.204.932 E srv  llama_server: exiting due to model loading error\n",
+        "load": {
+          "samples": 1,
+          "interval_seconds": 5.0,
+          "started": 1785648783.4812195,
+          "finished": 1785648784.4852412,
+          "missed": 0,
+          "loadavg_1m": {
+            "min": 1.95,
+            "max": 1.95,
+            "mean": 1.95,
+            "n": 1
+          },
+          "loadavg_5m": {
+            "min": 2.65,
+            "max": 2.65,
+            "mean": 2.65,
+            "n": 1
+          },
+          "loadavg_15m": {
+            "min": 2.45,
+            "max": 2.45,
+            "mean": 2.45,
+            "n": 1
+          },
+          "runnable": {
+            "min": 2,
+            "max": 2,
+            "mean": 2.0,
+            "n": 1
+          },
+          "procs": {
+            "min": 1259,
+            "max": 1259,
+            "mean": 1259.0,
+            "n": 1
+          },
+          "mem_available_bytes": {
+            "min": 29876342784,
+            "max": 29876342784,
+            "mean": 29876342784.0,
+            "n": 1
+          },
+          "mem_cached_bytes": {
+            "min": 1382707200,
+            "max": 1382707200,
+            "mean": 1382707200.0,
+            "n": 1
+          },
+          "swap_free_bytes": {
+            "min": 75131473920,
+            "max": 75131473920,
+            "mean": 75131473920.0,
+            "n": 1
+          }
+        }
+      },
+      {
+        "run": 1,
+        "error": "RuntimeError: server exited rc=1 during load; stderr tail:\n0.00.194.149 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)\n0.00.194.653 I srv  llama_server: MoE expert cache enabled per device: dev0=4294967296 (unnamed devices: none), policy=slru, admission=2\n0.00.194.975 W srv  llama_server: -----------------\n0.00.194.976 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set\n0.00.194.977 W srv  llama_server: this can be a security risk (cross-origin attacks)\n0.00.194.977 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655\n0.00.194.977 W srv  llama_server: -----------------\n0.00.196.209 I srv    load_model: loading model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.196.250 E gguf_init_from_file: failed to open GGUF file '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf' (No such file or directory)\n0.00.196.314 E llama_model_load: error loading model: llama_model_loader: failed to load model from /home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf\n0.00.196.318 E llama_model_load_from_file_impl: failed to load model\n0.00.196.319 E cmn  common_init_: failed to load model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.196.320 E srv    load_model: failed to load model, '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.196.321 I srv    operator(): operator(): cleaning up before exit...\n0.00.196.994 E srv  llama_server: exiting due to model loading error\n",
+        "load": {
+          "samples": 1,
+          "interval_seconds": 5.0,
+          "started": 1785648784.485331,
+          "finished": 1785648785.4891953,
+          "missed": 0,
+          "loadavg_1m": {
+            "min": 1.95,
+            "max": 1.95,
+            "mean": 1.95,
+            "n": 1
+          },
+          "loadavg_5m": {
+            "min": 2.64,
+            "max": 2.64,
+            "mean": 2.64,
+            "n": 1
+          },
+          "loadavg_15m": {
+            "min": 2.45,
+            "max": 2.45,
+            "mean": 2.45,
+            "n": 1
+          },
+          "runnable": {
+            "min": 1,
+            "max": 1,
+            "mean": 1.0,
+            "n": 1
+          },
+          "procs": {
+            "min": 1260,
+            "max": 1260,
+            "mean": 1260.0,
+            "n": 1
+          },
+          "mem_available_bytes": {
+            "min": 29832380416,
+            "max": 29832380416,
+            "mean": 29832380416.0,
+            "n": 1
+          },
+          "mem_cached_bytes": {
+            "min": 1382731776,
+            "max": 1382731776,
+            "mean": 1382731776.0,
+            "n": 1
+          },
+          "swap_free_bytes": {
+            "min": 75131691008,
+            "max": 75131691008,
+            "mean": 75131691008.0,
+            "n": 1
+          }
+        }
+      },
+      {
+        "run": 2,
+        "error": "RuntimeError: server exited rc=1 during load; stderr tail:\n0.00.199.467 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)\n0.00.199.968 I srv  llama_server: MoE expert cache enabled per device: dev0=4294967296 (unnamed devices: none), policy=slru, admission=2\n0.00.200.295 W srv  llama_server: -----------------\n0.00.200.296 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set\n0.00.200.297 W srv  llama_server: this can be a security risk (cross-origin attacks)\n0.00.200.297 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655\n0.00.200.297 W srv  llama_server: -----------------\n0.00.201.525 I srv    load_model: loading model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.201.570 E gguf_init_from_file: failed to open GGUF file '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf' (No such file or directory)\n0.00.201.633 E llama_model_load: error loading model: llama_model_loader: failed to load model from /home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf\n0.00.201.637 E llama_model_load_from_file_impl: failed to load model\n0.00.201.638 E cmn  common_init_: failed to load model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.201.639 E srv    load_model: failed to load model, '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.201.640 I srv    operator(): operator(): cleaning up before exit...\n0.00.202.295 E srv  llama_server: exiting due to model loading error\n",
+        "load": {
+          "samples": 1,
+          "interval_seconds": 5.0,
+          "started": 1785648785.48929,
+          "finished": 1785648786.4932358,
+          "missed": 0,
+          "loadavg_1m": {
+            "min": 1.95,
+            "max": 1.95,
+            "mean": 1.95,
+            "n": 1
+          },
+          "loadavg_5m": {
+            "min": 2.64,
+            "max": 2.64,
+            "mean": 2.64,
+            "n": 1
+          },
+          "loadavg_15m": {
+            "min": 2.45,
+            "max": 2.45,
+            "mean": 2.45,
+            "n": 1
+          },
+          "runnable": {
+            "min": 2,
+            "max": 2,
+            "mean": 2.0,
+            "n": 1
+          },
+          "procs": {
+            "min": 1264,
+            "max": 1264,
+            "mean": 1264.0,
+            "n": 1
+          },
+          "mem_available_bytes": {
+            "min": 29852069888,
+            "max": 29852069888,
+            "mean": 29852069888.0,
+            "n": 1
+          },
+          "mem_cached_bytes": {
+            "min": 1387266048,
+            "max": 1387266048,
+            "mean": 1387266048.0,
+            "n": 1
+          },
+          "swap_free_bytes": {
+            "min": 75135471616,
+            "max": 75135471616,
+            "mean": 75135471616.0,
+            "n": 1
+          }
+        }
+      },
+      {
+        "run": 3,
+        "error": "RuntimeError: server exited rc=1 during load; stderr tail:\n0.00.198.445 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)\n0.00.198.934 I srv  llama_server: MoE expert cache enabled per device: dev0=4294967296 (unnamed devices: none), policy=slru, admission=2\n0.00.199.244 W srv  llama_server: -----------------\n0.00.199.245 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set\n0.00.199.245 W srv  llama_server: this can be a security risk (cross-origin attacks)\n0.00.199.245 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655\n0.00.199.245 W srv  llama_server: -----------------\n0.00.200.462 I srv    load_model: loading model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.200.501 E gguf_init_from_file: failed to open GGUF file '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf' (No such file or directory)\n0.00.200.562 E llama_model_load: error loading model: llama_model_loader: failed to load model from /home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf\n0.00.200.565 E llama_model_load_from_file_impl: failed to load model\n0.00.200.566 E cmn  common_init_: failed to load model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.200.568 E srv    load_model: failed to load model, '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.200.569 I srv    operator(): operator(): cleaning up before exit...\n0.00.201.327 E srv  llama_server: exiting due to model loading error\n",
+        "load": {
+          "samples": 1,
+          "interval_seconds": 5.0,
+          "started": 1785648786.49333,
+          "finished": 1785648787.4970832,
+          "missed": 0,
+          "loadavg_1m": {
+            "min": 1.95,
+            "max": 1.95,
+            "mean": 1.95,
+            "n": 1
+          },
+          "loadavg_5m": {
+            "min": 2.64,
+            "max": 2.64,
+            "mean": 2.64,
+            "n": 1
+          },
+          "loadavg_15m": {
+            "min": 2.45,
+            "max": 2.45,
+            "mean": 2.45,
+            "n": 1
+          },
+          "runnable": {
+            "min": 1,
+            "max": 1,
+            "mean": 1.0,
+            "n": 1
+          },
+          "procs": {
+            "min": 1264,
+            "max": 1264,
+            "mean": 1264.0,
+            "n": 1
+          },
+          "mem_available_bytes": {
+            "min": 29825806336,
+            "max": 29825806336,
+            "mean": 29825806336.0,
+            "n": 1
+          },
+          "mem_cached_bytes": {
+            "min": 1387356160,
+            "max": 1387356160,
+            "mean": 1387356160.0,
+            "n": 1
+          },
+          "swap_free_bytes": {
+            "min": 75136069632,
+            "max": 75136069632,
+            "mean": 75136069632.0,
+            "n": 1
+          }
+        }
+      },
+      {
+        "run": 4,
+        "error": "RuntimeError: server exited rc=1 during load; stderr tail:\n0.00.189.360 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)\n0.00.189.864 I srv  llama_server: MoE expert cache enabled per device: dev0=4294967296 (unnamed devices: none), policy=slru, admission=2\n0.00.190.185 W srv  llama_server: -----------------\n0.00.190.186 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set\n0.00.190.187 W srv  llama_server: this can be a security risk (cross-origin attacks)\n0.00.190.187 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655\n0.00.190.187 W srv  llama_server: -----------------\n0.00.191.410 I srv    load_model: loading model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.191.453 E gguf_init_from_file: failed to open GGUF file '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf' (No such file or directory)\n0.00.191.515 E llama_model_load: error loading model: llama_model_loader: failed to load model from /home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf\n0.00.191.519 E llama_model_load_from_file_impl: failed to load model\n0.00.191.520 E cmn  common_init_: failed to load model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.191.521 E srv    load_model: failed to load model, '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.191.522 I srv    operator(): operator(): cleaning up before exit...\n0.00.192.326 E srv  llama_server: exiting due to model loading error\n",
+        "load": {
+          "samples": 1,
+          "interval_seconds": 5.0,
+          "started": 1785648787.4971895,
+          "finished": 1785648788.501042,
+          "missed": 0,
+          "loadavg_1m": {
+            "min": 1.95,
+            "max": 1.95,
+            "mean": 1.95,
+            "n": 1
+          },
+          "loadavg_5m": {
+            "min": 2.64,
+            "max": 2.64,
+            "mean": 2.64,
+            "n": 1
+          },
+          "loadavg_15m": {
+            "min": 2.45,
+            "max": 2.45,
+            "mean": 2.45,
+            "n": 1
+          },
+          "runnable": {
+            "min": 3,
+            "max": 3,
+            "mean": 3.0,
+            "n": 1
+          },
+          "procs": {
+            "min": 1265,
+            "max": 1265,
+            "mean": 1265.0,
+            "n": 1
+          },
+          "mem_available_bytes": {
+            "min": 29844971520,
+            "max": 29844971520,
+            "mean": 29844971520.0,
+            "n": 1
+          },
+          "mem_cached_bytes": {
+            "min": 1391185920,
+            "max": 1391185920,
+            "mean": 1391185920.0,
+            "n": 1
+          },
+          "swap_free_bytes": {
+            "min": 75142647808,
+            "max": 75142647808,
+            "mean": 75142647808.0,
+            "n": 1
+          }
+        }
+      }
+    ],
+    "C3": [
+      {
+        "run": 0,
+        "error": "RuntimeError: server exited rc=1 during load; stderr tail:\n0.00.189.826 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)\n0.00.190.318 I srv  llama_server: MoE expert cache enabled per device: dev0=4294967296 (unnamed devices: none), policy=slru, admission=2\n0.00.190.637 W srv  llama_server: -----------------\n0.00.190.638 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set\n0.00.190.639 W srv  llama_server: this can be a security risk (cross-origin attacks)\n0.00.190.639 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655\n0.00.190.639 W srv  llama_server: -----------------\n0.00.191.884 I srv    load_model: loading model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.191.929 E gguf_init_from_file: failed to open GGUF file '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf' (No such file or directory)\n0.00.191.999 E llama_model_load: error loading model: llama_model_loader: failed to load model from /home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf\n0.00.192.003 E llama_model_load_from_file_impl: failed to load model\n0.00.192.004 E cmn  common_init_: failed to load model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.192.006 E srv    load_model: failed to load model, '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.192.006 I srv    operator(): operator(): cleaning up before exit...\n0.00.192.733 E srv  llama_server: exiting due to model loading error\n",
+        "load": {
+          "samples": 1,
+          "interval_seconds": 5.0,
+          "started": 1785648788.501139,
+          "finished": 1785648789.5047908,
+          "missed": 0,
+          "loadavg_1m": {
+            "min": 1.95,
+            "max": 1.95,
+            "mean": 1.95,
+            "n": 1
+          },
+          "loadavg_5m": {
+            "min": 2.64,
+            "max": 2.64,
+            "mean": 2.64,
+            "n": 1
+          },
+          "loadavg_15m": {
+            "min": 2.45,
+            "max": 2.45,
+            "mean": 2.45,
+            "n": 1
+          },
+          "runnable": {
+            "min": 3,
+            "max": 3,
+            "mean": 3.0,
+            "n": 1
+          },
+          "procs": {
+            "min": 1267,
+            "max": 1267,
+            "mean": 1267.0,
+            "n": 1
+          },
+          "mem_available_bytes": {
+            "min": 29897596928,
+            "max": 29897596928,
+            "mean": 29897596928.0,
+            "n": 1
+          },
+          "mem_cached_bytes": {
+            "min": 1391190016,
+            "max": 1391190016,
+            "mean": 1391190016.0,
+            "n": 1
+          },
+          "swap_free_bytes": {
+            "min": 75145371648,
+            "max": 75145371648,
+            "mean": 75145371648.0,
+            "n": 1
+          }
+        }
+      },
+      {
+        "run": 1,
+        "error": "RuntimeError: server exited rc=1 during load; stderr tail:\n0.00.197.905 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)\n0.00.198.389 I srv  llama_server: MoE expert cache enabled per device: dev0=4294967296 (unnamed devices: none), policy=slru, admission=2\n0.00.198.707 W srv  llama_server: -----------------\n0.00.198.708 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set\n0.00.198.708 W srv  llama_server: this can be a security risk (cross-origin attacks)\n0.00.198.708 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655\n0.00.198.708 W srv  llama_server: -----------------\n0.00.199.936 I srv    load_model: loading model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.199.974 E gguf_init_from_file: failed to open GGUF file '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf' (No such file or directory)\n0.00.200.033 E llama_model_load: error loading model: llama_model_loader: failed to load model from /home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf\n0.00.200.036 E llama_model_load_from_file_impl: failed to load model\n0.00.200.037 E cmn  common_init_: failed to load model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.200.039 E srv    load_model: failed to load model, '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.200.040 I srv    operator(): operator(): cleaning up before exit...\n0.00.200.998 E srv  llama_server: exiting due to model loading error\n",
+        "load": {
+          "samples": 1,
+          "interval_seconds": 5.0,
+          "started": 1785648789.50489,
+          "finished": 1785648790.5085871,
+          "missed": 0,
+          "loadavg_1m": {
+            "min": 1.79,
+            "max": 1.79,
+            "mean": 1.79,
+            "n": 1
+          },
+          "loadavg_5m": {
+            "min": 2.6,
+            "max": 2.6,
+            "mean": 2.6,
+            "n": 1
+          },
+          "loadavg_15m": {
+            "min": 2.44,
+            "max": 2.44,
+            "mean": 2.44,
+            "n": 1
+          },
+          "runnable": {
+            "min": 3,
+            "max": 3,
+            "mean": 3.0,
+            "n": 1
+          },
+          "procs": {
+            "min": 1268,
+            "max": 1268,
+            "mean": 1268.0,
+            "n": 1
+          },
+          "mem_available_bytes": {
+            "min": 29881274368,
+            "max": 29881274368,
+            "mean": 29881274368.0,
+            "n": 1
+          },
+          "mem_cached_bytes": {
+            "min": 1393364992,
+            "max": 1393364992,
+            "mean": 1393364992.0,
+            "n": 1
+          },
+          "swap_free_bytes": {
+            "min": 75146739712,
+            "max": 75146739712,
+            "mean": 75146739712.0,
+            "n": 1
+          }
+        }
+      },
+      {
+        "run": 2,
+        "error": "RuntimeError: server exited rc=1 during load; stderr tail:\n0.00.187.803 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)\n0.00.188.286 I srv  llama_server: MoE expert cache enabled per device: dev0=4294967296 (unnamed devices: none), policy=slru, admission=2\n0.00.188.609 W srv  llama_server: -----------------\n0.00.188.610 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set\n0.00.188.610 W srv  llama_server: this can be a security risk (cross-origin attacks)\n0.00.188.610 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655\n0.00.188.610 W srv  llama_server: -----------------\n0.00.189.848 I srv    load_model: loading model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.189.891 E gguf_init_from_file: failed to open GGUF file '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf' (No such file or directory)\n0.00.189.951 E llama_model_load: error loading model: llama_model_loader: failed to load model from /home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf\n0.00.189.955 E llama_model_load_from_file_impl: failed to load model\n0.00.189.955 E cmn  common_init_: failed to load model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.189.957 E srv    load_model: failed to load model, '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.189.958 I srv    operator(): operator(): cleaning up before exit...\n0.00.190.613 E srv  llama_server: exiting due to model loading error\n",
+        "load": {
+          "samples": 1,
+          "interval_seconds": 5.0,
+          "started": 1785648790.5086987,
+          "finished": 1785648791.5123994,
+          "missed": 0,
+          "loadavg_1m": {
+            "min": 1.79,
+            "max": 1.79,
+            "mean": 1.79,
+            "n": 1
+          },
+          "loadavg_5m": {
+            "min": 2.6,
+            "max": 2.6,
+            "mean": 2.6,
+            "n": 1
+          },
+          "loadavg_15m": {
+            "min": 2.44,
+            "max": 2.44,
+            "mean": 2.44,
+            "n": 1
+          },
+          "runnable": {
+            "min": 1,
+            "max": 1,
+            "mean": 1.0,
+            "n": 1
+          },
+          "procs": {
+            "min": 1268,
+            "max": 1268,
+            "mean": 1268.0,
+            "n": 1
+          },
+          "mem_available_bytes": {
+            "min": 29881413632,
+            "max": 29881413632,
+            "mean": 29881413632.0,
+            "n": 1
+          },
+          "mem_cached_bytes": {
+            "min": 1393373184,
+            "max": 1393373184,
+            "mean": 1393373184.0,
+            "n": 1
+          },
+          "swap_free_bytes": {
+            "min": 75147862016,
+            "max": 75147862016,
+            "mean": 75147862016.0,
+            "n": 1
+          }
+        }
+      },
+      {
+        "run": 3,
+        "error": "RuntimeError: server exited rc=1 during load; stderr tail:\n0.00.190.942 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)\n0.00.191.422 I srv  llama_server: MoE expert cache enabled per device: dev0=4294967296 (unnamed devices: none), policy=slru, admission=2\n0.00.191.846 W srv  llama_server: -----------------\n0.00.191.848 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set\n0.00.191.848 W srv  llama_server: this can be a security risk (cross-origin attacks)\n0.00.191.849 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655\n0.00.191.849 W srv  llama_server: -----------------\n0.00.193.037 I srv    load_model: loading model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.193.068 E gguf_init_from_file: failed to open GGUF file '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf' (No such file or directory)\n0.00.193.111 E llama_model_load: error loading model: llama_model_loader: failed to load model from /home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf\n0.00.193.114 E llama_model_load_from_file_impl: failed to load model\n0.00.193.114 E cmn  common_init_: failed to load model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.193.115 E srv    load_model: failed to load model, '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.193.116 I srv    operator(): operator(): cleaning up before exit...\n0.00.193.830 E srv  llama_server: exiting due to model loading error\n",
+        "load": {
+          "samples": 1,
+          "interval_seconds": 5.0,
+          "started": 1785648791.5125706,
+          "finished": 1785648792.5167663,
+          "missed": 0,
+          "loadavg_1m": {
+            "min": 1.79,
+            "max": 1.79,
+            "mean": 1.79,
+            "n": 1
+          },
+          "loadavg_5m": {
+            "min": 2.6,
+            "max": 2.6,
+            "mean": 2.6,
+            "n": 1
+          },
+          "loadavg_15m": {
+            "min": 2.44,
+            "max": 2.44,
+            "mean": 2.44,
+            "n": 1
+          },
+          "runnable": {
+            "min": 1,
+            "max": 1,
+            "mean": 1.0,
+            "n": 1
+          },
+          "procs": {
+            "min": 1269,
+            "max": 1269,
+            "mean": 1269.0,
+            "n": 1
+          },
+          "mem_available_bytes": {
+            "min": 29839769600,
+            "max": 29839769600,
+            "mean": 29839769600.0,
+            "n": 1
+          },
+          "mem_cached_bytes": {
+            "min": 1393410048,
+            "max": 1393410048,
+            "mean": 1393410048.0,
+            "n": 1
+          },
+          "swap_free_bytes": {
+            "min": 75148083200,
+            "max": 75148083200,
+            "mean": 75148083200.0,
+            "n": 1
+          }
+        }
+      },
+      {
+        "run": 4,
+        "error": "RuntimeError: server exited rc=1 during load; stderr tail:\n0.00.205.419 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)\n0.00.205.905 I srv  llama_server: MoE expert cache enabled per device: dev0=4294967296 (unnamed devices: none), policy=slru, admission=2\n0.00.206.226 W srv  llama_server: -----------------\n0.00.206.228 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set\n0.00.206.228 W srv  llama_server: this can be a security risk (cross-origin attacks)\n0.00.206.228 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655\n0.00.206.228 W srv  llama_server: -----------------\n0.00.207.455 I srv    load_model: loading model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.207.496 E gguf_init_from_file: failed to open GGUF file '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf' (No such file or directory)\n0.00.207.562 E llama_model_load: error loading model: llama_model_loader: failed to load model from /home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf\n0.00.207.566 E llama_model_load_from_file_impl: failed to load model\n0.00.207.567 E cmn  common_init_: failed to load model '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.207.569 E srv    load_model: failed to load model, '/home/aaron/models/unsloth/Qwen3.5-122B-A10B-GGUF/Qwen3.5-122B-A10B-UD-IQ1_M.gguf'\n0.00.207.569 I srv    operator(): operator(): cleaning up before exit...\n0.00.208.458 E srv  llama_server: exiting due to model loading error\n",
+        "load": {
+          "samples": 1,
+          "interval_seconds": 5.0,
+          "started": 1785648792.5168593,
+          "finished": 1785648793.5203688,
+          "missed": 0,
+          "loadavg_1m": {
+            "min": 1.79,
+            "max": 1.79,
+            "mean": 1.79,
+            "n": 1
+          },
+          "loadavg_5m": {
+            "min": 2.6,
+            "max": 2.6,
+            "mean": 2.6,
+            "n": 1
+          },
+          "loadavg_15m": {
+            "min": 2.44,
+            "max": 2.44,
+            "mean": 2.44,
+            "n": 1
+          },
+          "runnable": {
+            "min": 2,
+            "max": 2,
+            "mean": 2.0,
+            "n": 1
+          },
+          "procs": {
+            "min": 1269,
+            "max": 1269,
+            "mean": 1269.0,
+            "n": 1
+          },
+          "mem_available_bytes": {
+            "min": 29832904704,
+            "max": 29832904704,
+            "mean": 29832904704.0,
+            "n": 1
+          },
+          "mem_cached_bytes": {
+            "min": 1405218816,
+            "max": 1405218816,
+            "mean": 1405218816.0,
+            "n": 1
+          },
+          "swap_free_bytes": {
+            "min": 75157278720,
+            "max": 75157278720,
+            "mean": 75157278720.0,
+            "n": 1
+          }
+        }
+      }
+    ]
+  }
+}

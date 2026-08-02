@@ -101,7 +101,10 @@ fi
 # IsolatedAsyncioTestCase classes); serial fallback ~218s, parallel ~43s.
 section "test suite"
 TESTS_T0=$SECONDS
-if (cd "$REPO/modelctl" && "$VENV" -m pytest -n auto -q . \
+# --color=no: pytest's ANSI codes land between "N passed" and ", N
+# skipped", so the summary grep below matched only the first half and the
+# PASS line silently under-reported the run.
+if (cd "$REPO/modelctl" && "$VENV" -m pytest -n auto -q --color=no . \
         > /tmp/ci-tests.log 2>&1); then
     pass "$(grep -oE '[0-9]+ passed(, [0-9]+ skipped)?' /tmp/ci-tests.log | tail -1) in $((SECONDS - TESTS_T0))s wall"
 else
