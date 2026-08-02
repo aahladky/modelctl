@@ -179,12 +179,20 @@ reruns in one command when anything changes.
   `--moe-cache-prefill-admission off` no skips happen during prefill at
   all, so this has not been worth fixing yet.
 
-## Known defect in the surrounding cache path
+## The nondeterminism that blocked this rail (fixed)
 
-On the 122B, an identical cache condition does **not** reproduce its
-own greedy token sequence run to run — including with hybrid off, which
-executes no CPU-tier code at all. Static placement reproduces
-perfectly. This predates the CPU-kernel pass and means "hybrid on
-matches hybrid off" has no fixed reference on that model; the
-deterministic tiny-MoE fixture is where that rail can still be
-evaluated (and passes). See §4 of the 2026-08-01 evidence.
+An identical 122B condition used not to reproduce its own greedy token
+sequence run to run, which left "hybrid on matches hybrid off" with no
+fixed reference on that model. It was recorded here as a defect in the
+surrounding cache path. **It was not in the cache path.** It reproduced
+with no cache configured at all, and — once logprobs rather than token
+IDs were compared — under static placement too. The cause was oneDNN's
+GPU matmul running without oneDNN's `deterministic` attribute, reached
+by any matmul whose batch exceeds `MMQ_MAX_BATCH_SIZE`, i.e. during
+prompt processing in every condition.
+
+`GGML_SYCL_DETERMINISTIC` (default 1) pins it, and the rail is now
+evaluable on the 122B rather than only on the tiny fixture. The
+localization, the controls that excluded the cache, and the acceptance
+numbers are in
+[../evidence/2026-08-01-onednn-determinism.md](../evidence/2026-08-01-onednn-determinism.md).

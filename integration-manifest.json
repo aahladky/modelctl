@@ -1,11 +1,11 @@
 {
-  "generated_at": "2026-08-01T14:45:00-04:00",
+  "generated_at": "2026-08-01T21:58:00-04:00",
   "validated_modelctl_commit": "dfcebc8",
-  "validated_llama_commit": "f4d390349ff7be5a36f6945b1cb136bd82e857ca",
+  "validated_llama_commit": "85b7e6556b6b83026d1a17df2635bc1173db1f97",
   "upstream_base": "9b2a08881",
-  "validation_report": "modelctl/docs/evidence/2026-08-01-p1-madvise-bench.md",
+  "validation_report": "modelctl/docs/evidence/2026-08-01-onednn-determinism.md",
   "modelctl_commit": "dfcebc8",
-  "llama_cpp_commit": "f4d390349ff7be5a36f6945b1cb136bd82e857ca",
+  "llama_cpp_commit": "85b7e6556b6b83026d1a17df2635bc1173db1f97",
   "llama_cpp_upstream_base": "9b2a08881",
   "llama_cpp_pre_sync_tag": "moe-cache-pre-upstream-2026-07-30",
   "llama_cpp_pre_sync_commit": "e7af6cf1996cb3d850963213b043d876ffe959ea",
@@ -25,7 +25,7 @@
     "moe_cache_prefetch"
   ],
   "release_channel": "experimental",
-  "acceptance_report": "modelctl/docs/evidence/2026-08-01-p1-madvise-bench.md",
+  "acceptance_report": "modelctl/docs/evidence/2026-08-01-onednn-determinism.md",
   "field_notes": "validated_* names the last modelctl+llama.cpp pair that passed hardware acceptance together -- the rollback target. The legacy modelctl_commit/llama_cpp_commit/llama_cpp_upstream_base/acceptance_report keys are the same values under their old ambiguous names, kept for ci/checks.sh and older readers.",
-  "notes": "P1 mmap-tier madvise pair: bench on ornith-397b (C1 0.353 / C2 0.255 / C3 0.260 tok/s, C2==C3 token-identical, advise counters live), laguna anchor 13.71 tok/s (first run 13.48 flagged, 5.07% off), full ci/checks.sh green except the pin mismatch this update resolves."
+  "notes": "oneDNN determinism pair: the 122B greedy nondeterminism this chain had filed against the MoE transfer cache was oneDNN matmul reduction order (DnnlGemmWrapper built its primitive without set_deterministic). It reproduced with no cache configured and under static placement. GGML_SYCL_DETERMINISTIC (default 1) pins it. Rail: 10/10 identical tokens AND logprobs at 122B for cache-on, cache+hybrid and +advise, with byte-identical execution fingerprints; advise-on == advise-off bit for bit, closing the P1 C4 flicker; tiny fixture 8/8. Cost, same binary, attribute off: C1 -15.20%, C2 -8.01%, C3 -14.87% (dets are the slower arm). The pin advances the determinism fix and the hybrid CPU kernel work together as one validated pair."
 }

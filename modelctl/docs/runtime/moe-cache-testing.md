@@ -82,6 +82,34 @@ fork's `tests/` (tiny-MoE model, `/cache/reset` between conditions)
 exist for exactly this; the invalidated 07-28 benchmark is what
 skipping this step produces.
 
+**First check that the oracle reproduces itself.** For a month this
+machine's 122B runs did not, and every A/B built on top of them was
+comparing two samples from a distribution. The cause was oneDNN's GPU
+matmul, whose default permits a reduction order that varies between
+executions; it is reached whenever a batch exceeds
+`MMQ_MAX_BATCH_SIZE` (32), i.e. during prompt processing, in **every**
+condition including static placement. `GGML_SYCL_DETERMINISTIC` now
+defaults to 1 and pins it. Details and the localization in
+[../evidence/2026-08-01-onednn-determinism.md](../evidence/2026-08-01-onednn-determinism.md).
+
+Two consequences for anyone running this protocol:
+
+- Run the reference against **itself** before comparing anything to it.
+  Two runs of one condition must be token-identical. If they are not,
+  no downstream comparison means anything, and that is a defect to
+  chase rather than a tolerance to widen.
+- Token identity is a weak instrument. Greedy argmax survives large
+  logit perturbations, so sequences can agree for dozens of steps while
+  the numbers underneath differ by nats. Ask for `n_probs` and compare
+  **logprobs**, not only token IDs — within one step, differences of
+  log-softmax values are exactly differences of logits.
+
+`GGML_MOE_FINGERPRINT=<path>` in the fork records, per routed
+`MUL_MAT_ID`, which branch ran and which experts it was routed to, plus
+every staging decision (hit / promote / hybrid-skip / fallback). Diffing
+two runs' fingerprints answers "did these two runs execute the same
+ops?" before anyone argues about arithmetic. It is inert when unset.
+
 ## 4. Measure the cost of reaching the cache, not just its benefit
 
 `GGML_OP_OFFLOAD_MIN_BATCH` is **global**. Lowering it to 1 forces every
