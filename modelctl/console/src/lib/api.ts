@@ -1,7 +1,9 @@
 import type {
-  AdmissionPreview, CancelResult, ConfigSaveResult, GgufAnalysis, HistoryRow,
-  JobRow, LogTail, ModelDetail, ModelRow, PlanRow, RegisterData, RepoContents,
-  SaveResult, SearchResult, SettingsOverview, WizardDetail, WizardSummary,
+  AdmissionPreview, CacheResetResult, CancelResult, ConfigSaveResult,
+  GgufAnalysis, HistoryRow, JobRow, JobSubmitted, LogTail, ModelDetail,
+  ModelRow, PlanRow, RegisterData, RepoContents, RoutingMatrix, RunCommand,
+  RuntimePolicyView, SaveResult, SearchResult, SettingsOverview,
+  TierApplyResult, WizardDetail, WizardSummary,
 } from "./types";
 
 /* Server refusals (gates, scratch-safe mode, validation) answer with a
@@ -103,6 +105,51 @@ export const saveModelConfig = (name: string, body: {
   moe_mode?: string | null;
   accept_structural?: boolean;
 }) => postJson<ConfigSaveResult>(`/api/v2/models/${enc(name)}/config`, body);
+
+/* ---- phase 4: operations ----
+   Every write here is the typed re-home of a control the phase-3 cutover
+   removed. They answer with the job id; the tick stream carries the rest,
+   so nothing on these paths polls. */
+
+export const restartModel = (name: string) =>
+  postJson<JobSubmitted>(`/api/v2/models/${enc(name)}/restart`);
+export const resetModelCache = (name: string) =>
+  postJson<CacheResetResult>(`/api/v2/models/${enc(name)}/cache/reset`);
+export const deleteModel = (name: string) =>
+  postJson<JobSubmitted>(`/api/v2/models/${enc(name)}/delete`);
+export const benchModel = (name: string, max_tokens: number, runs: number) =>
+  postJson<JobSubmitted & { max_tokens: number; runs: number }>(
+    `/api/v2/models/${enc(name)}/bench`, { max_tokens, runs });
+export const smokeModel = (name: string) =>
+  postJson<JobSubmitted>(`/api/v2/models/${enc(name)}/smoke`);
+export const autotuneModel = (name: string, objective: string) =>
+  postJson<JobSubmitted>(`/api/v2/models/${enc(name)}/autotune`, { objective });
+export const unloadAll = () =>
+  postJson<JobSubmitted>("/api/v2/runtime/unload-all");
+
+export type PlanAction = "select" | "enable" | "disable" | "test";
+export const planAction = (name: string, planId: string, action: PlanAction) =>
+  postJson<JobSubmitted>(
+    `/api/v2/models/${enc(name)}/plans/${enc(planId)}/${action}`);
+
+export const applyTier = (name: string, accept: boolean) =>
+  postJson<TierApplyResult>(`/api/v2/models/${enc(name)}/tier/apply`,
+                            { accept_tier_change: accept });
+
+export const fetchRuntimePolicy = (name: string) =>
+  get<RuntimePolicyView>(`/api/v2/models/${enc(name)}/runtime-policy`);
+export const saveRuntimePolicy = (name: string, body: Record<string, unknown>) =>
+  postJson<JobSubmitted & { mode: string }>(
+    `/api/v2/models/${enc(name)}/runtime-policy`, body);
+
+export const fetchRunCommand = (name: string) =>
+  get<RunCommand>(`/api/v2/models/${enc(name)}/run-command`);
+
+export const fetchJob = (id: string) => get<JobRow>(`/api/v2/jobs/${enc(id)}`);
+
+export const fetchRouting = () => get<RoutingMatrix>("/api/v2/settings/routing");
+export const applyRouting = () =>
+  postJson<JobSubmitted>("/api/v2/settings/routing/apply");
 
 /* ---- add wizard ---- */
 

@@ -7,15 +7,18 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { useStream } from "../lib/stream";
 import {
-  ApiError, fetchAdmission, fetchLogTail, fetchModelDetail,
-  fetchModelHistory, fetchModelPlans, fmtAgo, fmtClock, fmtGiB,
-  saveModelConfig,
+  ApiError, applyTier, deleteModel, fetchAdmission, fetchLogTail,
+  fetchModelDetail, fetchModelHistory, fetchModelPlans, fetchRunCommand,
+  fetchRuntimePolicy, fmtAgo, fmtClock, fmtGiB, planAction, resetModelCache,
+  restartModel, saveModelConfig, saveRuntimePolicy,
 } from "../lib/api";
+import type { PlanAction } from "../lib/api";
+import { ConfirmButton, submitAction } from "../lib/actions";
 import { Info } from "../lib/info";
 import { toast } from "../lib/toasts";
 import type {
   AdmissionPreview, Gate, HistoryRow, LogTail as LogTailT, ModelDetail,
-  ModelRow, PlanRow,
+  ModelRow, PlanRow, RunCommand as RunCommandT, RuntimePolicyView,
 } from "../lib/types";
 
 function MeasuredTag({ measured }: { measured: boolean }) {
@@ -83,12 +86,270 @@ function Overview({ d, live, stale, lastAt, retryIn }: {
   );
 }
 
-function Plans({ name, revision }: { name: string; revision: number }) {
+/* ---- runtime actions ------------------------------------------------- */
+
+function RuntimeActions({ d, live, onChanged }: {
+  d: ModelDetail; live: ModelRow | null; onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState("");
+  const running = live ? live.running : d.runtime.running;
+  const run = (key: string, fn: () => Promise<unknown>, label: string,
+               okSub?: (r: never) => string) => {
+    setBusy(key);
+    submitAction(fn, label, onChanged, okSub as never)
+      .finally(() => setBusy(""));
+  };
+  return (
+    <div class="widget">
+      <div class="label"><span>actions</span></div>
+      <div class="actions" style="flex-wrap:wrap;gap:.6rem">
+        <ConfirmButton
+          label="restart"
+          busy={busy === "restart"}
+          disabled={!!busy || !running}
+          consequences={<>
+            Stops and reloads {d.name}. In-flight requests to it fail, and
+            the reload pays the model's full load time again.
+          </>}
+          onConfirm={() => run("restart", () => restartModel(d.name),
+                               `restart ${d.name}`)} />
+        {/* Not behind a confirm: it is not destructive to anything but
+            the cache's own learned placement, which rebuilds itself. It
+            IS reported honestly, because a reset that quietly did nothing
+            makes the next measurement a lie. */}
+        <button type="button" class={busy === "cache" ? "busy" : undefined}
+                disabled={!!busy || !running || d.moe_cache.mode === "off"}
+                onClick={() => run("cache", () => resetModelCache(d.name),
+                                   `MoE cache reset for ${d.name}`,
+                                   ((r: { port: number }) =>
+                                     `cleared on port ${r.port} · the cache relearns from the next request`) as never)}>
+          reset MoE cache
+        </button>
+        <span class="grow" style="flex:1"></span>
+        <ConfirmButton
+          label="delete profile"
+          confirmLabel="yes, delete the profile"
+          busy={busy === "delete"}
+          disabled={!!busy}
+          consequences={<>
+            Deletes the profile and its generated artifacts, then resyncs
+            the backends so {d.name} is no longer served. The model file
+            on disk ({d.model_path || "unknown path"}) is left alone.
+          </>}
+          onConfirm={() => run("delete", () => deleteModel(d.name),
+                               `delete ${d.name}`)} />
+      </div>
+      {!running && (
+        <div class="sub" style="margin-top:.4rem">
+          restart and cache reset need the model resident — it is
+          currently {live ? live.state : d.runtime.state}
+        </div>
+      )}
+      {running && d.moe_cache.mode === "off" && (
+        <div class="sub" style="margin-top:.4rem">
+          no MoE cache to reset — this profile's cache mode is off
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---- tier apply ------------------------------------------------------ */
+
+function TierApply({ name, revision, onApplied }: {
+  name: string; revision: number; onApplied: () => void;
+}) {
+  const [preview, setPreview] = useState<AdmissionPreview | null>(null);
+  const [err, setErr] = useState("");
+  const [gate, setGate] = useState<Gate | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setErr("");
+    /* No draft arguments: this is the planner's answer for the profile
+       exactly as saved, which is what apply would compute. The same
+       endpoint the configure form drafts against. */
+    fetchAdmission(name).then(setPreview).catch((e) => setErr(String(e)));
+  }, [name, revision]);
+
+  const apply = (accept: boolean) => {
+    setBusy(true);
+    setGate(null);
+    applyTier(name, accept)
+      .then((r) => {
+        toast("ok", `tier apply ${name} submitted`,
+              `job ${r.job_id} · watch it on the jobs page`);
+        onApplied();
+      })
+      .catch((e) => {
+        if (e instanceof ApiError && e.status === 409 && e.body.gate) {
+          setGate(e.body.gate as Gate);
+        } else if (e instanceof ApiError && e.status === 405) {
+          toast("err", "✗ tier apply refused",
+                String(e.body.reason ?? e.message), 9000);
+        } else if (e instanceof ApiError) {
+          toast("err", `✗ tier apply ${name} failed`,
+                String(e.body.error ?? e.message), 9000);
+        } else {
+          toast("err", `✗ tier apply ${name} failed`, String(e), 9000);
+        }
+      })
+      .finally(() => setBusy(false));
+  };
+
+  const plan = preview?.plan ?? null;
+  const admission = plan?.admission ?? null;
+  return (
+    <div class="widget">
+      <div class="label"><span>tier plan{" "}
+        <Info label="about tiers">
+          The planner picks a placement tier from the recorded machine
+          facts: tier 1 is GPU-only, 2 adds RAM, 3 adds storage. Applying
+          writes the tier's placement into the profile and resyncs. This
+          is the same plan and the same gate the CLI's tier apply uses.
+        </Info></span>
+      </div>
+      {err && <p class="sub">planner unavailable: {err}</p>}
+      {!preview && !err && <p class="sub">asking the planner…</p>}
+      {preview && !plan && (
+        <p class="sub">the planner could not analyze this model's layout
+          {preview.error ? ` — ${preview.error}` : ""} — nothing to apply</p>
+      )}
+      {plan && (
+        <>
+          <div class="sub">
+            tier {plan.tier} · inputs {preview?.planning_inputs_source}
+            {admission && (admission.fits
+              ? " · fits as chosen"
+              : " · does not fit even degraded")}
+          </div>
+          <table>
+            <tbody>
+              {plan.layout.map(([label, gib, desc], i) => (
+                <tr key={i}>
+                  <td class="sub">{label}</td>
+                  <td class="num">{gib.toFixed(1)} GiB</td>
+                  <td class="sub">{desc}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {plan.warnings.map((w) => (
+            <div class="msg warning" key={w}>⚠ {w}</div>
+          ))}
+          {preview?.gate && preview.gate.changes.length > 0 && (
+            <div class="sub" style="margin-top:.4rem">
+              this replan differs from what is saved:
+              {preview.gate.changes.map((c) => (
+                <div class="sub" key={c}>· {c}</div>
+              ))}
+            </div>
+          )}
+          {gate && (
+            <fieldset style="border-color:var(--warn);margin-top:.6rem">
+              <legend style="color:var(--warn)">
+                tier change — confirm required
+              </legend>
+              <p class="sub">This replan changes tier, split, or placement
+                beyond the profile's pins:</p>
+              {gate.changes.map((c) => (
+                <div class="msg warning" key={c}>⚠ {c}</div>
+              ))}
+              <div class="actions">
+                <button type="button" onClick={() => setGate(null)}>cancel</button>
+                <button type="button" class="btn-danger" disabled={busy}
+                        onClick={() => apply(true)}>
+                  apply the tier change
+                </button>
+              </div>
+            </fieldset>
+          )}
+          <div class="actions" style="justify-content:flex-end;margin-top:.6rem">
+            <button type="button" class={busy ? "busy" : undefined}
+                    disabled={busy} onClick={() => apply(false)}>
+              apply tier {plan.tier}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---- plans, with their four actions ---------------------------------- */
+
+function PlanActions({ name, plan, onChanged, onOptimistic }: {
+  name: string; plan: PlanRow; onChanged: () => void;
+  onOptimistic: (planId: string, disabled: boolean | null) => void;
+}) {
+  const [busy, setBusy] = useState("");
+  const act = (action: PlanAction, label: string) => {
+    setBusy(action);
+    submitAction(() => planAction(name, plan.id, action),
+                 `${label} ${plan.label}`, onChanged)
+      .finally(() => setBusy(""));
+  };
+  /* enable/disable are the only reversible ones, so they are the only
+     ones that reflect before the server answers -- and they un-happen
+     loudly (the row snaps back and the toast carries the reason) when it
+     refuses. select rewrites the profile's launch config and test starts
+     a real server; neither is something to pretend has happened. */
+  const toggle = (action: "enable" | "disable", label: string) => {
+    setBusy(action);
+    onOptimistic(plan.id, action === "disable");
+    submitAction(() => planAction(name, plan.id, action),
+                 `${label} ${plan.label}`, onChanged)
+      .then((ok) => {
+        if (!ok) onOptimistic(plan.id, null);
+      })
+      .finally(() => setBusy(""));
+  };
+  return (
+    <span class="actions">
+      <button type="button" class={busy === "select" ? "busy" : undefined}
+              disabled={!!busy || plan.pinned}
+              onClick={() => act("select", "select plan")}>select</button>
+      {plan.disabled
+        ? <button type="button" class={busy === "enable" ? "busy" : undefined}
+                  disabled={!!busy}
+                  onClick={() => toggle("enable", "enable plan")}>enable</button>
+        : <button type="button" class={busy === "disable" ? "busy" : undefined}
+                  disabled={!!busy}
+                  onClick={() => toggle("disable", "disable plan")}>disable</button>}
+      <button type="button" class={busy === "test" ? "busy" : undefined}
+              disabled={!!busy}
+              onClick={() => act("test", "test plan")}>test</button>
+    </span>
+  );
+}
+
+function Plans({ name, revision, onChanged }: {
+  name: string; revision: number; onChanged: () => void;
+}) {
   const [plans, setPlans] = useState<PlanRow[] | null>(null);
   const [err, setErr] = useState("");
+  /* null restores the server's value: the un-happen path must not invert
+     the flag a second time, it has to forget the optimistic one. */
+  const [pretend, setPretend] = useState<Record<string, boolean>>({});
   useEffect(() => {
-    fetchModelPlans(name).then(setPlans).catch((e) => setErr(String(e)));
+    fetchModelPlans(name)
+      .then((rows) => {
+        setPlans(rows);
+        // fresh truth outranks every optimistic guess still standing
+        setPretend({});
+      })
+      .catch((e) => setErr(String(e)));
   }, [name, revision]);
+  const onOptimistic = (planId: string, disabled: boolean | null) =>
+    setPretend((p) => {
+      if (disabled === null) {
+        const { [planId]: _drop, ...rest } = p;
+        return rest;
+      }
+      return { ...p, [planId]: disabled };
+    });
+  const rows = plans?.map((p) => (
+    p.id in pretend ? { ...p, disabled: pretend[p.id] } : p));
   return (
     <div class="widget">
       <div class="label">
@@ -102,16 +363,23 @@ function Plans({ name, revision }: { name: string; revision: number }) {
         </span>
       </div>
       {err && <p class="sub">plans unavailable: {err}</p>}
-      {!plans && !err && <p class="sub">compiling plans…</p>}
-      {plans && plans.length === 0 && <p class="sub">no plans could be compiled</p>}
-      {plans && plans.length > 0 && (
+      {!rows && !err && <p class="sub">compiling plans…</p>}
+      {rows && rows.length === 0 && <p class="sub">no plans could be compiled</p>}
+      {rows && rows.length > 0 && (
         <table>
           <thead>
             <tr><th>plan</th><th>status</th><th class="num">tok/s</th>
-              <th class="num">load</th><th>numbers</th></tr>
+              <th class="num">load</th><th>numbers</th><th>actions{" "}
+                <Info label="about the plan actions">
+                  Select writes this plan's placement into the profile and
+                  resyncs. Disable takes it out of the ranked candidate
+                  set without deleting anything, and enable puts it back.
+                  Test launches a real server on this exact plan and
+                  records what it measures.
+                </Info></th></tr>
           </thead>
           <tbody>
-            {plans.map((p) => (
+            {rows.map((p) => (
               <tr key={p.id}>
                 <td>
                   {p.label}
@@ -139,6 +407,10 @@ function Plans({ name, revision }: { name: string; revision: number }) {
                   <MeasuredTag measured={!!p.measured} />
                   {p.measured?.cache_state
                     ? <span class="sub"> {p.measured.cache_state}</span> : null}
+                </td>
+                <td>
+                  <PlanActions name={name} plan={p} onChanged={onChanged}
+                               onOptimistic={onOptimistic} />
                 </td>
               </tr>
             ))}
@@ -609,6 +881,253 @@ export function Configure({ d, onSaved }:
   );
 }
 
+/* ---- runtime policy (typed form) ------------------------------------- */
+
+function RuntimePolicyForm({ name, revision, onSaved }: {
+  name: string; revision: number; onSaved: () => void;
+}) {
+  const [view, setView] = useState<RuntimePolicyView | null>(null);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [managed, setManaged] = useState(false);
+  const [objective, setObjective] = useState("balanced");
+  const [pinned, setPinned] = useState("");
+  const [allowFallback, setAllowFallback] = useState(true);
+  const [allowUntested, setAllowUntested] = useState(false);
+  const [minCtx, setMinCtx] = useState("");
+  const [maxCpuGiB, setMaxCpuGiB] = useState("");
+  const [tier, setTier] = useState("3");
+
+  useEffect(() => {
+    fetchRuntimePolicy(name)
+      .then((v) => {
+        setView(v);
+        const p = v.policy;
+        setManaged(!!p && p.mode === "managed");
+        setObjective(p?.objective || "balanced");
+        setPinned(p?.pinned_plan_id || "");
+        setAllowFallback(p ? !!p.allow_fallback : true);
+        setAllowUntested(p ? !!p.allow_untested : false);
+        setMinCtx(p?.minimum_context != null ? String(p.minimum_context) : "");
+        setMaxCpuGiB(p?.maximum_cpu_bytes != null
+          ? String(Math.round(p.maximum_cpu_bytes / 2 ** 30)) : "");
+        setTier(String(p?.maximum_storage_tier ?? 3));
+      })
+      .catch((e) => setErr(String(e)));
+  }, [name, revision]);
+
+  const save = () => {
+    setBusy(true);
+    const body: Record<string, unknown> = managed
+      ? {
+          mode: "managed",
+          objective,
+          pinned_plan_id: pinned || null,
+          allow_fallback: allowFallback,
+          allow_untested: allowUntested,
+          minimum_context: minCtx === "" ? null : parseInt(minCtx, 10),
+          /* the form asks for GiB because that is the unit an operator
+             thinks in; the profile stores bytes, and the conversion
+             happens here rather than in a server-side "_gib" field that
+             would have to exist forever */
+          maximum_cpu_bytes: maxCpuGiB === ""
+            ? null : Math.round(parseFloat(maxCpuGiB) * 2 ** 30),
+          maximum_storage_tier: parseInt(tier, 10),
+          disabled_plan_ids: view?.policy?.disabled_plan_ids ?? [],
+        }
+      : { mode: "fixed" };
+    submitAction(() => saveRuntimePolicy(name, body),
+                 `runtime policy for ${name}`, onSaved)
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <div class="widget" style="max-width:880px">
+      <h2>runtime policy{" "}
+        <Info label="about runtime policy">
+          Fixed renders one command from the saved config, forever.
+          Managed lets the planner rank the compiled plans at launch and
+          pick the best one for the objective — it can only pick plans it
+          has evidence for unless untested plans are allowed.
+        </Info>
+      </h2>
+      {err && <p class="sub">policy unavailable: {err}</p>}
+      {!view && !err && <p class="sub">loading policy…</p>}
+      {view && (
+        <form style="display:grid;gap:1rem" onSubmit={(e) => e.preventDefault()}>
+          <fieldset>
+            <legend>mode</legend>
+            <div class="frow">
+              <div class="field" style="max-width:260px">
+                <label for="rp-mode">placement</label>
+                <select id="rp-mode" value={managed ? "managed" : "fixed"}
+                        onChange={(e) => setManaged(
+                          (e.target as HTMLSelectElement).value === "managed")}>
+                  <option value="fixed">fixed command</option>
+                  <option value="managed">managed placement</option>
+                </select>
+                <div class="help">
+                  {managed
+                    ? "the planner chooses a plan at every launch"
+                    : "saving fixed drops the policy and restores the profile's own command"}
+                </div>
+              </div>
+            </div>
+          </fieldset>
+
+          {managed && (
+            <>
+              <fieldset>
+                <legend>ranking</legend>
+                <div class="frow">
+                  <div class="field" style="max-width:260px">
+                    <div class="lbl"><label for="rp-objective">objective</label>
+                      <Info label="about objectives">
+                        What the ranker maximizes. Every option here is one
+                        the ranker actually scores differently — the list
+                        comes from the server, so the form cannot offer an
+                        objective the write rejects.
+                      </Info>
+                    </div>
+                    <select id="rp-objective" value={objective}
+                            onChange={(e) => setObjective(
+                              (e.target as HTMLSelectElement).value)}>
+                      {view.objectives.map((o) => (
+                        <option key={o} value={o}>{o.replace(/_/g, " ")}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="rp-pinned">pinned plan</label>
+                    <select id="rp-pinned" value={pinned}
+                            onChange={(e) => setPinned(
+                              (e.target as HTMLSelectElement).value)}>
+                      <option value="">(none — rank every candidate)</option>
+                      {view.plans.map((p) => (
+                        <option key={p.id} value={p.id}>{p.label}</option>
+                      ))}
+                    </select>
+                    {pinned && !view.plans.some((p) => p.id === pinned) && (
+                      <div class="msg warning">
+                        ⚠ the pinned plan {pinned.slice(0, 8)} is not among the
+                        plans that compile today
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div class="frow">
+                  <div class="check">
+                    <input type="checkbox" id="rp-fallback" checked={allowFallback}
+                           onChange={(e) => setAllowFallback(
+                             (e.target as HTMLInputElement).checked)} />
+                    <div><b><label for="rp-fallback">allow fallback</label></b>
+                      <div class="help">when the ranked plan fails to launch,
+                        try the next one instead of failing the request</div>
+                    </div>
+                  </div>
+                  <div class="check">
+                    <input type="checkbox" id="rp-untested" checked={allowUntested}
+                           onChange={(e) => setAllowUntested(
+                             (e.target as HTMLInputElement).checked)} />
+                    <div><b><label for="rp-untested">allow untested plans</label></b>
+                      <div class="help">let the ranker choose a plan no run has
+                        ever measured</div>
+                    </div>
+                  </div>
+                </div>
+              </fieldset>
+
+              <fieldset>
+                <legend>limits</legend>
+                <div class="frow">
+                  <div class="field" style="max-width:180px">
+                    <label for="rp-minctx">minimum context <span class="sub">tokens</span></label>
+                    <input id="rp-minctx" type="number" min={0} value={minCtx}
+                           placeholder="(no floor)"
+                           onInput={(e) => setMinCtx(
+                             (e.target as HTMLInputElement).value)} />
+                  </div>
+                  <div class="field" style="max-width:180px">
+                    <label for="rp-maxcpu">max CPU offload <span class="sub">GiB</span></label>
+                    <input id="rp-maxcpu" type="number" min={0} value={maxCpuGiB}
+                           placeholder="(no limit)"
+                           onInput={(e) => setMaxCpuGiB(
+                             (e.target as HTMLInputElement).value)} />
+                  </div>
+                  <div class="field" style="max-width:220px">
+                    <label for="rp-tier">max tier</label>
+                    <select id="rp-tier" value={tier}
+                            onChange={(e) => setTier(
+                              (e.target as HTMLSelectElement).value)}>
+                      <option value="1">GPU only</option>
+                      <option value="2">GPU + RAM</option>
+                      <option value="3">GPU + RAM + SSD</option>
+                    </select>
+                  </div>
+                </div>
+              </fieldset>
+            </>
+          )}
+
+          <div class="actions" style="justify-content:flex-end">
+            <button type="button" class={busy ? "btn-primary busy" : "btn-primary"}
+                    disabled={busy} onClick={save}>
+              save policy &amp; resync
+            </button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+/* ---- the launch command, read-only ----------------------------------- */
+
+function RunCommand({ name, revision }: { name: string; revision: number }) {
+  const [cmd, setCmd] = useState<RunCommandT | null>(null);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    fetchRunCommand(name).then(setCmd).catch((e) => setErr(String(e)));
+  }, [name, revision]);
+  const drifted = !!cmd && !!cmd.pinned_binary
+    && cmd.resolved_binary !== cmd.pinned_binary;
+  return (
+    <div class="widget">
+      <div class="label"><span>launch command{" "}
+        <Info label="about the launch command">
+          Exactly what a launch of this profile would run, compiled by the
+          same code that writes run.sh and the llama-swap entry — so it
+          cannot drift from either. argv[0] is the RESOLVED binary, which
+          is the one surface where a profile whose backend moved becomes
+          visible. Read-only: nothing on this card writes.
+        </Info></span>
+      </div>
+      {err && <p class="sub">command unavailable: {err}</p>}
+      {!cmd && !err && <p class="sub">compiling the command…</p>}
+      {cmd && cmd.error && <p class="sub">{cmd.error}</p>}
+      {cmd && !cmd.error && (
+        <>
+          <div class="sub">
+            fingerprint {cmd.command_fingerprint.slice(0, 12) || "—"}
+            {cmd.ok ? "" : " · the backend preflight is not clean"}
+          </div>
+          {drifted && (
+            <div class="msg warning">
+              ⚠ resolved binary is {cmd.resolved_binary}, the profile pins{" "}
+              {cmd.pinned_binary}
+            </div>
+          )}
+          {cmd.messages.map((m) => <div class="msg" key={m}>{m}</div>)}
+          {cmd.warnings.map((w) => (
+            <div class="msg warning" key={w}>⚠ {w}</div>
+          ))}
+          <pre class="log" style="max-height:260px">{cmd.run_sh}</pre>
+        </>
+      )}
+    </div>
+  );
+}
+
 function fmtBudgetMap(v: unknown): string {
   if (!v || typeof v !== "object") return "—";
   const entries = Object.entries(v as Record<string, number>);
@@ -648,14 +1167,23 @@ export function Model({ name }: { name: string }) {
   if (!detail) {
     return <div class="widget"><span class="sub">loading {name}…</span></div>;
   }
+  const reload = () => setReloadN((n) => n + 1);
+  /* Both triggers refresh the evidence: a finished job anywhere, and any
+     action submitted from this page. Without the second one, a plan
+     select made here would not show until some job finished. */
+  const revision = finishedJobs + reloadN;
   return (
     <>
       <Overview d={detail} live={live} stale={stale} lastAt={lastAt}
                 retryIn={retryIn} />
-      <Plans name={name} revision={finishedJobs} />
-      <History name={name} revision={finishedJobs} />
+      <RuntimeActions d={detail} live={live} onChanged={reload} />
+      <TierApply name={name} revision={revision} onApplied={reload} />
+      <Plans name={name} revision={revision} onChanged={reload} />
+      <History name={name} revision={revision} />
       <Logs name={name} />
-      <Configure d={detail} onSaved={() => setReloadN((n) => n + 1)} />
+      <RunCommand name={name} revision={revision} />
+      <Configure d={detail} onSaved={reload} />
+      <RuntimePolicyForm name={name} revision={revision} onSaved={reload} />
     </>
   );
 }

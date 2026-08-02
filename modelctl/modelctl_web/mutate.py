@@ -283,6 +283,43 @@ def submit_plan_select(runner, name, plan_id, disable=False):
                                   "disable": disable})
 
 
+def submit_plan_enable(runner, name, plan_id):
+    """Undo a disable: put a plan back in the ranked candidate set.
+
+    select/disable had submit_* helpers and enable did not -- it lived
+    inline in the old console's route and went with it in the phase-3
+    demolition. Same service call, same lane, now reachable from the one
+    place plan actions are submitted."""
+    from modelctl_services import plan_service
+
+    def fn(ctx):
+        result = plan_service.enable_plan(name, plan_id)
+        if not result.ok:
+            raise RuntimeError(result.messages[0] if result.messages
+                              else f"enable failed for plan {plan_id}")
+        ctx.log(f"re-enabled plan {plan_id}")
+        return {"enabled": plan_id}
+    return runner.submit("mutation", f"enable plan {plan_id} on {name}", fn,
+                         payload={"name": name, "plan_id": plan_id})
+
+
+def submit_remove(runner, name):
+    """Delete a profile and its artifacts, then resync the backends.
+
+    cmd_remove, not profile_service.remove_profile: the service function
+    calls modelctl.remove_profile, which does not exist, so it raises
+    AttributeError on every call. cmd_remove is what the old console
+    deleted through and what `modelctl remove` still runs."""
+    def fn(ctx):
+        ctx.log(f"removing profile '{name}' and its artifacts")
+        modelctl.cmd_remove(type("A", (), {"name": name, "no_hermes": True,
+                                           "no_router_restart": False})())
+        ctx.log("backends resynced")
+        return {"removed": name}
+    return runner.submit("remove", f"remove {name}", fn,
+                         payload={"name": name}, lane="mutation")
+
+
 def submit_plan_test(runner, name, plan_id):
     def fn(ctx):
         import modelctl_tune

@@ -326,7 +326,10 @@ class TestDemolition(SettingsBase):
         "/runtime": "/v2/",
         "/runtime/routing": "/v2/settings",
         "/jobs": "/v2/jobs",
-        "/jobs/abc123": "/v2/jobs",
+        # phase 4 gave the SPA per-job URLs back, so this one stopped
+        # dropping the id it was carrying (test_console_phase4 owns the
+        # detail, including the sub-path case)
+        "/jobs/abc123": "/v2/jobs/abc123",
         "/add": "/v2/add",
         "/add/w1/register": "/v2/add/w1",
         "/pull": "/v2/add",

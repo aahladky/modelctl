@@ -6,8 +6,8 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { useStream } from "../lib/stream";
 import { Spark, push } from "../lib/spark";
 import { Info } from "../lib/info";
-import { toast } from "../lib/toasts";
-import { ApiError, fmtClock, fmtGiB, fmtUp, loadModel, unloadModel }
+import { ConfirmButton, submitAction } from "../lib/actions";
+import { fmtClock, fmtGiB, fmtUp, loadModel, unloadAll, unloadModel }
   from "../lib/api";
 import type { ModelRow, Tick } from "../lib/types";
 
@@ -52,21 +52,28 @@ function StaleSub({ lastAt, retryIn }: { lastAt: number | null; retryIn: number 
 /* Mutations go through the typed /api/v2 lane and answer with the job id;
    the job itself shows up in the stream, so the SPA toasts and lets the
    jobs badge/page track it. (Phase 3: these used to POST to the old
-   console's /models/{name}/{verb} routes, which the cutover removed.) */
-async function submitAction(fn: () => Promise<{ job_id: string }>,
-                            label: string) {
-  try {
-    const { job_id } = await fn();
-    toast("ok", `${label} submitted`,
-          `job ${job_id} · watch it on the jobs page`);
-  } catch (e) {
-    if (e instanceof ApiError && e.status === 405) {
-      toast("err", `✗ ${label} refused`,
-            String(e.body.reason ?? e.message), 9000);
-    } else {
-      toast("err", `✗ ${label} failed`, String(e), 9000);
-    }
-  }
+   console's /models/{name}/{verb} routes, which the cutover removed.
+   Phase 4: submitAction moved to lib/actions, shared with the model hub,
+   the model page and settings.) */
+
+function UnloadAll({ running, stale }: { running: number; stale: boolean }) {
+  const [busy, setBusy] = useState(false);
+  if (running === 0) return null;
+  return (
+    <ConfirmButton
+      label="unload all"
+      confirmLabel={`yes, unload ${running}`}
+      busy={busy}
+      disabled={stale}
+      consequences={<>
+        Unloads every resident model ({running} running). In-flight
+        requests to them fail; the next request reloads from disk.
+      </>}
+      onConfirm={() => {
+        setBusy(true);
+        submitAction(unloadAll, "unload all").finally(() => setBusy(false));
+      }} />
+  );
 }
 
 function ModelRowView({ m, spark, stale }:
@@ -273,7 +280,14 @@ export function Operate() {
       </div>
 
       <div class={cls("models")}>
-        <h2>resident models</h2>
+        <div class="label">
+          <h2 style="margin:0">resident models</h2>
+          {/* the one fleet-wide action, next to the fleet it acts on */}
+          <span class="actions">
+            <UnloadAll running={models.filter((m) => m.running).length}
+                       stale={stale} />
+          </span>
+        </div>
         {models.length === 0
           ? (err["models"]
               ? <p class="sub stale-note">could not read the profile store —

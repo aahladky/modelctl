@@ -61,30 +61,43 @@ streams over a single SSE tick at `/api/v2/events` — there is no manual
 refresh anywhere. Five pages:
 
 - **Operate (`/v2/`)**: service chips, per-GPU VRAM and RAM meters with
-  sparklines, MoE-cache hit ratios, resident models with live tok/s, and
-  load/unload. Each region degrades on its own and says which probe
-  failed rather than rendering a zero as fact.
+  sparklines, MoE-cache hit ratios, resident models with live tok/s,
+  load/unload, and unload-all behind a confirm. Each region degrades on
+  its own and says which probe failed rather than rendering a zero as
+  fact.
 - **Model hub (`/v2/models`, `/v2/models/<name>`)**: per-model overview
   and placement, compiled launch plans joined with the measurement store
   (measured vs estimated, always tagged), full plan-run history with the
   bottleneck judgement, log tail, and a typed configure form whose save
   shows the planner's admission preview and gates structural changes
-  behind an explicit confirm.
+  behind an explicit confirm. The list page triggers measurement —
+  benchmark (with the token/run overrides an SSD-mmap model needs),
+  smoke test, autotune — onto the benchmark lane. The per-model page
+  also carries restart, MoE cache reset, profile delete, per-plan
+  select/enable/disable/test, tier apply behind that same admission
+  preview and gate, the runtime-policy form (fixed or managed placement,
+  its objective list generated from the server's own), and a read-only
+  view of the launch command as it would actually run — argv[0] is the
+  resolved binary, so a profile whose backend moved is visible there.
 - **Add (`/v2/add`, `/v2/add/<id>`)**: the acquisition workflow — HF
   search or local file, verification, quant inspection, download,
   analysis, plan selection, measured testing, registration — as a
   stepper with inline job progress, visible blocked-advance reasons and
   single-shot retry.
-- **Jobs (`/v2/jobs`)**: running / queued / history across the lanes
-  (SQLite at `~/.local/share/modelctl/web_jobs.db`); profile and config
-  mutations serialize on a single-worker lane because profiles and the
-  llama-swap config are plain files. Cancel is optimistic and un-happens
-  loudly on refusal.
+- **Jobs (`/v2/jobs`, `/v2/jobs/<id>`)**: running / queued / history
+  across the lanes (SQLite at `~/.local/share/modelctl/web_jobs.db`);
+  profile and config mutations serialize on a single-worker lane because
+  profiles and the llama-swap config are plain files. Cancel is
+  optimistic and un-happens loudly on refusal. Every job has its own URL,
+  answered from the live stream when it is in it and from the store when
+  it is not.
 - **Settings (`/v2/settings`)**: readiness checklist, typed profile
   defaults, hardware policy (per-device reserves/roles/bandwidth, RAM
-  reserve, storage calibration), access and state paths, integration
-  manifest and capability report, support bundle. No JSON anywhere in
-  the UI; the files on disk stay hand-editable.
+  reserve, storage calibration), the managed llama-swap routing matrix as
+  a grid that says per set what applying would change and which sets are
+  hand-authored (those are never rewritten), access and state paths,
+  integration manifest and capability report, support bundle. No JSON
+  anywhere in the UI; the files on disk stay hand-editable.
 
 The typed surface lives under `/api/v2/*`; a legacy JSON API remains
 under `/api/*`. Every URL the old server-rendered console published

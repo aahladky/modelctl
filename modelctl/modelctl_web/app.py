@@ -436,11 +436,15 @@ def create_app(token=None, store=None, runner=None, collector=None,
     def moved_jobs():
         return _moved("/v2/jobs")
 
-    # The SPA has no per-job URL; every old job link lands on the list,
-    # where the job is visible in the running/queued/history tables.
+    # Phase 4 gave the SPA per-job URLs back, so an old /jobs/{id} link
+    # lands on that job again instead of on the list. The old links carry
+    # a ?back= query the SPA has no use for; only the id survives, and a
+    # sub-path (/jobs/{id}/anything) has no v2 equivalent to carry.
     @app.get("/jobs/{rest:path}")
     def moved_job(rest: str):
-        return _moved("/v2/jobs")
+        job_id = rest.split("/", 1)[0]
+        return _moved(f"/v2/jobs/{quote(job_id, safe='')}" if job_id
+                      else "/v2/jobs")
 
     @app.get("/events/jobs/{job_id}")
     def moved_job_stream(job_id: str):
@@ -693,6 +697,16 @@ def create_app(token=None, store=None, runner=None, collector=None,
     def api_v2_jobs():
         return collector.job_rows()
 
+    @app.get("/api/v2/jobs/{job_id}")
+    def api_v2_job(job_id: str):
+        # What a per-job deep link reads. The list endpoint is capped and
+        # the tick stream carries only the newest rows, so a link to an
+        # older job has to be answerable on its own.
+        job = store.get(job_id)
+        if not job:
+            return JSONResponse({"error": f"no job {job_id}"}, status_code=404)
+        return telemetry.job_row(job)
+
     @app.post("/api/v2/jobs/{job_id}/cancel")
     def api_v2_job_cancel(job_id: str):
         # Typed cancel for the SPA's optimistic UI: the answer says whether
@@ -822,6 +836,355 @@ def create_app(token=None, store=None, runner=None, collector=None,
                 mc["mode"] = str(moe_mode)
             jobs["moe_cache"] = mutate.submit_moe_cache(runner, name, mc)
         return {"jobs": jobs, "gate": gate}
+
+    # ---- v2 operations (console phase 4) ---------------------------------
+    # The capability the phase-3 cutover left behind, re-homed onto the
+    # typed lane. Every one of these submits through the same mutate.
+    # submit_* helper or service call the demolished route used -- no new
+    # mutation semantics: what changes is that the answer is a job id (or
+    # a named refusal) in JSON instead of a 303 into a job page that no
+    # longer exists.
+    #
+    # Every write here is a POST, so scratch-safe mode refuses it in the
+    # auth middleware with the reason, before the handler is reached.
+
+    @app.post("/api/v2/models/{name:path}/restart")
+    def api_v2_model_restart(name: str):
+        # {name:path} like load/unload: this is a runtime action keyed by
+        # the llama-swap model id, which can contain a slash.
+        return {"job_id": mutate.submit_restart(runner, name)}
+
+    @app.post("/api/v2/models/{name:path}/cache/reset")
+    def api_v2_model_cache_reset(name: str):
+        """Clear a running model's MoE expert cache in place.
+
+        Not a job: it is one HTTP call to the model's own server and the
+        answer is needed synchronously -- a measurement taken right after
+        a reset that silently did nothing is a wrong measurement. The old
+        route 303'd with the outcome in a query param; the same three
+        outcomes are now the status code.
+        """
+        try:
+            rt = _runtime_state().get(name, {})
+        except Exception as e:
+            return JSONResponse(
+                {"error": f"cannot read llama-swap runtime state: {e}"},
+                status_code=502)
+        port = rt.get("port")
+        if not port:
+            return JSONResponse(
+                {"error": f"'{name}' is not running -- there is no cache to "
+                          "reset until it is loaded"}, status_code=409)
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/cache/reset", method="POST")
+            urllib.request.urlopen(req, timeout=5)
+        except Exception as e:
+            return JSONResponse(
+                {"error": f"cache reset for '{name}' failed: {e}"},
+                status_code=502)
+        return {"ok": True, "name": name, "port": port}
+
+    # ---- plans: select / disable / enable / test -------------------------
+    # One route each, the same four submissions the old plans page owned.
+
+    @app.post("/api/v2/models/{name}/plans/{plan_id}/select")
+    def api_v2_plan_select(name: str, plan_id: str):
+        return {"job_id": mutate.submit_plan_select(runner, name, plan_id)}
+
+    @app.post("/api/v2/models/{name}/plans/{plan_id}/disable")
+    def api_v2_plan_disable(name: str, plan_id: str):
+        return {"job_id": mutate.submit_plan_select(runner, name, plan_id,
+                                                    disable=True)}
+
+    @app.post("/api/v2/models/{name}/plans/{plan_id}/enable")
+    def api_v2_plan_enable(name: str, plan_id: str):
+        return {"job_id": mutate.submit_plan_enable(runner, name, plan_id)}
+
+    @app.post("/api/v2/models/{name}/plans/{plan_id}/test")
+    def api_v2_plan_test(name: str, plan_id: str):
+        return {"job_id": mutate.submit_plan_test(runner, name, plan_id)}
+
+    # ---- tier apply, behind the admission preview and its gate ----------
+
+    @app.post("/api/v2/models/{name}/tier/apply")
+    async def api_v2_tier_apply(request: Request, name: str):
+        """Apply the tier plan the admission preview just showed.
+
+        The gate is answered here as a 409 carrying its own changes list,
+        exactly like the configure form's structural gate, so the confirm
+        is an explicit second call and not a checkbox the operator can
+        leave set. submit_tier_apply re-checks it inside the job -- this
+        is the visible half of the same rule, not a replacement for it.
+        """
+        p = modelctl.load_profile(name)
+        body = {}
+        if await request.body():
+            body, bad = await _json_body(request)
+            if bad:
+                return bad
+        accept = bool(body.get("accept_tier_change"))
+        import modelctl_tiers
+        plan, _inputs, _source = modelctl.plan_tiers_for_profile(p)
+        if plan is None:
+            return JSONResponse(
+                {"error": f"couldn't analyze model layout for '{name}' -- "
+                          "there is no plan to apply"}, status_code=409)
+        gate = modelctl_tiers.tier_change_gate(p, plan)
+        if gate["requires_accept"] and not accept:
+            return JSONResponse(
+                {"error": "this replan changes tier, split, or placement "
+                          "beyond pins", "gate": gate}, status_code=409)
+        return {"job_id": mutate.submit_tier_apply(
+            runner, name, accept_tier_change=accept), "gate": gate}
+
+    # ---- runtime policy (typed form) -------------------------------------
+    # The GET survived the cutover; this is the write it never had on the
+    # v2 surface. The objectives offered are exactly the ones the endpoint
+    # accepts, which are exactly the ones the ranker scores -- the phase-3
+    # settings rule ("an input's bound is provably the bound the write
+    # validates against"), applied to an enum.
+
+    @app.get("/api/v2/models/{name}/runtime-policy")
+    def api_v2_runtime_policy_get(name: str):
+        p = modelctl.load_profile(name)
+        try:
+            plans = [{"id": pl["id"], "label": pl["label"]}
+                     for pl in hub.plan_rows(p)]
+        except Exception:
+            # The pinned-plan picker degrades to a free-text id rather
+            # than taking the whole form down with it.
+            plans = []
+        return {"policy": p.get("runtime") or None,
+                "objectives": list(hub.RUNTIME_OBJECTIVES),
+                "plans": plans}
+
+    @app.post("/api/v2/models/{name}/runtime-policy")
+    async def api_v2_runtime_policy(request: Request, name: str):
+        profile = modelctl.load_profile(name)
+        body, bad = await _json_body(request)
+        if bad:
+            return bad
+        mode = body.get("mode") or "fixed"
+        if mode not in ("fixed", "managed"):
+            return JSONResponse(
+                {"error": f"mode must be 'fixed' or 'managed', not "
+                          f"{mode!r}"}, status_code=422)
+        if mode != "managed":
+            # Dropping the section restores fixed-command rendering; the
+            # old form did exactly this by passing runtime=None.
+            return {"job_id": mutate.submit_runtime_policy(runner, name, None),
+                    "mode": "fixed"}
+        import modelctl_backends
+        try:
+            modelctl_backends.get_backend(profile.get("backend", "llama-cpp"))
+        except modelctl_backends.BackendError as e:
+            # Managed placement is the backend choosing a plan at launch;
+            # a backend that cannot be resolved cannot do that, and the
+            # old handler refused the save for the same reason.
+            return JSONResponse({"error": str(e)}, status_code=400)
+        objective = body.get("objective") or "balanced"
+        if objective not in hub.RUNTIME_OBJECTIVES:
+            return JSONResponse(
+                {"error": f"unknown objective {objective!r}",
+                 "objectives": list(hub.RUNTIME_OBJECTIVES)}, status_code=422)
+
+        def _opt_int(key):
+            val = body.get(key)
+            if val in (None, ""):
+                return None
+            return int(val)
+
+        try:
+            minimum_context = _opt_int("minimum_context")
+            maximum_cpu_bytes = _opt_int("maximum_cpu_bytes")
+            tier = _opt_int("maximum_storage_tier")
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"error": "minimum_context, maximum_cpu_bytes and "
+                          "maximum_storage_tier must be integers"},
+                status_code=422)
+        if tier is None:
+            tier = 3
+        if tier not in (1, 2, 3):
+            return JSONResponse(
+                {"error": "maximum_storage_tier is 1 (GPU), 2 (GPU+RAM) or "
+                          "3 (GPU+RAM+SSD)"}, status_code=422)
+        disabled = body.get("disabled_plan_ids") or []
+        if not isinstance(disabled, list) or any(not isinstance(d, str)
+                                                 for d in disabled):
+            return JSONResponse(
+                {"error": "disabled_plan_ids must be a list of plan ids"},
+                status_code=422)
+        runtime = {
+            "mode": "managed",
+            "objective": objective,
+            "pinned_plan_id": body.get("pinned_plan_id") or None,
+            "allow_fallback": bool(body.get("allow_fallback", True)),
+            "allow_untested": bool(body.get("allow_untested", False)),
+            "minimum_context": minimum_context,
+            "maximum_cpu_bytes": maximum_cpu_bytes,
+            "maximum_storage_tier": tier,
+            "disabled_plan_ids": disabled,
+        }
+        return {"job_id": mutate.submit_runtime_policy(runner, name, runtime),
+                "mode": "managed", "runtime": runtime}
+
+    # ---- the launch command, as it would actually run --------------------
+
+    @app.get("/api/v2/models/{name}/run-command")
+    def api_v2_model_run_command(name: str):
+        """Read-only preview of the profile's canonical launch command.
+
+        The one surface that publishes the RESOLVED binary (argv[0] after
+        backend resolution) rather than the pinned one, which is why it
+        is worth having back: it is where a profile whose binary moved
+        becomes visible. Nothing here writes.
+        """
+        p = modelctl.load_profile(name)
+        try:
+            cmd, ok, messages = modelctl.canonical_launch_command(p)
+        except Exception as e:
+            return {"argv": [], "run_sh": "", "command_fingerprint": "",
+                    "ok": False, "messages": [], "warnings": [],
+                    "error": f"could not compile the launch command: {e}"}
+        return {
+            "argv": list(cmd.argv),
+            "run_sh": " \\\n  ".join(cmd.argv),
+            "command_fingerprint": cmd.command_fingerprint,
+            "resolved_binary": cmd.argv[0] if cmd.argv else "",
+            "pinned_binary": p.get("binary") or "",
+            "ok": bool(ok),
+            "messages": list(messages),
+            "warnings": [str(w) for w in (cmd.warnings or ())],
+            "error": "",
+        }
+
+    # ---- profile delete --------------------------------------------------
+
+    @app.post("/api/v2/models/{name}/delete")
+    def api_v2_model_delete(name: str):
+        modelctl.load_profile(name)  # 404 for an unknown name, not a job
+        return {"job_id": mutate.submit_remove(runner, name)}
+
+    # ---- measurement triggers: bench, smoke, autotune --------------------
+
+    @app.post("/api/v2/models/{name}/bench")
+    async def api_v2_model_bench(request: Request, name: str):
+        # Optional overrides, same clamps the old form parsed: SSD-mmap
+        # models generate well under 1 tok/s, so the default 256x3 takes
+        # the better part of an hour there and a smaller budget measures
+        # the same steady state.
+        body = {}
+        if await request.body():
+            body, bad = await _json_body(request)
+            if bad:
+                return bad
+        try:
+            max_tokens = max(1, min(4096, int(body.get("max_tokens", 256))))
+        except (TypeError, ValueError):
+            max_tokens = 256
+        try:
+            runs = max(1, min(10, int(body.get("runs", 3))))
+        except (TypeError, ValueError):
+            runs = 3
+        return {"job_id": mutate.submit_bench(runner, name,
+                                              max_tokens=max_tokens, runs=runs),
+                "max_tokens": max_tokens, "runs": runs}
+
+    @app.post("/api/v2/models/{name}/smoke")
+    def api_v2_model_smoke(name: str):
+        return {"job_id": mutate.submit_smoke_test(runner, name)}
+
+    @app.post("/api/v2/models/{name}/autotune")
+    async def api_v2_model_autotune(request: Request, name: str):
+        body = {}
+        if await request.body():
+            body, bad = await _json_body(request)
+            if bad:
+                return bad
+        objective = body.get("objective") or "balanced"
+        if objective not in hub.RUNTIME_OBJECTIVES:
+            return JSONResponse(
+                {"error": f"unknown objective {objective!r}",
+                 "objectives": list(hub.RUNTIME_OBJECTIVES)}, status_code=422)
+        ids = body.get("plan_ids") or None
+        if ids is not None and (not isinstance(ids, list)
+                                or any(not isinstance(i, str) for i in ids)):
+            return JSONResponse({"error": "plan_ids must be a list of plan ids"},
+                                status_code=422)
+        return {"job_id": mutate.submit_autotune(runner, name,
+                                                 objective=objective,
+                                                 candidate_ids=ids)}
+
+    # ---- fleet-wide runtime action ---------------------------------------
+
+    @app.post("/api/v2/runtime/unload-all")
+    def api_v2_unload_all():
+        return {"job_id": mutate.submit_unload_all(runner)}
+
+    # ---- the managed llama-swap routing matrix ---------------------------
+
+    @app.get("/api/v2/settings/routing")
+    def api_v2_routing():
+        """The matrix as data, for the typed grid.
+
+        Same degrade contract as everything else on this surface: an
+        unreadable router config or a generator that throws is a state to
+        render, not a 500.
+        """
+        import modelctl_matrix
+        cfg_path = Path(modelctl.LLAMA_SWAP_CONFIG_PATH)
+        errors = {}
+        try:
+            config = modelctl.yaml.safe_load(cfg_path.read_text()) or {}
+        except (OSError, modelctl.yaml.YAMLError) as e:
+            config = {}
+            errors["existing"] = f"cannot read {cfg_path}: {e}"
+        existing = config.get("matrix") or {}
+        try:
+            generated = modelctl_matrix.generate_matrix()
+        except Exception as e:
+            errors["generated"] = str(e) or "matrix generation failed"
+            return {"config_path": str(cfg_path), "existing": existing,
+                    "generated": None, "merged": None, "preview": "",
+                    "rows": [], "errors": errors}
+        merged = modelctl_matrix.merge_matrix(existing, generated)
+        # One row per routing set: what it holds, whether the set is
+        # managed (mc_*) or hand-authored, and what applying would do to
+        # it. The old page published only a YAML blob, so "this apply
+        # would drop a set I wrote by hand" was not answerable from it.
+        old_sets = (existing.get("sets") or {})
+        new_sets = (merged.get("sets") or {})
+        rows = []
+        for key in sorted(set(old_sets) | set(new_sets)):
+            before, after = old_sets.get(key), new_sets.get(key)
+            rows.append({
+                "key": key,
+                "managed": key.startswith(modelctl_matrix.MANAGED_PREFIX),
+                "before": before,
+                "after": after,
+                "change": ("added" if before is None else
+                           "removed" if after is None else
+                           "unchanged" if before == after else "changed"),
+                "evict_cost": (merged.get("evict_costs") or {}).get(key),
+            })
+        return {
+            "config_path": str(cfg_path),
+            "existing": existing,
+            "generated": generated,
+            "merged": merged,
+            "preview": modelctl.yaml.safe_dump({"matrix": merged},
+                                               sort_keys=False),
+            "rows": rows,
+            "errors": errors,
+        }
+
+    @app.post("/api/v2/settings/routing/apply")
+    def api_v2_routing_apply():
+        # routing_service owns the backup / write / restart / health-check
+        # / rollback sequence; this only submits it.
+        return {"job_id": mutate.submit_matrix_apply(runner)}
 
     # ---- v2 add wizard ---------------------------------------------------
 

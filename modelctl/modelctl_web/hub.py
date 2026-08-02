@@ -21,6 +21,17 @@ CONFIG_FIELDS = ["device", "split_mode", "tensor_split", "ctx",
                  "cache_type_k", "cache_type_v", "flash_attn", "ttl",
                  "mtp", "fit", "extra", "binary"]
 
+# The runtime-policy objectives the ranker actually scores differently
+# (modelctl_plans._objective_score / _plan_score). The typed form offers
+# this list and the endpoint validates against it, so the console cannot
+# offer an objective the ranker ignores -- the old form's select listed
+# six of these and silently omitted interactive_latency and
+# lowest_storage, which were therefore reachable only by hand-editing the
+# profile JSON.
+RUNTIME_OBJECTIVES = ("balanced", "fastest_generation", "fastest_prompt",
+                      "interactive_latency", "largest_context",
+                      "fastest_load", "lowest_ram", "lowest_storage")
+
 
 def _profile_config(profile):
     cfg = profile.get("config", {}) or {}

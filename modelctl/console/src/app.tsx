@@ -6,7 +6,7 @@ import { useStream } from "./lib/stream";
 import { fmtClock } from "./lib/api";
 import { ToastHost } from "./lib/toasts";
 import { Operate } from "./pages/operate";
-import { Jobs } from "./pages/jobs";
+import { Job, Jobs } from "./pages/jobs";
 import { Models } from "./pages/models";
 import { Model } from "./pages/model";
 import { Add } from "./pages/add";
@@ -42,7 +42,8 @@ function Side() {
       <a class={here("/v2/")} href="/v2/">▣ operate</a>
       <a class={under("/v2/models")} href="/v2/models">◇ model hub</a>
       <a class={under("/v2/add")} href="/v2/add">＋ add</a>
-      <a class={here("/v2/jobs")} href="/v2/jobs">
+      {/* `under`, not `here`: a per-job page is still the jobs section */}
+      <a class={under("/v2/jobs")} href="/v2/jobs">
         ≡ jobs{running > 0 && <span class="badge">{running}</span>}
       </a>
       <span class="spacer"></span>
@@ -94,6 +95,16 @@ function ModelShell() {
   );
 }
 
+function JobShell() {
+  const { params } = useRoute();
+  const id = params.id ?? "";
+  return (
+    <Shell title={`job · ${id.slice(0, 12)}`} live="job stream live">
+      <Job id={id} />
+    </Shell>
+  );
+}
+
 function WizardShell() {
   const { params } = useRoute();
   const id = params.id ?? "";
@@ -115,6 +126,7 @@ export function App() {
         <Route path="/v2/jobs" component={() => (
           <Shell title="jobs" live="job stream live"><Jobs /></Shell>
         )} />
+        <Route path="/v2/jobs/:id" component={JobShell} />
         <Route path="/v2/models" component={() => (
           <Shell title="model hub" live="telemetry live"><Models /></Shell>
         )} />

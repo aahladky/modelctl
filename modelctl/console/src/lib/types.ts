@@ -249,6 +249,83 @@ export interface ConfigSaveResult {
   gate: Gate;
 }
 
+/* ---- phase 4: operations ---- */
+
+/* Every phase-4 write answers with the job it queued, so the caller can
+   name it in the toast and the jobs page can be deep-linked to it. */
+export interface JobSubmitted {
+  job_id: string;
+}
+
+export interface CacheResetResult {
+  ok: boolean;
+  name: string;
+  port: number;
+}
+
+export interface TierApplyResult {
+  job_id: string;
+  gate: Gate;
+}
+
+export interface RuntimePolicy {
+  mode: string;
+  objective: string;
+  pinned_plan_id: string | null;
+  allow_fallback: boolean;
+  allow_untested: boolean;
+  minimum_context: number | null;
+  maximum_cpu_bytes: number | null;
+  maximum_storage_tier: number;
+  disabled_plan_ids: string[];
+}
+
+/* The form's select is built from `objectives`, which is the same tuple
+   the write validates against -- the console cannot offer an objective
+   the endpoint rejects, or hide one it accepts. */
+export interface RuntimePolicyView {
+  policy: RuntimePolicy | null;
+  objectives: string[];
+  plans: { id: string; label: string }[];
+}
+
+export interface RunCommand {
+  argv: string[];
+  run_sh: string;
+  command_fingerprint: string;
+  resolved_binary: string;
+  pinned_binary: string;
+  ok: boolean;
+  messages: string[];
+  warnings: string[];
+  error: string;
+}
+
+export interface RoutingRow {
+  key: string;
+  managed: boolean;
+  before: string | null;
+  after: string | null;
+  change: "added" | "removed" | "changed" | "unchanged";
+  evict_cost: number | null;
+}
+
+export interface RoutingMatrix {
+  config_path: string;
+  existing: Record<string, unknown>;
+  generated: {
+    vars: Record<string, string>;
+    evict_costs: Record<string, number>;
+    sets: Record<string, string>;
+    claims: Record<string, Record<string, number>>;
+    excluded: { name: string; reason: string }[];
+  } | null;
+  merged: Record<string, unknown> | null;
+  preview: string;
+  rows: RoutingRow[];
+  errors: Record<string, string>;
+}
+
 /* ---- phase 2: add wizard ---- */
 
 export type WizardStep =

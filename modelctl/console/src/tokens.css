@@ -244,9 +244,15 @@ legend { font-size: .8rem; font-weight: 650; color: var(--muted); text-transform
 .check .lbl > label { display: inline; }
 .check .lbl > .info { vertical-align: middle; margin-left: .35em; }
 .field .help { color: var(--muted); font-size: .8rem; }
-.field .msg { font-size: .8rem; display: flex; gap: .4em; align-items: baseline; }
-.field .msg.error { color: var(--err); font-weight: 600; }
-.field .msg.warning { color: var(--warn); font-weight: 600; }
+/* Not scoped to .field. It was, and every .msg outside a form field --
+   the structural-change gate's change list, a failed search, a job's
+   error, the settings page's own load failure -- inherited body colour
+   and rendered as ordinary prose. An error that looks like a sentence is
+   an error nobody sees. Two thirds of the .msg sites on the surface are
+   outside a .field. */
+.msg { font-size: .8rem; display: flex; gap: .4em; align-items: baseline; }
+.msg.error { color: var(--err); font-weight: 600; }
+.msg.warning { color: var(--warn); font-weight: 600; }
 .field.error input, .field.error select { border-color: var(--err); }
 .field.warning input { border-color: var(--warn); }
 .frow { display: flex; gap: .9rem; flex-wrap: wrap; }

@@ -9,14 +9,15 @@
    an input's min/max is the bound the write validates against. */
 import { useEffect, useState } from "preact/hooks";
 import {
-  ApiError, calibrateStorage, fetchSettings, fmtGiB, reprobeCapabilities,
-  rotateToken, saveDefaults, saveHardware,
+  ApiError, applyRouting, calibrateStorage, fetchRouting, fetchSettings,
+  fmtGiB, reprobeCapabilities, rotateToken, saveDefaults, saveHardware,
 } from "../lib/api";
+import { ConfirmButton, submitAction } from "../lib/actions";
 import { Info } from "../lib/info";
 import { toast } from "../lib/toasts";
 import { effectiveTheme, storedTheme } from "../theme";
 import type {
-  DefaultField, HardwareSection, PathRow, SettingsOverview,
+  DefaultField, HardwareSection, PathRow, RoutingMatrix, SettingsOverview,
 } from "../lib/types";
 
 const GIB = 2 ** 30;
@@ -889,6 +890,155 @@ function Diagnostics({ s }: { s: SettingsOverview }) {
   );
 }
 
+/* ---- the managed llama-swap routing matrix ---------------------------
+   The old page published two YAML blobs and an apply button, so the one
+   question worth asking of a matrix apply -- "what does this change, and
+   does it touch anything I wrote by hand?" -- was not answerable from it.
+   The grid answers it per set before the apply is submitted. */
+
+const CHANGE_CHIP: Record<string, string> = {
+  added: "chip ok", removed: "chip err", changed: "chip warn",
+  unchanged: "chip",
+};
+
+function Routing() {
+  const [m, setM] = useState<RoutingMatrix | null>(null);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [showYaml, setShowYaml] = useState(false);
+  const [n, setN] = useState(0);
+
+  useEffect(() => {
+    let live = true;
+    fetchRouting()
+      .then((d) => { if (live) { setM(d); setErr(""); } })
+      .catch((e) => { if (live) setErr(String(e)); });
+    return () => { live = false; };
+  }, [n]);
+
+  if (err) {
+    return (
+      <div class="widget">
+        <h2>routing matrix</h2>
+        <p class="msg error">✗ couldn't read the matrix: {err}</p>
+      </div>
+    );
+  }
+  if (!m) {
+    return (
+      <div class="widget"><h2>routing matrix</h2>
+        <p class="sub">reading the router config…</p></div>
+    );
+  }
+
+  const changing = m.rows.filter((r) => r.change !== "unchanged");
+  const handAuthored = m.rows.filter((r) => !r.managed);
+  return (
+    <div class="widget">
+      <h2>routing matrix{" "}
+        <Info label="about the routing matrix">
+          llama-swap can hold several models resident at once; the matrix
+          names the combinations that fit. modelctl generates the mc_*
+          sets from each profile's VRAM claim and the device budgets;
+          anything else in the matrix is hand-authored and is never
+          rewritten. Applying backs up the config, writes it, restarts
+          llama-swap, health-checks it, and rolls back if it does not come
+          up.
+        </Info>
+      </h2>
+      <div class="sub">{m.config_path}</div>
+      {Object.entries(m.errors).map(([section, why]) => (
+        <div class="msg warning" key={section}>⚠ {section}: {why}</div>
+      ))}
+      {m.generated == null
+        ? <p class="sub">the matrix could not be generated — there is
+            nothing to apply</p>
+        : (
+          <>
+            <p class="sub">
+              {m.rows.length} set(s) · {changing.length} would change ·{" "}
+              {handAuthored.length} hand-authored (left alone)
+              {m.generated.excluded.length > 0
+                ? ` · ${m.generated.excluded.length} profile(s) excluded`
+                : ""}
+            </p>
+            <table>
+              <thead>
+                <tr><th>set</th><th>owner</th><th>models after apply</th>
+                  <th class="num">evict cost</th><th>change</th></tr>
+              </thead>
+              <tbody>
+                {m.rows.map((r) => (
+                  <tr key={r.key}>
+                    <td class="num">{r.key}</td>
+                    <td class="sub">{r.managed ? "generated" : "hand-authored"}</td>
+                    <td>
+                      {r.after ?? <span class="sub">(removed)</span>}
+                      {r.change === "changed" && (
+                        <div class="sub">was: {r.before}</div>
+                      )}
+                    </td>
+                    <td class="num">
+                      {r.evict_cost != null ? r.evict_cost.toFixed(1) : "—"}
+                    </td>
+                    <td>
+                      <span class={CHANGE_CHIP[r.change] ?? "chip"}>
+                        <span class="dot"></span>{r.change}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {m.generated.excluded.length > 0 && (
+              <>
+                <div class="label" style="margin-top:.8rem">
+                  <span>excluded profiles{" "}
+                    <Info label="about exclusions">
+                      A profile with no computable VRAM claim is left out
+                      rather than guessed at — a guessed claim is how two
+                      models end up resident that do not fit.
+                    </Info></span>
+                </div>
+                {m.generated.excluded.map((x) => (
+                  <div class="sub" key={x.name}>· {x.name} — {x.reason}</div>
+                ))}
+              </>
+            )}
+            <div class="actions" style="margin-top:.8rem">
+              <button type="button" onClick={() => setShowYaml(!showYaml)}>
+                {showYaml ? "hide" : "show"} merged YAML
+              </button>
+              <span class="grow" style="flex:1"></span>
+              <ConfirmButton
+                label="apply matrix"
+                confirmLabel="yes, apply and restart llama-swap"
+                busy={busy}
+                disabled={changing.length === 0}
+                consequences={<>
+                  Writes {m.config_path} (after a timestamped backup) and
+                  restarts llama-swap. Every resident model is unloaded by
+                  the restart. If it does not come back healthy, the backup
+                  is restored automatically and the job says so.
+                </>}
+                onConfirm={() => {
+                  setBusy(true);
+                  submitAction(applyRouting, "matrix apply",
+                               () => setN((x) => x + 1))
+                    .finally(() => setBusy(false));
+                }} />
+            </div>
+            {changing.length === 0 && (
+              <div class="sub">nothing to apply — the config already holds
+                this matrix</div>
+            )}
+            {showYaml && <pre class="log" style="max-height:320px">{m.preview}</pre>}
+          </>
+        )}
+    </div>
+  );
+}
+
 function Appearance() {
   const stored = storedTheme();
   return (
@@ -936,6 +1086,7 @@ export function Settings() {
       <Readiness r={s.readiness} />
       <Defaults s={s} onSaved={reload} />
       <Hardware hw={s.hardware} onSaved={reload} />
+      <Routing />
       <Access s={s} onRotated={reload} />
       <Paths rows={s.paths} />
       <Diagnostics s={s} />

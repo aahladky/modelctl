@@ -5,10 +5,18 @@
    with the flash + toast (the loud un-happen). */
 import { useEffect, useRef, useState } from "preact/hooks";
 import { useStream } from "../lib/stream";
-import { cancelJob, fmtAgo } from "../lib/api";
+import { cancelJob, fetchJob, fmtAgo, fmtClock } from "../lib/api";
 import { Info } from "../lib/info";
 import { toast } from "../lib/toasts";
 import type { JobRow } from "../lib/types";
+
+/* Phase 4 gave jobs their URLs back. The link is on the title so the row
+   stays clickable-through without stealing the cancel button's clicks. */
+const jobHref = (id: string) => `/v2/jobs/${encodeURIComponent(id)}`;
+
+function JobLink({ job }: { job: JobRow }) {
+  return <a href={jobHref(job.id)}>{job.title}</a>;
+}
 
 const HISTORY_CHIP: Record<string, { cls: string; label: string }> = {
   done: { cls: "chip ok", label: "done" },
@@ -62,6 +70,112 @@ function useCancel() {
   return { pending, flash, request };
 }
 
+/* ---- one job, by URL -------------------------------------------------
+   The tick stream carries only the newest rows, so a link to an older
+   job cannot be answered from it. This reads the stream when the job is
+   in it (live progress, no polling) and falls back to the per-job
+   endpoint when it is not -- which is also the only thing that makes an
+   old /jobs/{id} bookmark work again. */
+export function Job({ id }: { id: string }) {
+  const { tick, stale } = useStream();
+  const { pending, request } = useCancel();
+  const [fetched, setFetched] = useState<JobRow | null>(null);
+  const [err, setErr] = useState("");
+
+  const live = tick?.jobs.find((j) => j.id === id) ?? null;
+  /* A job off the end of the stream is read from the store, and re-read
+     on the tick while it can still move. Once it has finished it is
+     immutable, so the reads stop -- otherwise a link to a job that ended
+     last week polls the store every two seconds for a row that will
+     never change again. */
+  const settled = fetched != null
+    && !["running", "queued"].includes(fetched.status);
+  useEffect(() => {
+    if (live || settled) return;   // in the stream, or done and immutable
+    fetchJob(id).then(setFetched).catch((e) => setErr(String(e)));
+  }, [id, live == null, settled, tick?.ts]);
+
+  const job = live ?? fetched;
+  if (err && !job) {
+    return (
+      <div class="widget">
+        <p>no job {id}: {err}</p>
+        <p class="sub"><a href="/v2/jobs">back to the job list</a></p>
+      </div>
+    );
+  }
+  if (!job) {
+    return <div class="widget"><span class="sub">loading job {id}…</span></div>;
+  }
+  const chip = HISTORY_CHIP[job.status]
+    ?? { cls: job.status === "running" ? "chip active" : "chip",
+         label: job.status };
+  const finished = !["running", "queued"].includes(job.status);
+  return (
+    <>
+      <div class={stale && !finished ? "widget stale" : "widget"}>
+        <div class="label">
+          <span>{job.title}</span>
+          {!finished && !live && (
+            <span class="live stale"><span class="dot"></span>
+              not in the live stream — read once at{" "}
+              {fmtClock(Date.now())}
+            </span>
+          )}
+        </div>
+        <table>
+          <tbody>
+            <tr><td class="sub">status</td>
+              <td><span class={chip.cls}><span class="dot"></span>{chip.label}</span></td></tr>
+            <tr><td class="sub">lane</td><td>{job.lane}</td></tr>
+            <tr><td class="sub">type</td><td>{job.type}</td></tr>
+            <tr><td class="sub">id</td><td class="num">{job.id}</td></tr>
+            <tr><td class="sub">created</td>
+              <td class="sub">{job.created ? fmtAgo(job.created) : "—"}</td></tr>
+            <tr><td class="sub">started</td>
+              <td class="sub">{job.started ? fmtAgo(job.started) : "not yet"}</td></tr>
+            <tr><td class="sub">finished</td>
+              <td class="sub">{job.finished ? fmtAgo(job.finished) : "—"}</td></tr>
+          </tbody>
+        </table>
+        {!finished && (
+          <>
+            <div class="meterbar" style="max-width:340px">
+              <div class="fill" style={`width:${Math.round(job.progress * 100)}%`}></div>
+            </div>
+            <div class="sub num">
+              {`${Math.round(job.progress * 100)}%`}
+              {job.detail ? ` · ${job.detail}` : ""}
+            </div>
+          </>
+        )}
+        {job.error && <div class="msg error">{job.error}</div>}
+        <div class="actions" style="margin-top:.6rem">
+          <a href="/v2/jobs" class="sub">← all jobs</a>
+          <span class="grow" style="flex:1"></span>
+          {!finished && (
+            <button class={pending[job.id] ? "btn-danger busy" : "btn-danger"}
+                    disabled={!!pending[job.id] || !job.cancellable}
+                    onClick={() => request(job, job.status === "queued"
+                      ? "dequeue" : "cancel")}>
+              {job.status === "queued" ? "dequeue" : "cancel"}
+            </button>
+          )}
+        </div>
+        {!job.cancellable && !finished && (
+          <div class="sub">this lane's jobs cannot be cancelled once started</div>
+        )}
+      </div>
+      <div class="widget">
+        <div class="label"><span>log</span></div>
+        {job.result_tail.trim()
+          ? <LogTail text={job.result_tail} />
+          : <p class="sub">this job has not written any output yet</p>}
+      </div>
+    </>
+  );
+}
+
 export function Jobs() {
   const { tick, stale } = useStream();
   const { pending, flash, request } = useCancel();
@@ -107,7 +221,7 @@ export function Jobs() {
                         : <span class="chip active"><span class="dot"></span>running</span>}
                     </td>
                     <td>
-                      {j.title} <span class="sub">· lane {j.lane}</span>
+                      <JobLink job={j} /> <span class="sub">· lane {j.lane}</span>
                       <div class="meterbar" style="max-width:340px">
                         <div class="fill" style={`width:${Math.round(j.progress * 100)}%`}></div>
                       </div>
@@ -158,7 +272,7 @@ export function Jobs() {
                         : <span class="chip"><span class="dot"></span>queued #{i + 1}</span>}
                     </td>
                     <td>
-                      {j.title}{" "}
+                      <JobLink job={j} />{" "}
                       <span class="sub">
                         · lane {j.lane}{j.detail ? ` · ${j.detail}` : ""}
                       </span>
@@ -195,7 +309,7 @@ export function Jobs() {
                         <span class={chip.cls}><span class="dot"></span>{chip.label}</span>
                       </td>
                       <td>
-                        {j.title}{" "}
+                        <JobLink job={j} />{" "}
                         <span class="sub">
                           · lane {j.lane}{sub ? ` · ${sub}` : ""}
                           {j.finished ? ` · ${fmtAgo(j.finished)}` : ""}
