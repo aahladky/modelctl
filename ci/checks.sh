@@ -31,6 +31,23 @@ section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 VENV="$REPO/modelctl/.venv/bin/python"
 [ -x "$VENV" ] || VENV=python3
 
+# ccache, made path-independent. Without this, the same commit built from
+# a lane worktree (/home/aaron/workspace/.lanes/<slug>) misses on every
+# object the main checkout already compiled, because ccache hashes the
+# absolute path of each source file -- so a fork-touching lane pays a
+# full rebuild instead of minutes. CCACHE_BASEDIR rewrites paths under
+# the checkout root to paths relative to the build's cwd, and
+# hash_dir=false keeps the cwd out of the hash; every cmake invocation
+# below therefore runs from $REPO so the rewritten paths agree between
+# checkouts. Nothing else is relaxed: no sloppiness is set, so headers,
+# macros and compiler identity are hashed as strictly as ccache's
+# defaults. ggml turns ccache on by itself when it is installed
+# (GGML_CCACHE=ON); this only makes its entries shareable.
+if command -v ccache >/dev/null; then
+    export CCACHE_BASEDIR="$REPO"
+    export CCACHE_NOHASHDIR=1
+fi
+
 # --- 1. submodule pin -------------------------------------------------
 # The specific failure this exists for: the repo sat five commits ahead of
 # its own pin for a day, so a clone built a runtime the docs did not
@@ -141,12 +158,15 @@ else
     # Overridable so worktrees and parallel runs don't fight over one
     # cmake cache configured against a different source path.
     BUILD="${MODELCTL_CI_BUILD_DIR:-/tmp/ci-build-cpu}"
-    if cmake -B "$BUILD" -S "$REPO/llama.cpp" -DGGML_SYCL=OFF \
+    # From $REPO: CCACHE_BASEDIR rewrites to paths relative to the cwd,
+    # so the cwd has to be the checkout root for a lane's entries and the
+    # main checkout's to match.
+    if (cd "$REPO" && cmake -B "$BUILD" -S "$REPO/llama.cpp" -DGGML_SYCL=OFF \
             -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_TESTS=ON \
             -DLLAMA_BUILD_EXAMPLES=OFF -DCMAKE_BUILD_TYPE=Release \
             > /tmp/ci-cmake.log 2>&1 \
        && cmake --build "$BUILD" --target llama-server test-moe-cache \
-            test-moe-hybrid -j"$(nproc)" > /tmp/ci-build.log 2>&1; then
+            test-moe-hybrid -j"$(nproc)" > /tmp/ci-build.log 2>&1); then
         pass "CPU-only build"
 
         if "$BUILD/bin/test-moe-cache" > /dev/null 2>&1; then
@@ -207,14 +227,14 @@ else
     rm -f /tmp/ci-santest
     if [ -z "$SAN_CC" ]; then
         printf '  \033[33mSKIP\033[0m  no toolchain with a working sanitizer runtime (dnf install libasan libubsan, or install clang)\n'
-    elif cmake -B "$SBUILD" -S "$REPO/llama.cpp" -DGGML_SYCL=OFF \
+    elif (cd "$REPO" && cmake -B "$SBUILD" -S "$REPO/llama.cpp" -DGGML_SYCL=OFF \
             -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_TESTS=ON \
             -DLLAMA_BUILD_EXAMPLES=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_C_COMPILER="$SAN_CC" -DCMAKE_CXX_COMPILER="$SAN_CXX" \
             -DCMAKE_C_FLAGS="$SANFLAGS" -DCMAKE_CXX_FLAGS="$SANFLAGS" \
             > /tmp/ci-cmake-san.log 2>&1 \
        && cmake --build "$SBUILD" --target test-moe-cache test-moe-hybrid \
-            -j"$(nproc)" > /tmp/ci-build-san.log 2>&1; then
+            -j"$(nproc)" > /tmp/ci-build-san.log 2>&1); then
         if "$SBUILD/bin/test-moe-cache" > /dev/null 2>&1; then
             pass "test-moe-cache under ASan/UBSan"
         else fail "test-moe-cache under ASan/UBSan"; fi
@@ -241,7 +261,8 @@ LEAVES = ['modelctl_paths.py', 'modelctl_fsutil.py', 'modelctl_errors.py',
           'modelctl_capabilities.py', 'modelctl_hardware.py',
           'modelctl_storage.py', 'modelctl_backends.py',
           'modelctl_load.py', 'modelctl_paired.py', 'modelctl_anchors.py',
-          'modelctl_display.py']
+          'modelctl_display.py', 'modelctl_remote_hands.py',
+          'modelctl_remote_hands_oauth.py', 'modelctl_lanes.py']
 bad = []
 for name in LEAVES:
     path = pathlib.Path(name)

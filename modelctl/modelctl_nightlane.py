@@ -465,13 +465,31 @@ def today(clock=time.time) -> str:
 
 # --- running a job -------------------------------------------------------
 
-def run_job(job, measure, ctx=None, load_interval=5.0, clock=time.time):
+# How long a night job waits for the GPU lock before refusing. The
+# window gate already asked for a quiet machine, so a held lock means
+# somebody's bench is running right now: a minute covers the gap between
+# a lane releasing the lock and this job asking, and refusing after that
+# is correct -- the job is queued, not scheduled, and tomorrow night is
+# fine. Waiting instead would put a benchmark inside a window that was
+# checked an hour earlier.
+GPU_LOCK_WAIT_SECONDS = 60.0
+
+
+def run_job(job, measure, ctx=None, load_interval=5.0, clock=time.time,
+            gpu_lock=None, gpu_lock_wait=GPU_LOCK_WAIT_SECONDS):
     """Execute one pre-registered job and return its record.
 
     `measure(arm, index, slot) -> dict` performs one run of one arm. It is
     injected because launching a server is not this module's business and
     because a night lane whose orchestration can only be tested with real
     GPUs does not get tested.
+
+    Every run happens holding the machine-wide GPU lock
+    (modelctl_lanes.gpu_lock), which is the same lock `modelctl lane
+    gpu-lock` takes. The single-worker benchmark lane already stops two
+    night jobs from overlapping; the lock is what stops a night job and
+    a session's bench in a parallel lane from measuring each other, and
+    those two schedulers know nothing about one another.
 
     The record it returns is what `file_evidence` writes. It carries the
     job's own criterion verbatim: a result read months later without the
@@ -488,14 +506,39 @@ def run_job(job, measure, ctx=None, load_interval=5.0, clock=time.time):
         record["finished"] = clock()
         return record
 
+    if job.mode == "paired" and len(job.arms) != 2:
+        # Refused before the lock: a job that cannot run should not make
+        # anything else wait to find that out.
+        record["status"] = "refused"
+        record["violations"] = [
+            f"paired mode needs exactly two arms, this job has "
+            f"{len(job.arms)}"]
+        record["finished"] = clock()
+        return record
+
+    if gpu_lock is None:
+        import modelctl_lanes
+        gpu_lock = modelctl_lanes.gpu_lock
+    try:
+        with gpu_lock(timeout=gpu_lock_wait, note=f"night lane {job.id}"):
+            return _run_measurements(job, measure, record, ctx, load_interval,
+                                     clock)
+    except Exception as e:
+        # LockBusy is the only expected one, and it is a refusal rather
+        # than an error: nothing ran, so there is nothing to file but the
+        # reason. Caught by name rather than by class to keep this module
+        # a leaf of modelctl_lanes' exception types.
+        if type(e).__name__ != "LockBusy":
+            raise
+        record["status"] = "refused"
+        record["violations"] = [
+            f"the GPU lock is held by another run ({e}); nothing was measured"]
+        record["finished"] = clock()
+        return record
+
+
+def _run_measurements(job, measure, record, ctx, load_interval, clock):
     if job.mode == "paired":
-        if len(job.arms) != 2:
-            record["status"] = "refused"
-            record["violations"] = [
-                f"paired mode needs exactly two arms, this job has "
-                f"{len(job.arms)}"]
-            record["finished"] = clock()
-            return record
         import modelctl_paired
         a, b = (modelctl_paired.Condition(
             name=arm.name, label=arm.note,

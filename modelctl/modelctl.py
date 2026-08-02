@@ -4588,6 +4588,10 @@ def _remote_hands_summary(rh, st):
           f"{'listening' if st['listening'] else 'not listening'}")
     print(f"token:    {'present' if st['token_present'] else 'MISSING'} "
           f"({st['token_path']})")
+    grants = st["oauth"]
+    print(f"oauth:    {grants['clients']} client(s), "
+          f"{grants['access_tokens']} access / "
+          f"{grants['refresh_tokens']} refresh token(s) live")
     print(f"allowlist: {', '.join(st['allow_roots'])}")
     print(f"audit:    {st['audit_path']}")
     recent = st["recent"]
@@ -4721,6 +4725,124 @@ def _cmd_headless_cli(args):
     command's status is corrected here -- changing main() would move
     every other command's exit code at the same time."""
     sys.exit(cmd_headless(args) or 0)
+
+
+def _lane_age(seconds):
+    hours, minutes = divmod(int(seconds) // 60, 60)
+    return f"{hours}h{minutes:02d}m"
+
+
+def _print_lane_row(row):
+    ports = f"{row['port_base']}-{row['port_end']}"
+    sessions = (",".join(str(p) for p in row["sessions"])
+                if row["sessions"] else "none")
+    ahead = "?" if row["unlanded_commits"] is None else row["unlanded_commits"]
+    print(f"  {row['slug']:<20} {ports}  age {_lane_age(row['age_seconds']):>7}"
+          f"  sessions {sessions}  unlanded {ahead}")
+    print(f"    {row['path']}  ({row['branch']})")
+    if row["flags"]:
+        print(f"    flags: {'; '.join(row['flags'])}")
+
+
+def cmd_lane(args):
+    """Parallel work lanes.
+
+    Every subcommand prints what it did and nothing else; the exit
+    status is the answer for a caller, and a stop is a non-zero exit
+    with the reason on stderr. No subcommand here asks a question.
+    """
+    import modelctl_lanes as lanes
+
+    action = args.lane_command
+    try:
+        if action == "start":
+            entry = lanes.start(args.slug)
+            print(entry["path"])
+            print(f"branch {entry['branch']}, ports "
+                  f"{entry['port_base']}-{entry['port_end']}")
+            subs = entry.get("submodules") or {}
+            if subs.get("cloned_from_main"):
+                print(f"submodules cloned from the main checkout (the "
+                      f"declared remote was unreachable): "
+                      f"{', '.join(subs['cloned_from_main'])}")
+            print(f"environment: eval \"$(modelctl lane env {args.slug})\"")
+            print(f"land it with: modelctl lane land {args.slug}")
+            return 0
+
+        if action == "land":
+            report = lanes.land(args.slug, timeout=args.wait)
+            if report["journal"]:
+                print(f"journalled {len(report['journal']['files'])} local "
+                      f"edit(s) in the main checkout as "
+                      f"{report['journal']['commit'][:12]}")
+            print(f"rebase: {report['rebase']}")
+            print(f"checks: {report['checks']}"
+                  + (f" ({report['checks_log']})" if report["checks_log"]
+                     else ""))
+            print(f"master {report['master_before'][:12]} -> "
+                  f"{report['master_after'][:12]}")
+            print(f"lane removed, branch deleted, ports "
+                  f"{report['ports_freed'][0]}-{report['ports_freed'][1]} "
+                  f"freed")
+            return 0
+
+        if action in ("list", "sweep"):
+            rows = lanes.lane_list()
+            if not rows:
+                print("no lanes")
+            for row in rows:
+                _print_lane_row(row)
+            if action == "list":
+                return 0
+            flagged = [r for r in rows if r["flags"]]
+            print(f"\n{len(flagged)} of {len(rows)} lane(s) flagged.")
+            if not args.delete:
+                print("sweep never deletes on its own: name a lane with "
+                      "--delete to remove it.")
+                return 0
+            rc = 0
+            for slug in args.delete:
+                try:
+                    lanes.delete(slug, force=args.force)
+                    print(f"deleted {slug}")
+                except lanes.LaneError as e:
+                    print(f"lane sweep: {e}", file=sys.stderr)
+                    rc = 1
+            return rc
+
+        if action == "env":
+            data = lanes.read_ledger()
+            entry = data["lanes"].get(args.slug)
+            if entry is None:
+                print(f"lane env: no lane named {args.slug}", file=sys.stderr)
+                return 1
+            for line in lanes.env_exports(entry):
+                print(line)
+            return 0
+
+        if action == "gpu-lock":
+            argv = list(args.command or [])
+            if argv and argv[0] == "--":
+                argv = argv[1:]
+            return lanes.run_with_gpu_lock(argv, timeout=args.wait)
+
+    except lanes.LaneError as e:
+        print(f"lane {action}: {e}", file=sys.stderr)
+        return 1
+
+    print(f"unknown lane command: {action}", file=sys.stderr)
+    return 2
+
+
+def _cmd_lane_cli(args):
+    """argparse entry point for `lane`.
+
+    main() drops each command's return value, so every command exits 0.
+    That is not survivable here: a land that stopped on a conflict which
+    exited 0 would tell the session its work is on master when it is
+    still in the lane, and the next thing that session does is delete
+    the lane."""
+    sys.exit(cmd_lane(args) or 0)
 
 
 def cmd_doctor(args):
@@ -5353,6 +5475,52 @@ def build_arg_parser():
         parser_.add_argument("--port", type=int, default=9294,
                              help="loopback port (default 9294)")
     p_rh.set_defaults(func=cmd_remote_hands)
+
+    p_lane = sub.add_parser(
+        "lane",
+        help="parallel work lanes: hidden worktrees that land on master")
+    lane_sub = p_lane.add_subparsers(dest="lane_command", required=True)
+
+    p_lane_start = lane_sub.add_parser(
+        "start", help="create a lane worktree, branch and port block")
+    p_lane_start.add_argument("slug", help="lane name (lowercase, dashes)")
+
+    p_lane_land = lane_sub.add_parser(
+        "land", help="rebase, re-check if master moved, fast-forward master, "
+                     "delete the lane")
+    p_lane_land.add_argument("slug")
+    p_lane_land.add_argument(
+        "--wait", type=float, default=None, metavar="SECONDS",
+        help="give up waiting for the land lock after SECONDS "
+             "(default: wait indefinitely -- only one land runs at a time)")
+
+    lane_sub.add_parser("list", help="list active lanes with age, sessions "
+                                     "and unlanded commits")
+
+    p_lane_sweep = lane_sub.add_parser(
+        "sweep", help="list lanes and flag the stale ones; deletes only what "
+                      "is named")
+    p_lane_sweep.add_argument("--delete", action="append", default=[],
+                              metavar="SLUG",
+                              help="delete this lane (repeatable)")
+    p_lane_sweep.add_argument(
+        "--force", action="store_true",
+        help="delete even with unlanded commits or a live session")
+
+    p_lane_env = lane_sub.add_parser(
+        "env", help="print the lane's shell environment (ports, ccache, "
+                    "per-lane build dirs)")
+    p_lane_env.add_argument("slug")
+
+    p_lane_gpu = lane_sub.add_parser(
+        "gpu-lock", help="run a command holding the machine-wide GPU lock")
+    p_lane_gpu.add_argument(
+        "--wait", type=float, default=None, metavar="SECONDS",
+        help="give up waiting for the lock after SECONDS (default: wait)")
+    p_lane_gpu.add_argument("command", nargs=argparse.REMAINDER,
+                            help="-- followed by the command to run")
+
+    p_lane.set_defaults(func=_cmd_lane_cli)
 
     p_caps = sub.add_parser(
         "capabilities",

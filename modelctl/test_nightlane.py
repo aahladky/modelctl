@@ -11,12 +11,31 @@ to dispatch, and whether it fails closed when it cannot see the machine.
 A gate that only gets tested on the path where it opens is not a gate.
 """
 import json
+import os
 import re
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import modelctl_nightlane as nl
+
+_GPU_LOCK_TMP = None
+
+
+def setUpModule():
+    """Every run_job() here takes the real GPU lock unless one is
+    injected. Redirect it: a single-file run of this test must not flock
+    the path the live night lane and `modelctl lane gpu-lock` use."""
+    global _GPU_LOCK_TMP
+    _GPU_LOCK_TMP = tempfile.mkdtemp(prefix="nightlane-gpu-lock-")
+    os.environ["MODELCTL_GPU_LOCK"] = str(Path(_GPU_LOCK_TMP) / "gpu.lock")
+
+
+def tearDownModule():
+    os.environ.pop("MODELCTL_GPU_LOCK", None)
+    shutil.rmtree(_GPU_LOCK_TMP, ignore_errors=True)
 
 RPC_PAIRS = ["ornith-rpc-criterion-2026-08-02",
              "qwen122b-remote-experts-hypothesis-2026-08-02"]
@@ -493,6 +512,71 @@ class TestTheOffloadFloor(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertTrue(any("below the 32 floor" in v
                             for v in record["violations"]))
+
+
+class TestGpuLockIsHeld(unittest.TestCase):
+    """The night lane and a session's lane bench are separate schedulers
+    that know nothing about each other. The lock is the only thing that
+    stops them measuring each other."""
+
+    def _job(self):
+        return nl.job_by_id("re-anchor-c1-c2-c3-2026-08-02")
+
+    def test_every_measurement_happens_inside_the_lock(self):
+        events = []
+
+        class FakeLock:
+            def __init__(self, timeout=None, note=None):
+                self.note = note
+
+            def __enter__(self):
+                events.append(("acquired", self.note))
+                return self
+
+            def __exit__(self, *exc):
+                events.append(("released", None))
+                return False
+
+        nl.run_job(self._job(),
+                   lambda arm, i, slot: events.append(("measure", arm.name))
+                   or {"generation_tps": 5.0},
+                   clock=lambda: 0.0, gpu_lock=FakeLock)
+
+        self.assertEqual(events[0][0], "acquired")
+        self.assertEqual(events[-1][0], "released")
+        self.assertIn("night lane", events[0][1])
+        self.assertTrue(any(e[0] == "measure" for e in events))
+
+    def test_it_takes_the_same_lock_modelctl_lane_gpu_lock_takes(self):
+        import modelctl_lanes
+        with mock.patch.object(modelctl_lanes, "gpu_lock") as fake:
+            nl.run_job(self._job(), lambda *a: {"generation_tps": 5.0},
+                       clock=lambda: 0.0)
+        fake.assert_called_once()
+        self.assertEqual(fake.call_args.kwargs["timeout"],
+                         nl.GPU_LOCK_WAIT_SECONDS)
+
+    def test_a_held_lock_is_a_refusal_and_nothing_is_measured(self):
+        import modelctl_lanes
+        calls = []
+        with modelctl_lanes.gpu_lock(note="a lane bench"):
+            record = nl.run_job(self._job(),
+                                lambda *a: calls.append(a) or {},
+                                clock=lambda: 0.0, gpu_lock_wait=0.2)
+        self.assertEqual(record["status"], "refused")
+        self.assertEqual(calls, [])
+        self.assertTrue(any("GPU lock is held" in v
+                            for v in record["violations"]))
+
+    def test_a_job_that_cannot_run_refuses_without_taking_the_lock(self):
+        job = nl.NightLaneJob(id="x", title="t", question="q", criterion="c",
+                              measures=("m",), mode="paired", pairs=2,
+                              arms=(nl.Arm(name="only", profile="p"),))
+        import modelctl_lanes
+        with mock.patch.object(modelctl_lanes, "gpu_lock") as fake:
+            record = nl.run_job(job, lambda *a: {}, clock=lambda: 0.0)
+        self.assertEqual(record["status"], "refused")
+        fake.assert_not_called()
 
 
 class TestRunJob(unittest.TestCase):
