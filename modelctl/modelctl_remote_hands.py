@@ -54,10 +54,12 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import modelctl_fsutil
+import modelctl_remote_hands_oauth as oauth
 from modelctl_paths import STATE_DIR
 
 SERVER_NAME = "modelctl-remote-hands"
@@ -666,6 +668,25 @@ class _Handler(BaseHTTPRequestHandler):
 
     # --- plumbing ---------------------------------------------------------
 
+    def _base(self):
+        return oauth.base_url(self.headers.get("Host"))
+
+    def _send_json(self, code, payload, extra=None):
+        self._send(code, json.dumps(payload).encode(), extra=extra)
+
+    def _form(self):
+        """A urlencoded request body as a flat dict. The token endpoint
+        must accept application/x-www-form-urlencoded per RFC 6749 --
+        Claude sends both the code exchange and refreshes that way, and a
+        JSON-only parser answers 415 and strands the connection."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(min(length, 64 * 1024)) if length else b""
+        return {k: v[0] for k, v in urllib.parse.parse_qs(
+            raw.decode("utf-8", "replace"), keep_blank_values=True).items()}
+
     def log_message(self, fmt, *args):
         # journalctl gets method/path/status; the audit log gets the tool
         # calls. Neither ever gets a header value.
@@ -693,26 +714,181 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _unauthorized(self):
+        """401 with the header that starts the OAuth flow.
+
+        `resource_metadata` is what Claude follows to discover this
+        server's authorization server; without it, an unauthenticated
+        connector attempt is a dead end rather than a Connect card. The
+        static-token path produces the same 401, so a client that has a
+        header credential and got it wrong sees the same thing."""
         audit("-", "unauthorized", args=None, peer=self._peer(),
               detail=f"{self.command} {self.path}")
-        body = json.dumps({"error": "unauthorized"}).encode()
-        self._send(401, body, extra={
-            "WWW-Authenticate": 'Bearer realm="modelctl-remote-hands"'})
+        self._send_json(401, {"error": "invalid_token",
+                              "error_description": "Authentication required"},
+                        extra={"WWW-Authenticate":
+                               oauth.www_authenticate(self._base(), MCP_PATH)})
 
     def _check_auth(self):
+        """Either credential opens the door.
+
+        The static header token stays because it is what works the day
+        the `static_headers` beta reaches this account, and an OAuth
+        access token because that is what works today. Neither is
+        weakened by the other's presence: both are unguessable secrets
+        and both are checked before routing."""
         if authorized(self.headers, self.token):
+            return True
+        presented = presented_credentials(self.headers)
+        if any(oauth.valid_access_token(c) for c in presented):
             return True
         self._unauthorized()
         return False
 
     # --- methods ----------------------------------------------------------
 
+    # --- OAuth surface ----------------------------------------------------
+    # These are the only unauthenticated paths, and they have to be: a
+    # client with no credential yet is exactly who fetches discovery and
+    # walks the consent flow. Everything they expose is either public by
+    # design (the metadata documents) or gated on a secret the caller
+    # must already hold (the consent form takes the operator token; the
+    # token endpoint takes a PKCE verifier for a code it was issued).
+
+    def _route_oauth_get(self, path, query):
+        base = self._base()
+        if path in ("/.well-known/oauth-protected-resource",
+                    f"/.well-known/oauth-protected-resource{MCP_PATH}"):
+            self._send_json(200, oauth.protected_resource_metadata(
+                base, MCP_PATH))
+            return True
+        if path in ("/.well-known/oauth-authorization-server",
+                    f"/.well-known/oauth-authorization-server{MCP_PATH}"):
+            self._send_json(200, oauth.authorization_server_metadata(base))
+            return True
+        if path == "/authorize":
+            self._authorize_page(query)
+            return True
+        return False
+
+    def _authorize_page(self, query):
+        params = {k: v[0] for k, v in query.items()}
+        try:
+            oauth.validate_authorize(params)
+            oauth.resolve_client(params.get("client_id"),
+                                 params.get("redirect_uri"))
+        except oauth.OAuthError as e:
+            # Rendered as a page, not redirected: an invalid client or
+            # redirect_uri is exactly the case where bouncing the user
+            # onward would be the vulnerability.
+            audit("oauth/authorize", "denied", args=params, peer=self._peer(),
+                  detail=f"{e.code}: {e.description}")
+            self._send(400, f"<h1>{e.code}</h1><p>{oauth._esc(e.description)}"
+                            f"</p>".encode(), content_type="text/html")
+            return
+        audit("oauth/authorize", "ok", args=params, peer=self._peer(),
+              detail=params.get("client_id"))
+        html = oauth.consent_html(params["client_id"], params["redirect_uri"],
+                                  oauth.authorize_params(params))
+        self._send(200, html.encode(), content_type="text/html")
+
+    def _authorize_submit(self):
+        form = self._form()
+        supplied = form.pop("operator_token", "")
+        try:
+            oauth.validate_authorize(form)
+            oauth.resolve_client(form.get("client_id"),
+                                 form.get("redirect_uri"))
+        except oauth.OAuthError as e:
+            audit("oauth/consent", "denied", args=form, peer=self._peer(),
+                  detail=f"{e.code}: {e.description}")
+            self._send(400, f"<h1>{e.code}</h1>".encode(),
+                       content_type="text/html")
+            return
+        token = self.token if self.token is not None else read_token()
+        if not token or not supplied or not secrets.compare_digest(
+                supplied, token):
+            # Re-render rather than redirect: a denied consent must not
+            # hand the client anything, and the operator may simply have
+            # pasted the wrong thing.
+            audit("oauth/consent", "denied", args=form, peer=self._peer(),
+                  detail="operator token did not match")
+            html = oauth.consent_html(form["client_id"], form["redirect_uri"],
+                                      oauth.authorize_params(form),
+                                      error="That token did not match.")
+            self._send(401, html.encode(), content_type="text/html")
+            return
+        code = oauth.create_code(form["client_id"], form["redirect_uri"],
+                                 form["code_challenge"])
+        audit("oauth/consent", "ok", args=form, peer=self._peer(),
+              detail=form.get("client_id"))
+        self._send(302, b"", extra={
+            "Location": oauth.redirect_with_code(form["redirect_uri"], code,
+                                                 form.get("state"))})
+
+    def _token_endpoint(self):
+        form = self._form()
+        grant = form.get("grant_type")
+        try:
+            if grant == "authorization_code":
+                entry = oauth.redeem_code(
+                    form.get("code"), form.get("client_id"),
+                    form.get("redirect_uri"), form.get("code_verifier"))
+                tokens = oauth.issue_tokens(entry["client_id"],
+                                            entry.get("scope"))
+                outcome = "oauth/token"
+            elif grant == "refresh_token":
+                tokens = oauth.refresh_tokens(form.get("refresh_token"),
+                                              form.get("client_id"))
+                outcome = "oauth/refresh"
+            else:
+                raise oauth.OAuthError("unsupported_grant_type",
+                                       f"unsupported grant_type: {grant}")
+        except oauth.OAuthError as e:
+            audit(f"oauth/{grant or 'token'}", "denied", args=form,
+                  peer=self._peer(), detail=f"{e.code}: {e.description}")
+            self._send_json(e.status, e.body(),
+                            extra={"Cache-Control": "no-store"})
+            return
+        audit(outcome, "ok", args=form, peer=self._peer())
+        self._send_json(200, tokens, extra={"Cache-Control": "no-store"})
+
+    def _register_endpoint(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(min(length, 64 * 1024)) if length else b"{}"
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            payload = None
+        try:
+            if not isinstance(payload, dict):
+                raise oauth.OAuthError("invalid_client_metadata",
+                                       "body must be a JSON object")
+            result = oauth.register_client(payload)
+        except oauth.OAuthError as e:
+            audit("oauth/register", "denied", args=payload, peer=self._peer(),
+                  detail=f"{e.code}: {e.description}")
+            self._send_json(e.status, e.body())
+            return
+        audit("oauth/register", "ok", args=payload, peer=self._peer(),
+              detail=result["client_id"])
+        self._send_json(201, result)
+
+    # --- methods ----------------------------------------------------------
+
     def do_GET(self):
+        path = self.path.split("?")[0]
+        query = urllib.parse.parse_qs(
+            self.path.partition("?")[2], keep_blank_values=True)
+        if self._route_oauth_get(path, query):
+            return
         # Auth first, then routing: an unauthenticated caller learns
         # nothing about which paths exist here.
         if not self._check_auth():
             return
-        if self.path.split("?")[0] == MCP_PATH:
+        if path == MCP_PATH:
             # No server-initiated SSE stream. The spec allows 405 for
             # exactly this case, and clients fall back to POST-only.
             self._send(405, b"", extra={"Allow": "POST, DELETE"})
@@ -726,9 +902,22 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(204)
 
     def do_POST(self):
+        path = self.path.split("?")[0]
+        # The three unauthenticated POSTs, routed before the auth gate
+        # for the same reason as their GET counterparts: they are how a
+        # caller with no credential gets one.
+        if path == "/authorize":
+            self._authorize_submit()
+            return
+        if path == "/token":
+            self._token_endpoint()
+            return
+        if path == "/register":
+            self._register_endpoint()
+            return
         if not self._check_auth():
             return
-        if self.path.split("?")[0] != MCP_PATH:
+        if path != MCP_PATH:
             self._send(404, json.dumps({"error": "not found"}).encode())
             return
         try:
@@ -1009,6 +1198,7 @@ def status(port=DEFAULT_PORT, host=DEFAULT_HOST, runner=None):
         "token_path": str(token_path()),
         "audit_path": str(audit_path()),
         "allow_roots": [str(r) for r in allow_roots()],
+        "oauth": oauth.grant_summary(),
         "recent": audit_tail(5),
     }
 

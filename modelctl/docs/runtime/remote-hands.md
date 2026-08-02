@@ -49,33 +49,37 @@ Requirements verified against Anthropic's connector docs on 2026-08-02.
 They drift — re-read them if something below does not match what the
 dialog shows you.
 
+There are two ways in, and which one you get depends on your account.
+**OAuth is the one that works on this account today.**
+
 1. `modelctl remote-hands on`. It prints the public URL, which looks
    like `https://aaron-2.tailb51646.ts.net/mcp`.
 2. On claude.ai: **Settings → Connectors → Add custom connector**.
 3. Paste the URL. Nothing goes in the query string — see below.
-4. Open the **Request headers** section. Pick `authorization` from the
-   list.
-5. Enter the value **including the scheme**: `Bearer <token>`, with the
+4. Leave OAuth Client ID / Client Secret **empty** — those configure a
+   client for *your* authorization server, and this server registers
+   Claude automatically.
+5. **Add**, then enable it per-conversation with the **+** button.
+6. The first tool call shows a **Connect** card. Clicking it opens the
+   rig's own consent page, which asks for the remote-hands token.
+   Paste it. That is the only time you need it.
+
+### If the dialog has a Request headers section
+
+Then `static_headers` is enabled on your account and you can skip the
+consent step entirely:
+
+1. Open **Request headers**, pick `authorization`.
+2. Enter the value **including the scheme**: `Bearer <token>`, with the
    space. Claude sends the value verbatim and adds no prefix of its own,
-   so a bare token arrives as `Authorization: <token>` and this server
-   rejects it. `x-api-key` and `x-auth-token` are also accepted, and
-   those take the bare token with no prefix.
-6. Mark the header **Required**, so a connection with no stored value
-   fails rather than reaching the server unauthenticated.
-7. **Add**, then enable it per-conversation with the **+** button.
+   so a bare token arrives as `Authorization: <token>` and is rejected.
+   `x-api-key` and `x-auth-token` take the bare token with no prefix.
+3. Mark it **Required**, so a connection with no stored value fails
+   rather than reaching the server unauthenticated.
 
-### The beta caveat that decides whether this works at all
-
-Request-header authentication (`static_headers`) is **in beta**:
-"being slowly rolled out to customers; contact Anthropic for early
-access." If the **Request headers** section is not in your dialog, the
-only other thing it offers is OAuth, and this server does not speak
-OAuth.
-
-**In that case, do not add the connector and do not leave the funnel
-up.** An endpoint with a shell on it, published to the internet, whose
-credential the client cannot send is an endpoint no one should be able
-to reach. `modelctl remote-hands off` and wait for the rollout.
+Both credentials work at once; neither disables the other. Header auth
+is in beta ("being slowly rolled out to customers; contact Anthropic for
+early access"), which is why OAuth exists here at all.
 
 ### Why the token is never in the URL
 
@@ -85,6 +89,73 @@ security vulnerability: URLs land in server logs, proxies and browsing
 history. There is no query-parameter mode in this server to fall back
 on, deliberately — the fallback is the thing you would reach for on a
 bad day.
+
+---
+
+## How the OAuth side works
+
+The rig is its own authorization server. It is smaller than that sounds
+because of **CIMD** (Client ID Metadata Document): Claude's `client_id`
+is an HTTPS URL that dereferences to its own registration metadata, so
+there is no client database and no registration round-trip in the normal
+path. Claude selects CIMD only when the metadata advertises **both**
+`client_id_metadata_document_supported: true` **and** `"none"` in
+`token_endpoint_auth_methods_supported`; if either is missing it falls
+back to looking for a `registration_endpoint`, so a minimal RFC 7591
+`/register` is implemented too — purely so a CIMD selection failure is
+not a dead connector.
+
+| endpoint | auth |
+|---|---|
+| `/.well-known/oauth-protected-resource[/mcp]` | none (public by design) |
+| `/.well-known/oauth-authorization-server` | none (public by design) |
+| `GET /authorize` | none — renders the consent page |
+| `POST /authorize` | the remote-hands token, in the form body |
+| `POST /token` | the PKCE verifier for a code it issued |
+| `POST /register` | none, capped at 50 clients, oldest-out |
+| `/mcp` | the remote-hands token **or** an OAuth access token |
+
+These are the only unauthenticated paths, and they have to be — a client
+with no credential yet is exactly who fetches discovery and walks the
+consent flow.
+
+Details worth knowing when something breaks:
+
+- **You** are the user being authenticated, at the consent screen, with
+  the same 32-byte token the header path uses. It is posted in a form
+  body, never a URL.
+- The consent screen shows the **host of the `client_id` URL**, not the
+  document's `client_name`. The document is self-asserted; the host is
+  the one fact the fetch established.
+- Non-loopback redirect URIs must be same-origin with the `client_id`
+  URL. Without that rule a self-referential document could name someone
+  else's callback and make `/authorize` an open redirect. Loopback URIs
+  are matched with the **port ignored** (RFC 8252 §7.3), because native
+  clients bind an ephemeral port.
+- PKCE **S256 only**; `plain` is refused. Codes are single-use, live 60
+  seconds, and are popped before the PKCE check so a rejected attempt
+  cannot be retried.
+- Refresh tokens rotate: the old one is invalidated in the same write
+  that issues the new one. An unknown or expired one returns
+  `invalid_grant` specifically — Claude only re-authorizes on that code,
+  and anything else strands the connection.
+- Access and refresh tokens are stored **as SHA-256 hashes** in
+  `remote-hands-oauth.json` (0600), so the grant file is not a list of
+  live credentials at rest. Codes are in memory only and do not survive
+  a restart.
+- Claude caches discovery documents globally, keyed by URL, for about
+  five minutes. Metadata is computed per-request from the `Host` header
+  rather than stored, so there is no second copy to go stale — but
+  expect a delay after changing the hostname. Override with
+  `MODELCTL_REMOTE_HANDS_BASE_URL` if a proxy rewrites `Host`.
+- Claude allows ten seconds for discovery and token calls, thirty for
+  refresh. Everything is local except the one CIMD fetch, which is
+  bounded at ten seconds and 128 KiB.
+
+Revoking access: rotating the operator token stops new consents, but
+already-issued grants survive it. Clear those by deleting
+`remote-hands-oauth.json`, or take the whole thing down with
+`remote-hands off`.
 
 ---
 
@@ -165,6 +236,9 @@ Every tool call and every rejected request appends one JSON line to
 ```
 
 Outcomes are `ok`, `denied`, `error`, `unknown-tool` and `unauthorized`.
+OAuth steps appear as `oauth/authorize`, `oauth/consent`, `oauth/token`,
+`oauth/refresh` and `oauth/register` — so a failed consent, a replayed
+code and a rotated refresh token are all visible after the fact.
 
 The **arguments are not logged**, only a digest of them: `write_file`
 carries file contents and `run_command` can carry a secret, and the log
