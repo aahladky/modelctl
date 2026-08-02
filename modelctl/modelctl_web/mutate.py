@@ -388,6 +388,45 @@ def submit_matrix_apply(runner):
     return runner.submit("mutation", "apply managed matrix", fn)
 
 
+def submit_fleet_budget(runner, node, device, budget_bytes):
+    """Set one fleet device's operator budget.
+
+    Thin on purpose: every rule about what a budget may be -- the
+    ceiling, the lock, which stored-input plans the change stales --
+    lives in modelctl_fleet.set_device_budget, which is also what
+    `modelctl fleet set-budget` calls. A second copy of the ceiling
+    check on this side is a second copy that can drift from the one that
+    actually guards the write.
+
+    The route ahead of this refuses an over-ceiling budget synchronously
+    so the operator gets the number to ask for instead of a failed job;
+    the setter re-checks it under the lock, because between that check
+    and this write another writer may have lowered the cap.
+    """
+    def fn(ctx):
+        import modelctl_fleet
+        result = modelctl_fleet.set_device_budget(node, device, budget_bytes)
+        gib = budget_bytes / (1 << 30)
+        if result["changed"]:
+            ctx.log(f"{node}/{device} budget -> {gib:.2f} GiB "
+                    f"(ceiling {result['ceiling_bytes'] / (1 << 30):.2f} GiB, "
+                    f"{result['ceiling_basis']})")
+        else:
+            ctx.log(f"{node}/{device} budget already {gib:.2f} GiB; "
+                    f"nothing written")
+        for p in result["staled_profiles"]:
+            ctx.log(f"stale planning inputs: {p['name']} -- its stored plan "
+                    f"was built against the old budget; replan to use the new "
+                    f"one")
+        if not result["staled_profiles"]:
+            ctx.log("no stored-input plans depended on the old budget")
+        return result
+    return runner.submit("fleet-budget", f"budget {node}/{device}", fn,
+                         payload={"node": node, "device": device,
+                                  "budget_bytes": int(budget_bytes)},
+                         lane="mutation")
+
+
 def submit_moe_cache(runner, name, moe_cache):
     """Save moe_cache section for a profile, regenerate artifacts, and sync.
 

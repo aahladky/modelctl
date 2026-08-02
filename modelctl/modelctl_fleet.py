@@ -67,23 +67,43 @@ PRESENCE_TTL_SECONDS = 900
 
 @dataclass(frozen=True)
 class FleetDevice:
-    """One device a node offers, plus what we are willing to use of it."""
+    """One device a node offers, plus what we are willing to use of it.
+
+    Three different numbers, and conflating any two of them is a bug:
+
+    * `total_bytes` is what the node reports the device physically has;
+    * `cap_bytes` is the hard limit the node's own OS enforces on the
+      unit serving this device -- systemd `MemoryMax` for a cpu unit. It
+      is operator-recorded, not probed: reading it means asking another
+      machine's service manager, and nothing in the planning path may
+      shell out over SSH. Zero means "not recorded", which reads as "the
+      device total is the only limit we know of";
+    * `budget_bytes` is what we are willing to place, which admission
+      charges. It is the only one of the three an operator edits here.
+
+    A budget above the cap is not a policy, it is a mistake that becomes
+    an OOM kill on the far side of a 2.5GbE link -- `device_ceiling`
+    exists so the setter can refuse it before it is written.
+    """
     name: str            # remote-side device name as the client sees it
     kind: str            # "gpu" | "cpu"
     total_bytes: int     # what the node reports it has
     budget_bytes: int    # operator ceiling; admission never exceeds this
+    cap_bytes: int = 0   # OS-enforced limit on the serving unit (0 = unknown)
 
     def to_dict(self):
         return {"name": self.name, "kind": self.kind,
                 "total_bytes": self.total_bytes,
-                "budget_bytes": self.budget_bytes}
+                "budget_bytes": self.budget_bytes,
+                "cap_bytes": self.cap_bytes}
 
     @staticmethod
     def from_dict(d):
         return FleetDevice(
             name=d["name"], kind=d.get("kind", "gpu"),
             total_bytes=int(d.get("total_bytes", 0)),
-            budget_bytes=int(d.get("budget_bytes", 0)))
+            budget_bytes=int(d.get("budget_bytes", 0)),
+            cap_bytes=int(d.get("cap_bytes", 0)))
 
 
 @dataclass(frozen=True)
@@ -400,6 +420,203 @@ def admission_budgets(nodes=None, presence=None, now=None) -> dict:
         for d in n.devices:
             if d.budget_bytes > 0:
                 out[admission_key(n.name, d.name)] = int(d.budget_bytes)
+    return out
+
+
+def budget_input(nodes=None) -> dict:
+    """{admission_key: budget_bytes} for every ENABLED node's devices.
+
+    The planning-input twin of `admission_budgets`, and deliberately not
+    the same function. Admission asks "what may this plan spend right
+    now", so it reads presence and a node nobody can reach contributes
+    nothing. A recorded planning input asks "what were the operator's
+    declared ceilings when this plan was built", which must not move
+    because a laptop was closed: presence in the record would make every
+    probe look like an input change and every profile permanently
+    drifted. So this reads the registry only.
+    """
+    out = {}
+    for n in enabled_nodes(nodes):
+        for d in n.devices:
+            out[admission_key(n.name, d.name)] = int(d.budget_bytes)
+    return out
+
+
+# --- the ceiling, and the one writer of a budget --------------------
+
+# What a budget may not claim, over and above the OS-enforced cap. The
+# ggml-rpc-server process is not only its tensor buffers: it has a
+# resident set of its own (0.4-1 GiB observed on ph16-71), it copies
+# tensors through send/recv staging buffers, and on a cpu unit it shares
+# the cgroup with nothing else, so overshooting is an OOM kill rather
+# than a swap-out. A flat floor covers the small devices, the fraction
+# covers the large ones.
+HEADROOM_FRACTION = 0.05
+HEADROOM_MIN_BYTES = 1 << 30
+
+
+def runtime_headroom(base_bytes: int) -> int:
+    return max(HEADROOM_MIN_BYTES, int(base_bytes * HEADROOM_FRACTION))
+
+
+def device_ceiling(device) -> tuple:
+    """(ceiling_bytes, basis) -- the largest budget this device may hold.
+
+    The basis is named because a refusal that says only "too big" leaves
+    the operator guessing which of three numbers to go look at:
+
+    * a cpu device is limited by the systemd `MemoryMax` on its unit,
+      because that is what will actually kill it, and the machine's RAM
+      total is irrelevant next to a cgroup limit;
+    * a gpu device is limited by what the node reports the card has;
+    * a cpu device with no recorded cap falls back to the reported
+      total and says so -- a guess would silently authorize a budget the
+      cgroup will refuse at load time.
+    """
+    if device.kind == "cpu" and device.cap_bytes > 0:
+        base, basis = device.cap_bytes, "systemd MemoryMax"
+    elif device.kind == "cpu":
+        base, basis = device.total_bytes, "reported total (no MemoryMax recorded)"
+    else:
+        base, basis = device.total_bytes, "reported device total"
+    return max(0, base - runtime_headroom(base)), basis
+
+
+def _find(nodes, node_name, device_name) -> tuple:
+    for i, n in enumerate(nodes):
+        if n.name != node_name:
+            continue
+        for j, d in enumerate(n.devices):
+            if d.name == device_name:
+                return i, j
+        raise KeyError(
+            f"node '{node_name}' has no device '{device_name}' "
+            f"(it has: {', '.join(d.name for d in n.devices) or 'none'})")
+    raise KeyError(f"no fleet node named '{node_name}'")
+
+
+def _replace_device(nodes, i, j, **changes) -> list:
+    node = nodes[i]
+    devices = list(node.devices)
+    devices[j] = replace(devices[j], **changes)
+    out = list(nodes)
+    out[i] = replace(node, devices=tuple(devices))
+    return out
+
+
+def set_device_budget(node_name, device_name, budget_bytes, path=None) -> dict:
+    """Set one device's operator budget. The only writer of that number.
+
+    Read-modify-write under `state_lock`, so two concurrent setters
+    serialize instead of each writing a whole registry computed from the
+    same stale read (which would silently drop one of the two edits --
+    the registry is one JSON document, not a row per device).
+
+    Refuses a budget over `device_ceiling`, naming the ceiling and its
+    basis. Returns the change, including the profiles whose recorded
+    planning inputs no longer match the fleet budgets in force -- a
+    budget IS a planning input, so moving one stales every stored-input
+    plan built against the old number exactly as a hardware change does.
+    """
+    budget_bytes = int(budget_bytes)
+    if budget_bytes < 0:
+        raise ValueError(f"budget must not be negative, got {budget_bytes}")
+    with modelctl_fsutil.state_lock():
+        nodes = load_fleet(path)
+        i, j = _find(nodes, node_name, device_name)
+        device = nodes[i].devices[j]
+        ceiling, basis = device_ceiling(device)
+        if budget_bytes > ceiling:
+            raise ValueError(
+                f"budget {_gib(budget_bytes)} GiB exceeds the ceiling for "
+                f"{node_name}/{device_name}: {_gib(ceiling)} GiB "
+                f"({basis} {_gib(_ceiling_base(device))} GiB minus "
+                f"{_gib(runtime_headroom(_ceiling_base(device)))} GiB runtime "
+                f"headroom). Raise the cap on the node first, or ask for less.")
+        previous = device.budget_bytes
+        if budget_bytes != previous:
+            save_fleet(_replace_device(nodes, i, j,
+                                       budget_bytes=budget_bytes), path)
+        staled = stale_input_profiles()
+    return {"node": node_name, "device": device_name,
+            "previous_bytes": previous, "budget_bytes": budget_bytes,
+            "ceiling_bytes": ceiling, "ceiling_basis": basis,
+            "changed": budget_bytes != previous,
+            "staled_profiles": staled}
+
+
+def set_device_cap(node_name, device_name, cap_bytes, path=None) -> dict:
+    """Record the OS-enforced limit on the unit serving one device.
+
+    Separate from `set_device_budget` because the cap and the budget are
+    different facts with different owners: the cap is what the node's
+    service manager enforces (an operator changed it over there, this
+    only writes down what it now says), the budget is what we choose to
+    spend under it. Recording a cap never moves a budget -- but a cap
+    BELOW the budget in force is refused, because writing it would leave
+    a registry whose own setter could not reproduce it.
+    """
+    cap_bytes = int(cap_bytes)
+    if cap_bytes < 0:
+        raise ValueError(f"cap must not be negative, got {cap_bytes}")
+    with modelctl_fsutil.state_lock():
+        nodes = load_fleet(path)
+        i, j = _find(nodes, node_name, device_name)
+        device = nodes[i].devices[j]
+        ceiling, _ = device_ceiling(replace(device, cap_bytes=cap_bytes))
+        if device.budget_bytes > ceiling:
+            raise ValueError(
+                f"cap {_gib(cap_bytes)} GiB would put the ceiling at "
+                f"{_gib(ceiling)} GiB, below {node_name}/{device_name}'s "
+                f"budget of {_gib(device.budget_bytes)} GiB; lower the "
+                f"budget first")
+        previous = device.cap_bytes
+        if cap_bytes != previous:
+            save_fleet(_replace_device(nodes, i, j, cap_bytes=cap_bytes), path)
+    return {"node": node_name, "device": device_name,
+            "previous_bytes": previous, "cap_bytes": cap_bytes,
+            "ceiling_bytes": ceiling, "changed": cap_bytes != previous}
+
+
+def _ceiling_base(device) -> int:
+    if device.kind == "cpu" and device.cap_bytes > 0:
+        return device.cap_bytes
+    return device.total_bytes
+
+
+def _gib(n) -> str:
+    return f"{n / (1 << 30):.2f}"
+
+
+def stale_input_profiles(live=None) -> list:
+    """Profiles whose recorded planning inputs disagree with the fleet
+    budgets in force now.
+
+    Stored planning inputs are sticky on purpose -- that is the whole
+    point of recording them -- so a budget change does not rewrite any
+    profile. What it does is make the record disagree with the machine,
+    and this is the list of profiles where it now does. A profile whose
+    record predates fleet budgets makes no claim and is not stale; a
+    profile with no recorded inputs at all has nothing to invalidate.
+    """
+    import modelctl
+    import modelctl_tiers
+    live = budget_input() if live is None else live
+    out = []
+    for profile in modelctl._read_all_profiles():
+        stored = modelctl_tiers.stored_planning_inputs(profile)
+        if not stored:
+            continue
+        recorded = modelctl_tiers.planning_input_fleet_budgets(stored)
+        if recorded is None:
+            continue  # recorded before budgets were an input: no claim
+        drift = {k: (recorded.get(k), live.get(k))
+                 for k in set(recorded) | set(live)
+                 if recorded.get(k) != live.get(k)}
+        if drift:
+            out.append({"name": profile.get("name", ""),
+                        "changed": {k: {"recorded": a, "live": b}
+                                    for k, (a, b) in sorted(drift.items())}})
     return out
 
 

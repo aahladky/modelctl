@@ -332,6 +332,15 @@ def build_launch_command(
             stored, modelctl_display.recorded_mode())
         if mismatch:
             warnings.append(mismatch)
+    # Same treatment for a remote budget that moved under a stored plan:
+    # the plan places a layer range on a node that offered N GiB, and the
+    # operator has since declared a different N. Registry read only -- no
+    # probe, no socket, on the launch path.
+    import modelctl_fleet
+    fleet_drift = modelctl_tiers.fleet_budget_mismatch(
+        stored, modelctl_fleet.budget_input())
+    if fleet_drift:
+        warnings.append(fleet_drift)
 
     # Build the command argv.
     from modelctl_backends import get_backend

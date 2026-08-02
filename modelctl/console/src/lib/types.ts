@@ -561,3 +561,88 @@ export interface SaveResult {
   warnings: string[];
   messages: string[];
 }
+
+/* ---- fleet: the local node and the remote RPC nodes, one shape ----
+   Presence is tri-state and not a boolean on purpose: PIN_MISMATCH is a
+   node that answers a handshake immediately while being unusable, and
+   collapsing it into "up" is exactly the render this view exists to
+   prevent (see modelctl_web/fleet.py). */
+
+export type PresenceState = "PRESENT" | "STALE" | "PIN_MISMATCH";
+
+export interface FleetDeviceRow {
+  name: string;
+  kind: string;
+  label?: string;
+  budget_bytes: number;
+  total_bytes: number;
+  cap_bytes: number;
+  ceiling_bytes: number;
+  ceiling_basis: string;
+  admission_key: string;
+  editable: boolean;
+  edit_note: string;
+}
+
+export interface FleetNodeRow {
+  name: string;
+  location: "local" | "remote";
+  host: string;
+  port: number | null;
+  endpoint: string;
+  variant: string;
+  enabled: boolean;
+  note: string;
+  pin: { node: string; expected: string; agrees: boolean };
+  presence: {
+    state: PresenceState;
+    detail: string;
+    reachable: boolean;
+    protocol: string;
+    probed_at: number | null;
+    ttl_seconds: number;
+  };
+  devices: FleetDeviceRow[];
+}
+
+export interface NightLaneRow {
+  id: string;
+  title: string;
+  enabled: boolean;
+  mode: string;
+  registered: string;
+  requires_nodes: string[];
+  arms: { name: string; profile: string; requires_nodes: string[] }[];
+}
+
+export interface StaleProfileRow {
+  name: string;
+  changed: Record<string, { recorded: number | null; live: number | null }>;
+}
+
+export interface FleetView {
+  nodes: FleetNodeRow[];
+  night_lane: NightLaneRow[];
+  stale_profiles: StaleProfileRow[];
+  local_pin: string;
+  errors: Record<string, string>;
+}
+
+export interface ProbeResult {
+  probed: {
+    node: string;
+    endpoint: string;
+    reachable: boolean;
+    protocol: string;
+    pin: string;
+    pin_agrees: boolean;
+    detail: string;
+    probed_at: number;
+  }[];
+}
+
+export interface BudgetSubmitted {
+  job_id: string;
+  budget_bytes: number;
+  ceiling_bytes: number;
+}

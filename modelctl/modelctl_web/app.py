@@ -1123,6 +1123,116 @@ def create_app(token=None, store=None, runner=None, collector=None,
     def api_v2_unload_all():
         return {"job_id": mutate.submit_unload_all(runner)}
 
+    # ---- the fleet: local node + remote RPC nodes ------------------------
+
+    @app.get("/api/v2/fleet")
+    def api_v2_fleet():
+        """Every node as one list. A read: opens no socket.
+
+        Presence here is what was last *recorded*. Refreshing it is the
+        explicit POST below, because a GET that reaches out over the LAN
+        to two machines is a GET that writes -- state and a few seconds
+        of latency both.
+        """
+        from . import fleet as fleet_view
+        return fleet_view.fleet_view()
+
+    def _probe_and_record(nodes):
+        """Probe `nodes` and merge the results into the presence record.
+
+        Merge, not replace: probing one node must not erase what is known
+        about the others, and save_presence writes the whole file.
+        """
+        import modelctl_fleet
+        import modelctl_fsutil
+        probes = [modelctl_fleet.probe_node(n) for n in nodes]
+        with modelctl_fsutil.state_lock():
+            recorded = modelctl_fleet.load_presence()
+            for pr in probes:
+                recorded[pr.node] = pr
+            modelctl_fleet.save_presence(list(recorded.values()))
+        return probes
+
+    @app.post("/api/v2/fleet/probe")
+    def api_v2_fleet_probe():
+        """Refresh presence for every enabled node.
+
+        Synchronous, for the reason cache/reset is: the page fires this
+        on open and renders the answer. A probe whose result arrives out
+        of band, minutes later, is the stale render it exists to
+        replace. Bounded by probe_node's own connect timeout.
+        """
+        import modelctl_fleet
+        nodes = modelctl_fleet.enabled_nodes()
+        try:
+            probes = _probe_and_record(nodes)
+        except OSError as e:
+            return JSONResponse(
+                {"error": f"presence could not be recorded: {e}"},
+                status_code=502)
+        return {"probed": [p.to_dict() for p in probes]}
+
+    @app.post("/api/v2/fleet/nodes/{node}/probe")
+    def api_v2_fleet_probe_node(node: str):
+        import modelctl_fleet
+        found = modelctl_fleet.node_by_name(node)
+        if found is None:
+            return JSONResponse({"error": f"no fleet node named '{node}'"},
+                                status_code=404)
+        try:
+            probes = _probe_and_record([found])
+        except OSError as e:
+            return JSONResponse(
+                {"error": f"presence could not be recorded: {e}"},
+                status_code=502)
+        return {"probed": [p.to_dict() for p in probes]}
+
+    @app.post("/api/v2/fleet/nodes/{node}/devices/{device}/budget")
+    async def api_v2_fleet_budget(node: str, device: str, request: Request):
+        """Edit one device's budget, through the one mutation entry.
+
+        The ceiling is checked here as well as inside the setter, and
+        the duplication is deliberate: this one exists so the operator
+        is told the number to ask for while the form is still open,
+        rather than watching a job fail. The setter's check under the
+        lock is the one that actually guards the write.
+        """
+        import modelctl_fleet
+        body, err = await _json_body(request)
+        if err:
+            return err
+        raw = body.get("budget_bytes")
+        try:
+            budget = int(raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"error": f"budget_bytes must be an integer, got {raw!r}"},
+                status_code=422)
+        if budget < 0:
+            return JSONResponse(
+                {"error": "budget_bytes must not be negative"},
+                status_code=422)
+        found = modelctl_fleet.node_by_name(node)
+        if found is None:
+            return JSONResponse({"error": f"no fleet node named '{node}'"},
+                                status_code=404)
+        match = [d for d in found.devices if d.name == device]
+        if not match:
+            return JSONResponse(
+                {"error": f"node '{node}' has no device '{device}'"},
+                status_code=404)
+        ceiling, basis = modelctl_fleet.device_ceiling(match[0])
+        if budget > ceiling:
+            return JSONResponse(
+                {"error": (f"budget {budget / (1 << 30):.2f} GiB exceeds the "
+                           f"ceiling for {node}/{device}: "
+                           f"{ceiling / (1 << 30):.2f} GiB ({basis})"),
+                 "ceiling_bytes": ceiling, "ceiling_basis": basis},
+                status_code=422)
+        return {"job_id": mutate.submit_fleet_budget(runner, node, device,
+                                                     budget),
+                "budget_bytes": budget, "ceiling_bytes": ceiling}
+
     # ---- the managed llama-swap routing matrix ---------------------------
 
     @app.get("/api/v2/settings/routing")

@@ -1,0 +1,67 @@
+========================================================================
+SCRATCH WALK -- console fleet surface
+state universe: /tmp/fleet-walk-8upr22z4
+console: 127.0.0.1:9500  (lane port block)
+MODELCTL_WEB_SCRATCH=1, all five redirections set
+========================================================================
+
+[liveness] console up, pid 926321, /healthz 200
+
+--- 1. the fleet view loads ---------------------------------
+GET /api/v2/fleet -> 200
+  rig (this machine)     local  PRESENT       pin_agrees=True 
+      SYCL0  budget  28.70 GiB  ceiling  31.89 GiB  total  31.89 GiB  (reported device total) editable=False
+      SYCL1  budget  10.74 GiB  ceiling  11.93 GiB  total  11.93 GiB  (reported device total) editable=False
+  ph16-71-cpu0           remote PRESENT       pin_agrees=True 
+      CPU    budget  16.00 GiB  ceiling  19.00 GiB  total  30.57 GiB  (systemd MemoryMax) editable=True
+  ph16-71-cuda0          remote STALE         pin_agrees=True never probed
+      CUDA0  budget  10.00 GiB  ceiling  10.60 GiB  total  11.60 GiB  (reported device total) editable=True
+  ph16-71-oldbuild       remote PIN_MISMATCH  pin_agrees=False node built at 111111111111, this checkout pins 85b7e6556b6b
+      CUDA0  budget   8.00 GiB  ceiling  10.60 GiB  total  11.60 GiB  (reported device total) editable=True
+
+--- 2. the three presence states ----------------------------
+  ph16-71-cpu0           PRESENT       OK
+  ph16-71-cuda0          STALE         OK
+  ph16-71-oldbuild       PIN_MISMATCH  OK
+  rendering: PRESENT -> chip ok, STALE -> chip warn, PIN_MISMATCH -> chip err
+  every non-PRESENT card also carries the 'widget stale' treatment, so a reachable wrong-commit node cannot read as available
+
+--- 3. night-lane pairs needing a node (READ-ONLY) ----------
+  ornith-rpc-criterion-2026-08-02              enabled=False needs=ph16-71-cuda0
+  qwen122b-remote-experts-hypothesis-2026-08-02 enabled=False needs=ph16-71-cuda0
+
+--- 4. budget edit within the ceiling, submitted ------------
+POST .../devices/CPU/budget  budget_bytes=19327352832 (18.00 GiB, under the 19.00 GiB ceiling)
+  -> 405 scratch-safe mode (MODELCTL_WEB_SCRATCH=1): this instance refuses mutations; POST /api/v2/fleet/nodes/ph16-71-cpu0/devices/CPU/budget would write state or drive the serving stack
+
+--- 5. over-ceiling edit ------------------------------------
+POST .../devices/CPU/budget  budget_bytes=26843545600 (25.00 GiB, over the 19.00 GiB ceiling)
+  -> 405 scratch-safe mode (MODELCTL_WEB_SCRATCH=1): this instance refuses mutations; POST /api/v2/fleet/nodes/ph16-71-cpu0/devices/CPU/budget would write state or drive the serving stack
+
+--- 6. probe writes are refused too -------------------------
+POST /api/v2/fleet/probe -> 405 scratch-safe mode (MODELCTL_WEB_SCRATCH=1): this instance refuses mutations; POST /api/v2/fleet/...
+POST /api/v2/fleet/nodes/ph16-71-cpu0/probe -> 405 scratch-safe mode (MODELCTL_WEB_SCRATCH=1): this instance refuses mutations; POST /api/v2/fleet/...
+
+--- 7. the SPA route serves the page ------------------------
+GET /v2/fleet -> 200, 880 bytes of SPA shell
+
+--- 7b. what the page says a budget change would stale ------
+  walk-dependent: {"RPC:ph16-71-cuda0:CUDA0": {"recorded": null, "live": 10737418240}, "RPC:ph16-71-oldbuild:CUDA0": {"recorded": null, "live": 8589934592}}
+
+[teardown] console pid 926321 stopped, rc=-15
+
+--- 8. the ceiling, against the same scratch state (CLI) ----
+$ modelctl fleet set-budget ph16-71-cpu0 CPU 26843545600   # 25 GiB
+  rc=2
+  refused: budget 25.00 GiB exceeds the ceiling for ph16-71-cpu0/CPU: 19.00 GiB (systemd MemoryMax 20.00 GiB minus 1.00 GiB runtime headroom). Raise the cap on the node first, or ask for less.
+$ modelctl fleet set-budget ph16-71-cpu0 CPU 19327352832   # 18 GiB
+  rc=0
+  ph16-71-cpu0/CPU budget: 16.00 GiB -> 18.00 GiB (ceiling 19.00 GiB, systemd MemoryMax)
+    stale planning inputs: walk-dependent
+  scratch registry now: budget 18.00 GiB
+
+--- 9. the live registry was never touched ------------------
+  ph16-71-cuda0          budget  10.00 GiB  cap   0.00 GiB
+  ph16-71-cpu0           budget  16.00 GiB  cap  20.00 GiB
+
+[teardown] scratch state universe /tmp/fleet-walk-8upr22z4 removed

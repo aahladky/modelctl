@@ -1,9 +1,9 @@
 import type {
-  AdmissionPreview, CacheResetResult, CancelResult, ConfigSaveResult,
-  GgufAnalysis, HistoryRow, JobRow, JobSubmitted, LogTail, ModelDetail,
-  ModelRow, PlanRow, RegisterData, RepoContents, RoutingMatrix, RunCommand,
-  RuntimePolicyView, SaveResult, SearchResult, SettingsOverview,
-  TierApplyResult, WizardDetail, WizardSummary,
+  AdmissionPreview, BudgetSubmitted, CacheResetResult, CancelResult,
+  ConfigSaveResult, FleetView, GgufAnalysis, HistoryRow, JobRow, JobSubmitted,
+  LogTail, ModelDetail, ModelRow, PlanRow, ProbeResult, RegisterData,
+  RepoContents, RoutingMatrix, RunCommand, RuntimePolicyView, SaveResult,
+  SearchResult, SettingsOverview, TierApplyResult, WizardDetail, WizardSummary,
 } from "./types";
 
 /* Server refusals (gates, scratch-safe mode, validation) answer with a
@@ -146,6 +146,22 @@ export const fetchRunCommand = (name: string) =>
   get<RunCommand>(`/api/v2/models/${enc(name)}/run-command`);
 
 export const fetchJob = (id: string) => get<JobRow>(`/api/v2/jobs/${enc(id)}`);
+
+/* ---- fleet ----
+   The read opens no socket; refreshing presence is the explicit POST,
+   which is why the page fires it on open rather than relying on the
+   GET to be fresh. The budget write rides the same mutation entry every
+   other phase-4 control does and answers with a job id. */
+
+export const fetchFleet = () => get<FleetView>("/api/v2/fleet");
+export const probeFleet = () => postJson<ProbeResult>("/api/v2/fleet/probe");
+export const probeNode = (node: string) =>
+  postJson<ProbeResult>(`/api/v2/fleet/nodes/${enc(node)}/probe`);
+export const setNodeBudget = (node: string, device: string,
+                              budget_bytes: number) =>
+  postJson<BudgetSubmitted>(
+    `/api/v2/fleet/nodes/${enc(node)}/devices/${enc(device)}/budget`,
+    { budget_bytes });
 
 export const fetchRouting = () => get<RoutingMatrix>("/api/v2/settings/routing");
 export const applyRouting = () =>

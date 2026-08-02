@@ -3274,11 +3274,17 @@ def resolve_planning_inputs(profile, refresh=False, inventory=None,
     # here: planning must not shell out to systemd, and a machine that has
     # never toggled records "unknown", which claims nothing.
     import modelctl_display
+    # Fleet budgets come off the registry, not the wire: this is the same
+    # rule -- no planning path opens a socket -- and a fleet-free install
+    # records an empty map rather than nothing, so a node enrolled later
+    # reads as an input change instead of as silence.
+    import modelctl_fleet
     return modelctl_tiers.make_planning_inputs(
         inventory, defaults["vram_limit_pct"], primary,
         modelctl_vram.system_ram_available(),
         hw_settings=hw_settings, capabilities=caps,
-        display=modelctl_display.planning_input()), "live"
+        display=modelctl_display.planning_input(),
+        fleet_budgets=modelctl_fleet.budget_input()), "live"
 
 
 def plan_tiers_for_profile(profile, refresh_inputs=False, inventory=None,
@@ -4851,6 +4857,51 @@ def _cmd_lane_cli(args):
     sys.exit(cmd_lane(args) or 0)
 
 
+def cmd_fleet(args):
+    """Fleet registry edits that are not enrollment.
+
+    The console's node cards submit the same primitive through the same
+    validation; this exists so it is reachable without a browser, and so
+    the ceiling refusal has a transcript that is not a screenshot.
+    """
+    import modelctl_fleet
+
+    def _gib(n):
+        return f"{n / (1 << 30):.2f} GiB"
+
+    try:
+        if args.fleet_command == "set-budget":
+            r = modelctl_fleet.set_device_budget(
+                args.node, args.device, args.bytes)
+            verb = "budget" if r["changed"] else "budget (unchanged)"
+            print(f"{r['node']}/{r['device']} {verb}: "
+                  f"{_gib(r['previous_bytes'])} -> {_gib(r['budget_bytes'])} "
+                  f"(ceiling {_gib(r['ceiling_bytes'])}, {r['ceiling_basis']})")
+            for p in r["staled_profiles"]:
+                print(f"  stale planning inputs: {p['name']}")
+            if not r["staled_profiles"]:
+                print("  no stored-input plans depend on the old number")
+            return 0
+        if args.fleet_command == "set-cap":
+            r = modelctl_fleet.set_device_cap(
+                args.node, args.device, args.bytes)
+            verb = "cap" if r["changed"] else "cap (unchanged)"
+            print(f"{r['node']}/{r['device']} {verb}: "
+                  f"{_gib(r['previous_bytes'])} -> {_gib(r['cap_bytes'])} "
+                  f"(ceiling now {_gib(r['ceiling_bytes'])})")
+            return 0
+    except (KeyError, ValueError) as e:
+        # A refusal is the answer, not a traceback: the ceiling message
+        # names the number to ask for instead.
+        print(f"refused: {e}", file=sys.stderr)
+        return 2
+    return 2
+
+
+def _cmd_fleet_cli(args):
+    sys.exit(cmd_fleet(args) or 0)
+
+
 def cmd_doctor(args):
     """Print readiness, the integration manifest, and backend capabilities;
     optionally write a support bundle.
@@ -5527,6 +5578,29 @@ def build_arg_parser():
                             help="-- followed by the command to run")
 
     p_lane.set_defaults(func=_cmd_lane_cli)
+
+    p_fleet = sub.add_parser(
+        "fleet", help="fleet registry: edit a remote node's device budgets")
+    fleet_sub = p_fleet.add_subparsers(dest="fleet_command", required=True)
+
+    p_fleet_budget = fleet_sub.add_parser(
+        "set-budget",
+        help="set how much of a remote device admission may spend "
+             "(refused above the device ceiling)")
+    p_fleet_budget.add_argument("node", help="fleet node name, e.g. ph16-71-cpu0")
+    p_fleet_budget.add_argument("device", help="device name on that node, e.g. CPU")
+    p_fleet_budget.add_argument("bytes", type=int, help="budget in bytes")
+
+    p_fleet_cap = fleet_sub.add_parser(
+        "set-cap",
+        help="record the OS-enforced limit on the unit serving a device "
+             "(systemd MemoryMax); this is what the ceiling derives from")
+    p_fleet_cap.add_argument("node")
+    p_fleet_cap.add_argument("device")
+    p_fleet_cap.add_argument("bytes", type=int,
+                             help="cap in bytes, as read off the live unit")
+
+    p_fleet.set_defaults(func=_cmd_fleet_cli)
 
     p_caps = sub.add_parser(
         "capabilities",

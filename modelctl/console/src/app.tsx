@@ -6,6 +6,7 @@ import { useStream } from "./lib/stream";
 import { fmtClock } from "./lib/api";
 import { ToastHost } from "./lib/toasts";
 import { Operate } from "./pages/operate";
+import { Fleet } from "./pages/fleet";
 import { Job, Jobs } from "./pages/jobs";
 import { Models } from "./pages/models";
 import { Model } from "./pages/model";
@@ -40,6 +41,9 @@ function Side() {
     <aside class="side">
       <div class="brand">modelctl</div>
       <a class={here("/v2/")} href="/v2/">▣ operate</a>
+      {/* next to operate, not under settings: where a model can run is an
+          operational question, and the rig is one of the nodes on it */}
+      <a class={under("/v2/fleet")} href="/v2/fleet">⬡ fleet</a>
       <a class={under("/v2/models")} href="/v2/models">◇ model hub</a>
       <a class={under("/v2/add")} href="/v2/add">＋ add</a>
       {/* `under`, not `here`: a per-job page is still the jobs section */}
@@ -122,6 +126,9 @@ export function App() {
       <Router>
         <Route path="/v2/" component={() => (
           <Shell title="operate" live="telemetry live"><Operate /></Shell>
+        )} />
+        <Route path="/v2/fleet" component={() => (
+          <Shell title="fleet" live="telemetry live"><Fleet /></Shell>
         )} />
         <Route path="/v2/jobs" component={() => (
           <Shell title="jobs" live="job stream live"><Jobs /></Shell>

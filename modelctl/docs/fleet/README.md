@@ -57,6 +57,43 @@ what the node has:
   `MemoryMax=20G` -- a budget above the cgroup ceiling would be admitted
   by the planner and then OOM-killed by systemd.
 
+### Changing a budget
+
+`modelctl fleet set-budget <node> <device> <bytes>` is the one writer of
+that number (the console's fleet page submits the same primitive). It
+takes the state lock, refuses anything above the device's ceiling, and
+reports which profiles' recorded planning inputs the change stales:
+
+    modelctl fleet set-budget ph16-71-cpu0 CPU 19327352832   # 18 GiB
+
+The **ceiling** is not the device total. For a cpu device it is the
+`MemoryMax` recorded for its unit, for a gpu device the reported device
+total, in both cases minus runtime headroom (`max(1 GiB, 5%)`) for the
+RPC server's own resident set and staging buffers. cpu0 today: 20 GiB
+cap -> **19.00 GiB ceiling**; cuda0: 11.6 GiB total -> **10.60 GiB**.
+
+The cap is operator-recorded, never probed -- reading it means asking
+another machine's service manager, and no planning path may shell out
+over SSH. After changing `MemoryMax` on the node, record it here or the
+ceiling will still be derived from the old number:
+
+    ssh aaron@192.168.0.76 'systemctl --user set-property rpc-cpu0 MemoryMax=26G'
+    ssh aaron@192.168.0.76 'systemctl --user show rpc-cpu0 -p MemoryMax'
+    modelctl fleet set-cap ph16-71-cpu0 CPU 27917287424     # what it now says
+
+`set-property` applies live and does **not** restart the unit, which
+matters: a restart drops the node's presence and any graph running
+across it. A device with no recorded cap falls back to the reported
+total and says so in the ceiling basis -- a guess would silently
+authorize a budget the cgroup refuses at load time.
+
+A budget is a planning input: it is spent by the same admission path a
+local card's VRAM is, so it is recorded with the rest of a profile's
+inputs and a change stales every stored-input plan built against the old
+number. Stale means "reported, not rewritten" -- the stored plan keeps
+placing against the number it was built for until it is replanned, and
+the launch preview says so.
+
 A registered node is inert until a presence probe records it reachable
 *and* built at this checkout's pin, and that record expires after 15
 minutes. Planning never opens a socket; it reads the stored record.

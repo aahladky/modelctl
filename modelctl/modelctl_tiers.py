@@ -289,7 +289,8 @@ def stored_planning_inputs(profile):
 
 
 def make_planning_inputs(inventory, limit_pct, primary, ram_available_bytes,
-                         hw_settings=None, capabilities=None, display=None):
+                         hw_settings=None, capabilities=None, display=None,
+                         fleet_budgets=None):
     """Canonicalize live machine values into the recorded-input schema.
 
     Only what plan_tiers actually reads is recorded -- with one stated
@@ -301,7 +302,14 @@ def make_planning_inputs(inventory, limit_pct, primary, ram_available_bytes,
     not read it and no budget spends it; it is recorded so a launch can
     tell the operator that the machine is not the one the plan was built
     for. A profile planned before this field existed simply has no
-    display block, which reads as "no claim"."""
+    display block, which reads as "no claim".
+
+    `fleet_budgets` is not an exception: a remote device's operator
+    budget is spent by the same admission path a local device's VRAM is
+    (modelctl_fleet.admission_budgets -> _usable_vram_map), so it is a
+    planner input in the strict sense, and a plan built when a node
+    offered 16 GiB is not a plan for a node offering 24. Presence is
+    deliberately NOT part of it -- see modelctl_fleet.budget_input."""
     return {
         "version": PLANNING_INPUTS_VERSION,
         "ram_available_bytes": int(ram_available_bytes or 0),
@@ -319,7 +327,55 @@ def make_planning_inputs(inventory, limit_pct, primary, ram_available_bytes,
             "mode": str((display or {}).get("mode") or "unknown"),
             "freed_bytes": int((display or {}).get("freed_bytes") or 0),
         },
+        "fleet": {"budgets_bytes": {str(k): int(v) for k, v
+                                    in sorted((fleet_budgets or {}).items())}},
     }
+
+
+def planning_input_fleet_budgets(inputs):
+    """The fleet budgets recorded with one profile's planner inputs, or
+    None for a record written before they were an input.
+
+    None and {} are different answers and the caller must keep them
+    apart: {} is "there were no fleet budgets when this was planned",
+    which a node enrolled later contradicts; None is "this record
+    predates the field", which nothing contradicts."""
+    fleet = (inputs or {}).get("fleet")
+    if not isinstance(fleet, dict):
+        return None
+    budgets = fleet.get("budgets_bytes")
+    if not isinstance(budgets, dict):
+        return None
+    return {str(k): int(v) for k, v in budgets.items()}
+
+
+def fleet_budget_mismatch(inputs, live_budgets):
+    """One operator-readable line when a profile's recorded fleet budgets
+    are not the budgets in force now, else None.
+
+    Same contract as display_input_mismatch: a statement about the
+    recorded inputs, never a block. The plan still launches on the
+    budget it was built for -- what the operator needs to know is that a
+    replan would now place differently."""
+    recorded = planning_input_fleet_budgets(inputs)
+    if recorded is None:
+        return None
+    live = {str(k): int(v) for k, v in (live_budgets or {}).items()}
+    changed = sorted(set(recorded) | set(live))
+    parts = []
+    for key in changed:
+        was, now = recorded.get(key), live.get(key)
+        if was == now:
+            continue
+        parts.append(f"{key}: "
+                     f"{'none' if was is None else f'{_gib(was):.2f} GiB'} -> "
+                     f"{'none' if now is None else f'{_gib(now):.2f} GiB'}")
+    if not parts:
+        return None
+    return ("fleet budgets changed since this plan's inputs were recorded ("
+            + "; ".join(parts) + "); the stored plan still places against "
+            "the old numbers -- replan with --refresh-inputs to use the new "
+            "ones")
 
 
 def planning_input_display_mode(inputs):
