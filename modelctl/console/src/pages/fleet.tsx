@@ -178,6 +178,9 @@ function Device({ node, device, staleNames, onDone }: {
   staleNames: string[];
   onDone: () => void;
 }) {
+  /* The editor is heavy for something touched monthly: collapsed until
+     asked for, like the summoned help. */
+  const [editing, setEditing] = useState(false);
   return (
     <div style="margin:.8rem 0 0">
       <div class="label">
@@ -209,8 +212,13 @@ function Device({ node, device, staleNames, onDone }: {
           ? ` · unit cap ${fmtGiB(device.cap_bytes, 2)} GiB` : ""}
       </div>
       {device.editable
-        ? <BudgetField node={node} device={device} staleNames={staleNames}
-                       onDone={onDone} />
+        ? (editing
+            ? <BudgetField node={node} device={device} staleNames={staleNames}
+                           onDone={() => { setEditing(false); onDone(); }} />
+            : <div class="actions" style="margin-top:.35rem">
+                <button type="button" onClick={() => setEditing(true)}>
+                  edit budget</button>
+              </div>)
         : <div class="sub" style="margin-top:.35rem">
             read-only here{" "}
             <Info label="why this budget is read-only">

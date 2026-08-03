@@ -6,6 +6,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { useStream } from "../lib/stream";
 import { cancelJob, fetchJob, fmtAgo, fmtClock } from "../lib/api";
+import { EmptyState } from "../lib/ui";
 import { Info } from "../lib/info";
 import { Meter } from "../lib/meter";
 import { toast } from "../lib/toasts";
@@ -14,6 +15,14 @@ import type { JobRow } from "../lib/types";
 /* Phase 4 gave jobs their URLs back. The link is on the title so the row
    stays clickable-through without stealing the cancel button's clicks. */
 const jobHref = (id: string) => `/v2/jobs/${encodeURIComponent(id)}`;
+
+/* "took 1m 31s" — absent when either endpoint is missing, never zero. */
+function fmtDur(started: number | null, finished: number | null): string {
+  if (!started || !finished || finished < started) return "";
+  const s = Math.round(finished - started);
+  if (s < 60) return `took ${s}s`;
+  return `took ${Math.floor(s / 60)}m ${s % 60}s`;
+}
 
 function JobLink({ job }: { job: JobRow }) {
   return <a href={jobHref(job.id)}>{job.title}</a>;
@@ -131,11 +140,17 @@ export function Job({ id }: { id: string }) {
             <tr><td class="sub">type</td><td>{job.type}</td></tr>
             <tr><td class="sub">id</td><td class="num">{job.id}</td></tr>
             <tr><td class="sub">created</td>
-              <td class="sub">{job.created ? fmtAgo(job.created) : "—"}</td></tr>
+              <td class="sub" title={job.created ? fmtClock(job.created) : undefined}>
+                {job.created ? fmtAgo(job.created) : "—"}</td></tr>
             <tr><td class="sub">started</td>
-              <td class="sub">{job.started ? fmtAgo(job.started) : "not yet"}</td></tr>
+              <td class="sub" title={job.started ? fmtClock(job.started) : undefined}>
+                {job.started ? fmtAgo(job.started) : "not yet"}</td></tr>
             <tr><td class="sub">finished</td>
-              <td class="sub">{job.finished ? fmtAgo(job.finished) : "—"}</td></tr>
+              <td class="sub" title={job.finished ? fmtClock(job.finished) : undefined}>
+                {job.finished
+                  ? `${fmtAgo(job.finished)}${fmtDur(job.started, job.finished)
+                      ? ` · ${fmtDur(job.started, job.finished)}` : ""}`
+                  : "—"}</td></tr>
           </tbody>
         </table>
         {!finished && (
@@ -200,6 +215,15 @@ export function Jobs() {
 
   return (
     <>
+      {jobs.length === 0 && (
+        <div class={wcls}>
+          <EmptyState>
+            no jobs — loads, downloads, benchmarks and configuration
+            changes appear here as they happen
+          </EmptyState>
+        </div>
+      )}
+      {running.length > 0 && (
       <div class={wcls}>
         <h2>
           running{" "}
@@ -209,9 +233,7 @@ export function Jobs() {
             cancellable), the row snaps back and a toast says why.
           </Info>
         </h2>
-        {running.length === 0
-          ? <p class="sub">nothing running</p>
-          : (
+        {(
             <div class="table-scroll">
             <table>
               <tbody>
@@ -269,12 +291,12 @@ export function Jobs() {
             </div>
           )}
       </div>
+      )}
 
+      {queued.length > 0 && (
       <div class={wcls}>
         <h2>queued</h2>
-        {queued.length === 0
-          ? <p class="sub">queue is empty</p>
-          : (
+        {(
             <div class="table-scroll">
             <table>
               <tbody>
@@ -308,12 +330,12 @@ export function Jobs() {
             </div>
           )}
       </div>
+      )}
 
+      {history.length > 0 && (
       <div class={wcls}>
         <h2>history</h2>
-        {history.length === 0
-          ? <p class="sub">no finished jobs yet</p>
-          : (
+        {(
             <div class="table-scroll">
             <table>
               <tbody>
@@ -329,8 +351,11 @@ export function Jobs() {
                       </td>
                       <td>
                         <JobLink job={j} />{" "}
-                        <span class="sub">
-                          · {[sub, j.finished ? fmtAgo(j.finished) : ""]
+                        <span class="sub"
+                              title={j.finished ? fmtClock(j.finished) : undefined}>
+                          · {[sub,
+                              fmtDur(j.started, j.finished),
+                              j.finished ? fmtAgo(j.finished) : ""]
                             .filter(Boolean).join(" · ")}
                         </span>
                       </td>
@@ -345,6 +370,7 @@ export function Jobs() {
             </div>
           )}
       </div>
+      )}
     </>
   );
 }
