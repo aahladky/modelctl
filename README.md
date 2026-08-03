@@ -8,24 +8,15 @@ This Gitea repository is the source of truth. The GitHub copies
 
 ## Mission
 
-Automate away what makes local AI painful — file management, downloads,
-launch configs, config files, terminals, linux-after-one-failed-command —
-while keeping granular control available from an interface that doesn't
-raise your blood pressure, and use the existing hardware to the fullest
-extent reasonably possible.
+Automate what's most hated about local AI — file management, downloads,
+launch configs, config files in general, linux after one failed command,
+keyboards and CLIs — as much as possible, while still allowing granular
+control from an interface that doesn't raise blood pressure. Do it using
+the existing hardware to the fullest extent reasonably possible.
 
-- **Top-level goal:** from "model found on Hugging Face" to "model
-  available under the local endpoint" as quickly as possible. The console
-  wizard (search → download → place → register → test) is the golden
-  path; everything else supports it.
-- **Key constraint:** hardware optimization. Automatic placement across
-  heterogeneous tiers (GPU / CPU RAM / SSD / fleet RPC) is the hard part.
-  The fork and the benchmark lane exist to feed placement rules — research
-  earns its keep when it changes a planner decision.
-- **The two numbers that matter:** wall-clock time-to-serve, and the
-  fraction of best-known tok/s the planner's automatic choice achieves.
-- **A workflow that requires a terminal is a gap.** Failures must be
-  recoverable from the console.
+The top-level goal: go from a model found on Hugging Face to a model
+available under the local endpoint as quickly as possible. The key
+challenge and constraint is hardware optimization.
 
 | Piece | Path | Repo |
 |---|---|---|
