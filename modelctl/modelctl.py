@@ -2332,12 +2332,16 @@ def update_runtime_policy(name, runtime, resync=True):
     its policy: objective, pinned/disabled plans, fallback, limits). Passing
     mode != "managed" (or None) drops the section, restoring fixed-command
     rendering. Regenerates artifacts and optionally re-syncs backends."""
-    profile = load_profile(name)
-    if runtime and runtime.get("mode") == "managed":
-        profile["runtime"] = runtime
-    else:
-        profile.pop("runtime", None)
-    save_profile(profile)
+    # Same single lock span as update_profile_config: the read and the
+    # write must be one atomic unit or a concurrent editor's fields are
+    # silently dropped.
+    with modelctl_fsutil.state_lock():
+        profile = load_profile(name)
+        if runtime and runtime.get("mode") == "managed":
+            profile["runtime"] = runtime
+        else:
+            profile.pop("runtime", None)
+        save_profile(profile)
     generate_artifacts(profile)
     if resync:
         sync_all_backends(restart_router=True, restart_openarc=True)
@@ -3450,23 +3454,28 @@ def update_profile_config(name, updates: dict, resync=True):
     `updates` (validated against EDITABLE_*_KEYS), save, regenerate artifacts,
     optionally re-sync backends. Returns (profile, messages) -- messages
     include ignored keys, preflight output, and anything notable."""
-    profile = load_profile(name)
-    cfg = profile.setdefault("config", {})
-    messages = []
-    for key, value in (updates or {}).items():
-        if key in EDITABLE_CONFIG_KEYS:
-            if key in _INT_CONFIG_KEYS:
-                try:
-                    value = int(value)
-                except (TypeError, ValueError):
-                    messages.append(f"ignored {key}: '{value}' isn't a number")
-                    continue
-            cfg[key] = value
-        elif key in EDITABLE_PROFILE_KEYS:
-            profile[key] = value
-        else:
-            messages.append(f"ignored unknown field: {key}")
-    save_profile(profile)
+    # One lock span for the whole read-modify-write: save_profile's own
+    # lock only makes the final write atomic. Without the outer span two
+    # concurrent editors (CLI vs web) each load, then serially save, and
+    # the second save silently drops the first one's fields.
+    with modelctl_fsutil.state_lock():
+        profile = load_profile(name)
+        cfg = profile.setdefault("config", {})
+        messages = []
+        for key, value in (updates or {}).items():
+            if key in EDITABLE_CONFIG_KEYS:
+                if key in _INT_CONFIG_KEYS:
+                    try:
+                        value = int(value)
+                    except (TypeError, ValueError):
+                        messages.append(f"ignored {key}: '{value}' isn't a number")
+                        continue
+                cfg[key] = value
+            elif key in EDITABLE_PROFILE_KEYS:
+                profile[key] = value
+            else:
+                messages.append(f"ignored unknown field: {key}")
+        save_profile(profile)
     generate_artifacts(profile)
     ok, _bin, _env, pf_messages = preflight(profile)
     messages.extend(pf_messages)
