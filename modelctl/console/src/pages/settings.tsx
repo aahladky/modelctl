@@ -1055,10 +1055,24 @@ function Appearance() {
   );
 }
 
+/* Eight sections in one scroll mixed every audience: appearance next to
+   the routing matrix. Tabs group them by who is looking — general is the
+   everyday pair plus readiness, advanced is the machinery. */
+const TABS = ["general", "hardware", "access", "advanced"] as const;
+type Tab = (typeof TABS)[number];
+
 export function Settings() {
   const [s, setS] = useState<SettingsOverview | null>(null);
   const [err, setErr] = useState("");
   const [n, setN] = useState(0);
+  const [tab, setTab] = useState<Tab>(() => {
+    const h = location.hash.replace("#", "");
+    return (TABS as readonly string[]).includes(h) ? (h as Tab) : "general";
+  });
+  const pick = (t: Tab) => {
+    setTab(t);
+    history.replaceState(null, "", `#${t}`);
+  };
 
   useEffect(() => {
     let live = true;
@@ -1083,14 +1097,24 @@ export function Settings() {
 
   return (
     <>
-      <Readiness r={s.readiness} />
-      <Defaults s={s} onSaved={reload} />
-      <Hardware hw={s.hardware} onSaved={reload} />
-      <Routing />
-      <Access s={s} onRotated={reload} />
-      <Paths rows={s.paths} />
-      <Diagnostics s={s} />
-      <Appearance />
+      <div class="tabs" role="tablist" aria-label="settings sections">
+        {TABS.map((t) => (
+          <button key={t} type="button" role="tab" aria-selected={tab === t}
+                  onClick={() => pick(t)}>{t}</button>
+        ))}
+      </div>
+      {tab === "general" && <>
+        <Readiness r={s.readiness} />
+        <Defaults s={s} onSaved={reload} />
+        <Appearance />
+      </>}
+      {tab === "hardware" && <Hardware hw={s.hardware} onSaved={reload} />}
+      {tab === "access" && <Access s={s} onRotated={reload} />}
+      {tab === "advanced" && <>
+        <Routing />
+        <Paths rows={s.paths} />
+        <Diagnostics s={s} />
+      </>}
     </>
   );
 }
