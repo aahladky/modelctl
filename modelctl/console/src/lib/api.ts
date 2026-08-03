@@ -138,6 +138,10 @@ export const fetchRunCommand = (name: string) =>
 
 export const fetchJob = (id: string) => get<JobRow>(`/api/v2/jobs/${enc(id)}`);
 
+/* Retry for a job that reported router_reloaded=false: re-runs the
+   backend sync as its own job and answers with the new job's id. */
+export const retrySync = () => postJson<{ job_id: string }>("/api/v2/sync");
+
 /* ---- fleet ----
    The read opens no socket; refreshing presence is the explicit POST,
    which is why the page fires it on open rather than relying on the

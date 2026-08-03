@@ -5,7 +5,7 @@
    with the flash + toast (the loud un-happen). */
 import { useEffect, useRef, useState } from "preact/hooks";
 import { useStream } from "../lib/stream";
-import { cancelJob, fetchJob, fmtAgo, fmtClock } from "../lib/api";
+import { cancelJob, fetchJob, fmtAgo, fmtClock, retrySync } from "../lib/api";
 import { EmptyState } from "../lib/ui";
 import { Info } from "../lib/info";
 import { Meter } from "../lib/meter";
@@ -91,6 +91,18 @@ export function Job({ id }: { id: string }) {
   const { pending, request } = useCancel();
   const [fetched, setFetched] = useState<JobRow | null>(null);
   const [err, setErr] = useState("");
+  const [syncBusy, setSyncBusy] = useState(false);
+
+  const retrySyncNow = async () => {
+    setSyncBusy(true);
+    try {
+      const res = await retrySync();
+      location.href = jobHref(res.job_id);
+    } catch (e) {
+      setSyncBusy(false);
+      toast("err", "✗ couldn't start the sync", String(e), 9000);
+    }
+  };
 
   const live = tick?.jobs.find((j) => j.id === id) ?? null;
   /* A job off the end of the stream is read from the store, and re-read
@@ -166,6 +178,21 @@ export function Job({ id }: { id: string }) {
           </>
         )}
         {job.error && <div class="msg error">{job.error}</div>}
+        {/* router_reloaded=false: the job's change was saved but the old
+            config is still serving. A failed sync job is the same
+            situation told by the retry itself. One button fixes both. */}
+        {(job.router_reloaded === false
+          || (job.type === "sync" && job.status === "failed")) && (
+          <div class="msg warning">
+            ⚠ {job.type === "sync"
+              ? "the sync didn't reach the router — the previous configuration is still serving."
+              : "this change was saved, but the router didn't pick it up — the previous configuration is still serving."}
+            <button class={syncBusy ? "busy" : undefined} disabled={syncBusy}
+                    onClick={retrySyncNow}>
+              retry sync
+            </button>
+          </div>
+        )}
         <div class="actions" style="margin-top:.6rem">
           <a href="/v2/jobs" class="sub">← all jobs</a>
           <span class="grow" style="flex:1"></span>

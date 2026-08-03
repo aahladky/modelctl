@@ -141,6 +141,16 @@ def summarize_cache(moe):
 
 def job_row(job, tail_chars=2000):
     """One JobStore row -> the typed shape the SPA consumes."""
+    # A job whose work applied but whose router reload failed records
+    # router_reloaded=False in its outcome; the SPA offers "retry sync"
+    # on exactly that field instead of grepping the log tail for the
+    # warning text.
+    try:
+        outcome = json.loads(job.get("outcome") or "{}")
+        router_reloaded = (outcome.get("router_reloaded")
+                           if isinstance(outcome, dict) else None)
+    except (TypeError, ValueError):
+        router_reloaded = None
     return {
         "id": job["id"],
         "type": job["type"],
@@ -152,6 +162,7 @@ def job_row(job, tail_chars=2000):
         "error": job.get("error") or "",
         "result_tail": (job.get("result") or "")[-tail_chars:],
         "cancellable": bool(job.get("cancellable", 1)),
+        "router_reloaded": router_reloaded,
         "created": job.get("created"),
         "started": job.get("started"),
         "finished": job.get("finished"),

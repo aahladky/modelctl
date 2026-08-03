@@ -136,6 +136,10 @@ export interface JobRow {
   error: string;
   result_tail: string;
   cancellable: boolean;
+  /* False when the job's work applied but the router reload failed --
+     the old config is still serving; the job page offers "retry sync"
+     on exactly this. Null when the job doesn't report on the router. */
+  router_reloaded: boolean | null;
   created: number;
   started: number | null;
   finished: number | null;

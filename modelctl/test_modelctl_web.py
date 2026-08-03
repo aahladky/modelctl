@@ -249,6 +249,144 @@ class TestDownloadHonesty(WebTestBase):
         self.assertTrue(any("NOT reloaded" in m for m in Ctx.logged),
                         Ctx.logged)
 
+    class _PullCtx:
+        """The slice of JobContext _run_pull_subprocess touches."""
+
+        def __init__(self):
+            self.logged = []
+
+        def log(self, m):
+            self.logged.append(m)
+
+        def set_progress(self, *a, **k):
+            pass
+
+        def raise_if_cancelled(self):
+            pass
+
+        def register_process(self, proc):
+            pass
+
+    @staticmethod
+    def _failing_proc(stdout_text):
+        import io as _io
+
+        class FailingProc:
+            returncode = 1
+            pid = 4242
+            stdout = _io.StringIO(stdout_text)
+
+            def wait(self, timeout=None):
+                return 1
+
+            def poll(self):
+                return 1
+
+        return FailingProc()
+
+    def test_failed_pull_removes_partial_files(self):
+        """A pull that dies mid-file must not leave the half-written
+        target or hf's .incomplete spool behind -- multi-GB junk that
+        holds disk until someone finds it by hand."""
+        from modelctl_web import mutate
+        models_dir = Path(self.tmp.name) / "models"
+        repo_dir = models_dir / "r" / "m"
+        spool = repo_dir / ".cache" / "huggingface" / "download"
+        spool.mkdir(parents=True)
+        (repo_dir / "m.gguf").write_bytes(b"x" * 10)
+        (spool / "m.gguf.abc123.incomplete").write_bytes(b"x" * 10)
+        ctx = self._PullCtx()
+        with mock.patch.object(
+                mutate.subprocess, "Popen",
+                return_value=self._failing_proc(
+                    "  downloading m.gguf -> /x ...\n")), \
+             mock.patch.object(modelctl, "DEFAULT_MODELS_DIR", models_dir), \
+             mock.patch.object(modelctl, "_remote_file_size",
+                               return_value=100):
+            with self.assertRaises(RuntimeError):
+                mutate._run_pull_subprocess(ctx, "r/m")
+        self.assertFalse((repo_dir / "m.gguf").exists())
+        self.assertFalse((spool / "m.gguf.abc123.incomplete").exists())
+        self.assertTrue(any("removed" in m for m in ctx.logged), ctx.logged)
+
+    def test_pull_cleanup_keeps_complete_and_unverifiable_files(self):
+        """Cleanup only deletes what is provably partial: a file whose
+        size matches the repo's copy finished before the failure, and a
+        file whose remote size can't be fetched (offline hiccup) might
+        be complete -- deleting either would throw away good gigabytes."""
+        from modelctl_web import mutate
+        models_dir = Path(self.tmp.name) / "models"
+        repo_dir = models_dir / "r" / "m"
+        repo_dir.mkdir(parents=True)
+        (repo_dir / "a.gguf").write_bytes(b"x" * 5)   # matches remote: keep
+        (repo_dir / "b.gguf").write_bytes(b"x" * 3)   # remote unknown: keep
+        sizes = {"a.gguf": 5, "b.gguf": None}
+        ctx = self._PullCtx()
+        with mock.patch.object(
+                mutate.subprocess, "Popen",
+                return_value=self._failing_proc(
+                    "  downloading a.gguf -> /x ...\n"
+                    "  downloading b.gguf -> /x ...\n")), \
+             mock.patch.object(modelctl, "DEFAULT_MODELS_DIR", models_dir), \
+             mock.patch.object(modelctl, "_remote_file_size",
+                               side_effect=lambda r, f: sizes.get(f)):
+            with self.assertRaises(RuntimeError):
+                mutate._run_pull_subprocess(ctx, "r/m")
+        self.assertTrue((repo_dir / "a.gguf").exists())
+        self.assertTrue((repo_dir / "b.gguf").exists())
+
+
+class TestSyncRetry(WebTestBase):
+    """A job that saved config but couldn't reload the router leaves the
+    old config serving; the console offers a one-click retry. The retry
+    endpoint submits a sync job that tells the truth: done when the
+    router reloaded, failed (with the reason) when it didn't."""
+
+    def test_sync_endpoint_submits_job_that_succeeds(self):
+        from modelctl_web import mutate
+        with mock.patch.object(
+                mutate.modelctl, "sync_all_backends",
+                return_value={"profiles": 2, "restarted": True,
+                              "restart_error": ""}):
+            resp = self.client.post("/api/v2/sync")
+            self.assertEqual(resp.status_code, 200)
+            job_id = resp.json()["job_id"]
+            j = self.wait_job(job_id)
+        self.assertEqual(j["status"], "done")
+        row = self.client.get(f"/api/v2/jobs/{job_id}").json()
+        self.assertIs(row["router_reloaded"], True)
+
+    def test_sync_job_fails_when_router_not_reloaded(self):
+        from modelctl_web import mutate
+        with mock.patch.object(
+                mutate.modelctl, "sync_all_backends",
+                return_value={"profiles": 2, "restarted": False,
+                              "restart_error": "unit not found"}):
+            job_id = self.client.post("/api/v2/sync").json()["job_id"]
+            j = self.wait_job(job_id)
+        self.assertEqual(j["status"], "failed")
+        self.assertIn("unit not found", j["error"])
+
+    def test_job_row_surfaces_router_reloaded_from_outcome(self):
+        """tier-apply and moe-cache jobs already record router_reloaded
+        in their outcome; the SPA needs it as a typed field, not by
+        grepping the log tail."""
+        from modelctl_web import telemetry
+        job_id = self.store.create("tier-apply", "auto-place m1")
+        self.store.update(job_id, outcome=json.dumps(
+            {"applied": True, "router_reloaded": False}))
+        row = telemetry.job_row(self.store.get(job_id))
+        self.assertIs(row["router_reloaded"], False)
+
+    def test_job_row_router_reloaded_absent_or_bad_outcome_is_none(self):
+        from modelctl_web import telemetry
+        job_id = self.store.create("edit", "edit m1")
+        row = telemetry.job_row(self.store.get(job_id))
+        self.assertIsNone(row["router_reloaded"])
+        self.store.update(job_id, outcome="not json{")
+        row = telemetry.job_row(self.store.get(job_id))
+        self.assertIsNone(row["router_reloaded"])
+
 
 class TestProfilesApi(WebTestBase):
     # Phase-3 cutover: profile *deletion* left the console with the old

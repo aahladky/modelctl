@@ -30,6 +30,28 @@ def _sync_backends(ctx):
     return True
 
 
+def submit_sync(runner):
+    """Re-run the backend sync on demand -- the one-click retry for a job
+    that reported "config written but the router was NOT reloaded".
+
+    Fails (job goes red, reason in the error) when the reload fails
+    again, so job history keeps telling the truth instead of stacking
+    green "done" rows on top of a router still serving the old config."""
+    def fn(ctx):
+        out = modelctl.sync_all_backends(restart_router=True,
+                                         restart_openarc=True)
+        profiles = out.get("profiles") if isinstance(out, dict) else out
+        ctx.log(f"synced {profiles} profile config(s)")
+        if isinstance(out, dict) and out.get("restarted") is False:
+            raise RuntimeError(
+                "config written but llama-swap was NOT reloaded "
+                f"({out.get('restart_error') or 'reload failed'})")
+        return {"profiles": profiles,
+                "router_reloaded": out.get("restarted")
+                if isinstance(out, dict) else None}
+    return runner.submit("sync", "sync backends", fn, lane="mutation")
+
+
 def submit_edit(runner, name, updates):
     """Apply config/profile field updates, regenerate, sync."""
     from modelctl_services import profile_service
@@ -106,6 +128,52 @@ def submit_tier_apply(runner, name, accept_tier_change=False):
                          lane="mutation")
 
 
+def _cleanup_partial_downloads(ctx, repo_id, filenames):
+    """Remove the half-written artifacts of a failed or cancelled pull.
+
+    Only files THIS pull reported downloading are touched. A file whose
+    size matches the repo's copy completed before the failure and is
+    kept; when the remote size is unreachable the file is kept too --
+    deleting a possibly-complete multi-GB download over an offline
+    hiccup is worse than leaving a partial for the next pull's size
+    check to catch. hf_hub_download's .incomplete spool files are always
+    safe to drop: nothing is ever served from them, they only hold disk.
+    """
+    repo_dir = Path(modelctl.DEFAULT_MODELS_DIR) / repo_id
+    for filename in filenames:
+        spool_dir = (repo_dir / ".cache" / "huggingface" / "download"
+                     / filename).parent
+        for spool in spool_dir.glob(Path(filename).name + ".*.incomplete"):
+            try:
+                spool.unlink()
+                ctx.log(f"removed download spool file {spool.name}")
+            except OSError:
+                pass
+        target = repo_dir / filename
+        try:
+            if not target.exists():
+                continue
+            size = target.stat().st_size
+        except OSError:
+            continue
+        expected = modelctl._remote_file_size(repo_id, filename)
+        if expected is None:
+            ctx.log(f"kept {filename}: its repo size can't be checked "
+                    "right now, so it may be complete")
+            continue
+        if size == expected:
+            ctx.log(f"kept {filename}: it finished downloading before "
+                    "the failure")
+            continue
+        try:
+            target.unlink()
+            ctx.log(f"removed partial download {filename} "
+                    f"({modelctl._format_size(size)} of "
+                    f"{modelctl._format_size(expected)})")
+        except OSError as e:
+            ctx.log(f"couldn't remove partial download {filename}: {e}")
+
+
 def _run_pull_subprocess(ctx, repo_id, quant_label=None, want_mtp=True,
                          current=None):
     """Run `modelctl pull --yes` as a killable child process.
@@ -134,22 +202,31 @@ def _run_pull_subprocess(ctx, repo_id, quant_label=None, want_mtp=True,
         env={**os.environ, "HF_HUB_DISABLE_PROGRESS_BARS": "1"})
     ctx.register_process(proc)
     profile_name = None
+    attempted = []
     if current is None:
         current = {"file": None}
-    for line in proc.stdout:
-        line = line.rstrip()
-        if not line:
-            continue
-        ctx.log(line)
-        m = re.search(r"downloading (\S+) ->", line)
-        if m:
-            current["file"] = m.group(1)
-            ctx.set_progress(detail=m.group(1))
-        m = re.search(r"Profile '([^']+)' created", line)
-        if m:
-            profile_name = m.group(1)
-    rc = proc.wait(timeout=60)
+    try:
+        for line in proc.stdout:
+            line = line.rstrip()
+            if not line:
+                continue
+            ctx.log(line)
+            m = re.search(r"downloading (\S+) ->", line)
+            if m:
+                current["file"] = m.group(1)
+                attempted.append(m.group(1))
+                ctx.set_progress(detail=m.group(1))
+            m = re.search(r"Profile '([^']+)' created", line)
+            if m:
+                profile_name = m.group(1)
+        rc = proc.wait(timeout=60)
+    except BaseException:
+        # Cancel usually surfaces as EOF + nonzero exit below, but a
+        # reader/wait error must clean up the same way.
+        _cleanup_partial_downloads(ctx, repo_id, attempted)
+        raise
     if rc != 0:
+        _cleanup_partial_downloads(ctx, repo_id, attempted)
         raise RuntimeError(f"pull of {repo_id} failed (exit {rc}) -- see job log")
     if not profile_name:
         # Belt and braces: the CLI's closing line is the contract, but if

@@ -648,6 +648,13 @@ def create_app(store=None, runner=None, collector=None,
                 "reason": None if cancelled else
                 f"server kept it {job['status']}"}
 
+    @app.post("/api/v2/sync")
+    def api_v2_sync():
+        """One-click retry for a job that reported the router was not
+        reloaded: submits a sync job and answers with its id; the tick
+        stream carries the rest."""
+        return {"job_id": mutate.submit_sync(runner)}
+
     # ---- v2 model hub ----------------------------------------------------
     from . import hub
 
