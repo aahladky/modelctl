@@ -7,10 +7,11 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { useStream } from "../lib/stream";
 import {
-  ApiError, applyTier, deleteModel, fetchAdmission, fetchLogTail,
-  fetchModelDetail, fetchModelHistory, fetchModelPlans, fetchRunCommand,
-  fetchRuntimePolicy, fmtAgo, fmtClock, fmtGiB, planAction, resetModelCache,
-  restartModel, saveModelConfig, saveRuntimePolicy,
+  ApiError, applyTier, autotuneModel, benchModel, deleteModel,
+  fetchAdmission, fetchLogTail, fetchModelDetail, fetchModelHistory,
+  fetchModelPlans, fetchRunCommand, fetchRuntimePolicy, fmtAgo, fmtClock,
+  fmtGiB, planAction, resetModelCache, restartModel, saveModelConfig,
+  saveRuntimePolicy, smokeModel,
 } from "../lib/api";
 import type { PlanAction } from "../lib/api";
 import { ConfirmButton, submitAction } from "../lib/actions";
@@ -125,19 +126,6 @@ function RuntimeActions({ d, live, onChanged }: {
                                      `cleared on port ${r.port} · the cache relearns from the next request`) as never)}>
           reset MoE cache
         </button>
-        <span class="grow" style="flex:1"></span>
-        <ConfirmButton
-          label="delete profile"
-          confirmLabel="yes, delete the profile"
-          busy={busy === "delete"}
-          disabled={!!busy}
-          consequences={<>
-            Deletes the profile and its generated artifacts, then resyncs
-            the backends so {d.name} is no longer served. The model file
-            on disk ({d.model_path || "unknown path"}) is left alone.
-          </>}
-          onConfirm={() => run("delete", () => deleteModel(d.name),
-                               `delete ${d.name}`)} />
       </div>
       {!running && (
         <div class="sub" style="margin-top:.4rem">
@@ -150,6 +138,114 @@ function RuntimeActions({ d, live, onChanged }: {
           no MoE cache to reset — this profile's cache mode is off
         </div>
       )}
+    </div>
+  );
+}
+
+/* ---- measurement triggers (moved here from the catalog rows) --------- */
+
+function BenchForm({ name, onDone }: { name: string; onDone: () => void }) {
+  const [tokens, setTokens] = useState("256");
+  const [runs, setRuns] = useState("3");
+  const [busy, setBusy] = useState(false);
+  return (
+    <div class="frow" style="margin-top:.4rem;align-items:end">
+      <div class="field" style="max-width:120px">
+        <label for={`bench-tok-${name}`}>max tokens</label>
+        <input id={`bench-tok-${name}`} type="number" min={1} max={4096}
+               value={tokens}
+               onInput={(e) => setTokens((e.target as HTMLInputElement).value)} />
+      </div>
+      <div class="field" style="max-width:100px">
+        <label for={`bench-runs-${name}`}>runs</label>
+        <input id={`bench-runs-${name}`} type="number" min={1} max={10}
+               value={runs}
+               onInput={(e) => setRuns((e.target as HTMLInputElement).value)} />
+      </div>
+      <div class="actions">
+        <button type="button" onClick={onDone}>cancel</button>
+        <button type="button" class={busy ? "btn-primary busy" : "btn-primary"}
+                disabled={busy}
+                onClick={() => {
+                  setBusy(true);
+                  submitAction(
+                    () => benchModel(name, parseInt(tokens, 10) || 256,
+                                     parseInt(runs, 10) || 3),
+                    `benchmark ${name}`,
+                    () => onDone(),
+                    (r) => `job ${r.job_id} · ${r.max_tokens} tokens x ${r.runs}`
+                  ).finally(() => setBusy(false));
+                }}>
+          run benchmark
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Measure({ name }: { name: string }) {
+  const [benching, setBenching] = useState(false);
+  const [busy, setBusy] = useState("");
+  const run = (key: string, fn: () => Promise<{ job_id: string }>,
+               label: string) => {
+    setBusy(key);
+    submitAction(fn, label).finally(() => setBusy(""));
+  };
+  return (
+    <div class="widget">
+      <div class="label"><span>measure{" "}
+        <Info label="about the measurement triggers">
+          A benchmark runs the speed harness and records the result; a
+          test proves the model answers at all; autotune launches
+          candidate plans and keeps the one that measures best. All three
+          queue one at a time, so two measurements never share the
+          machine.
+        </Info></span>
+      </div>
+      <div class="actions" style="margin-top:.4rem">
+        <button type="button" class={busy === "bench" ? "busy" : undefined}
+                onClick={() => setBenching(!benching)}>benchmark</button>
+        <button type="button" class={busy === "smoke" ? "busy" : undefined}
+                disabled={!!busy}
+                onClick={() => run("smoke", () => smokeModel(name),
+                                   `test ${name}`)}>test</button>
+        <button type="button" class={busy === "tune" ? "busy" : undefined}
+                disabled={!!busy}
+                onClick={() => run("tune", () => autotuneModel(name, "balanced"),
+                                   `autotune ${name}`)}>autotune</button>
+      </div>
+      {benching && <BenchForm name={name} onDone={() => setBenching(false)} />}
+    </div>
+  );
+}
+
+/* ---- danger zone: destruction lives with configuration, quarantined --- */
+
+function DangerZone({ d, onChanged }: {
+  d: ModelDetail; onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <div class="widget" style="border-color:var(--err);max-width:880px">
+      <div class="label"><span style="color:var(--err)">danger zone</span></div>
+      <div class="actions" style="margin-top:.4rem">
+        <ConfirmButton
+          label="delete profile"
+          confirmLabel="yes, delete the profile"
+          busy={busy}
+          disabled={busy}
+          consequences={<>
+            Deletes the profile and its generated artifacts, then resyncs
+            the backends so {d.name} is no longer served. The model file
+            on disk ({d.model_path || "unknown path"}) is left alone.
+          </>}
+          onConfirm={() => {
+            setBusy(true);
+            submitAction(() => deleteModel(d.name), `delete ${d.name}`,
+                         onChanged)
+              .finally(() => setBusy(false));
+          }} />
+      </div>
     </div>
   );
 }
@@ -306,7 +402,8 @@ function PlanActions({ name, plan, onChanged, onOptimistic }: {
   };
   return (
     <span class="actions">
-      <button type="button" class={busy === "select" ? "busy" : undefined}
+      <button type="button"
+              class={busy === "select" ? "btn-primary busy" : "btn-primary"}
               disabled={!!busy || plan.pinned}
               onClick={() => act("select", "select plan")}>select</button>
       {plan.disabled
@@ -1135,11 +1232,25 @@ function fmtBudgetMap(v: unknown): string {
   return entries.map(([dev, b]) => `${dev} ${fmtGiB(b)} GiB`).join(" · ");
 }
 
+const TABS = ["overview", "plans", "history", "logs", "configure"] as const;
+type Tab = (typeof TABS)[number];
+
 export function Model({ name }: { name: string }) {
   const { tick, stale, lastAt, retryIn } = useStream();
   const [detail, setDetail] = useState<ModelDetail | null>(null);
   const [err, setErr] = useState("");
   const [reloadN, setReloadN] = useState(0);
+  /* The subtitle used to promise "overview · plans · measurements ·
+     logs · configure" over one endless scroll; now they are real tabs.
+     The hash deep-links a tab and survives reload. */
+  const [tab, setTab] = useState<Tab>(() => {
+    const h = location.hash.replace("#", "");
+    return (TABS as readonly string[]).includes(h) ? (h as Tab) : "overview";
+  });
+  const pick = (t: Tab) => {
+    setTab(t);
+    history.replaceState(null, "", `#${t}`);
+  };
 
   useEffect(() => {
     fetchModelDetail(name).then(setDetail).catch((e) => setErr(String(e)));
@@ -1160,7 +1271,7 @@ export function Model({ name }: { name: string }) {
     return (
       <div class="widget">
         <p>couldn't load {name}: {err}</p>
-        <p class="sub"><a href="/v2/models">back to the model hub</a></p>
+        <p class="sub"><a href="/v2/models">back to models</a></p>
       </div>
     );
   }
@@ -1174,16 +1285,30 @@ export function Model({ name }: { name: string }) {
   const revision = finishedJobs + reloadN;
   return (
     <>
-      <Overview d={detail} live={live} stale={stale} lastAt={lastAt}
-                retryIn={retryIn} />
-      <RuntimeActions d={detail} live={live} onChanged={reload} />
-      <TierApply name={name} revision={revision} onApplied={reload} />
-      <Plans name={name} revision={revision} onChanged={reload} />
-      <History name={name} revision={revision} />
-      <Logs name={name} />
-      <RunCommand name={name} revision={revision} />
-      <Configure d={detail} onSaved={reload} />
-      <RuntimePolicyForm name={name} revision={revision} onSaved={reload} />
+      <div class="tabs" role="tablist" aria-label={`${name} sections`}>
+        {TABS.map((t) => (
+          <button key={t} type="button" role="tab" aria-selected={tab === t}
+                  onClick={() => pick(t)}>{t}</button>
+        ))}
+      </div>
+      {tab === "overview" && <>
+        <Overview d={detail} live={live} stale={stale} lastAt={lastAt}
+                  retryIn={retryIn} />
+        <RuntimeActions d={detail} live={live} onChanged={reload} />
+        <Measure name={name} />
+        <TierApply name={name} revision={revision} onApplied={reload} />
+      </>}
+      {tab === "plans" && <>
+        <Plans name={name} revision={revision} onChanged={reload} />
+        <RuntimePolicyForm name={name} revision={revision} onSaved={reload} />
+      </>}
+      {tab === "history" && <History name={name} revision={revision} />}
+      {tab === "logs" && <Logs name={name} />}
+      {tab === "configure" && <>
+        <Configure d={detail} onSaved={reload} />
+        <RunCommand name={name} revision={revision} />
+        <DangerZone d={detail} onChanged={reload} />
+      </>}
     </>
   );
 }
