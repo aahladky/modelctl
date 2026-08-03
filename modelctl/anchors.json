@@ -600,6 +600,29 @@
       "void_reason": "",
       "always_run": true,
       "note": "Exempt from fingerprint reuse. It runs a binary this repo does not build and does not carry the determinism fix; its job is to notice the machine moving under everything else, which is exactly the case where a fingerprint still matches."
+    },
+    {
+      "id": "laguna-s2.1-r2-maiden",
+      "condition": "laguna-s2.1 R2 promotion: build-sycl-rpc binary, --device SYCL0,SYCL1,RPC0 --rpc 192.168.0.76:50052, split 22,10,0, experts blk 29-37 on RPC0; maiden protocol (fresh server, greedy, seed 42, 32 warmup + 128 measured), bench_laguna_rpc.py --arms R2 --runs 5",
+      "metric": "generation_tps",
+      "unit": "tok/s",
+      "value": 13.947480864281765,
+      "runs": [
+        13.740076819910746,
+        13.990887560046048,
+        13.962035045144276,
+        13.67086120017345,
+        14.373543696134302
+      ],
+      "fingerprint": {
+        "build_commit": "f3e7141dd048",
+        "profile_hash": "",
+        "env_hash": "",
+        "driver": ""
+      },
+      "recorded": "2026-08-03",
+      "source": "~/workspace/.lanes/fleet-laguna-baseline/runs/r2-anchor.json",
+      "note": "supersedes laguna-s2.1-canary (old fork binary, void with the binary change); router idle during runs, console-only load"
     }
   ]
 }
