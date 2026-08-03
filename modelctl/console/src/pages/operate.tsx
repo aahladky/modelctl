@@ -659,7 +659,8 @@ export function Operate() {
                   <thead>
                     <tr>
                       <th>model</th><th class="opt">placement</th>
-                      <th class="num">size</th><th class="opt"></th>
+                      <th class="num">size</th>
+                      <th class="opt"><span class="sr-only">state</span></th>
                       <th><span class="sr-only">actions</span></th>
                     </tr>
                   </thead>
