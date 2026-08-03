@@ -1,43 +1,4 @@
 {
   "version": 1,
-  "jobs": [
-    {
-      "id": "ornith-rpc-criterion-2026-08-02",
-      "title": "Ornith 397B: RPC-augmented placement vs the 0.37-class incumbent",
-      "question": "On Ornith-1.0-397B UD-IQ4_NL, does moving a contiguous trailing layer range onto ph16-71's RTX 4080 over 2.5GbE change generation throughput relative to the current all-local placement, whose recorded behaviour is 0.37-class tok/s and SSD-bound?",
-      "criterion": "Both arms run the same prompt set, same context, same sampler, on an otherwise idle rig, three runs each. Record mean and standard deviation of generation tok/s per arm, plus the concurrent machine load for every run. The comparison is decided on the non-overlap of the two arms' run ranges: if the arms' [min, max] generation-tok/s intervals overlap, the pair is recorded as indistinguishable at this sample size and no directional claim is made. No arm is re-run to break a tie.",
-      "measures": [
-        "generation tok/s per run (mean, sd, and every raw run)",
-        "prompt eval tok/s per run",
-        "model load seconds per run",
-        "page-cache residency of the model file before each run",
-        "concurrent machine load (rig and ph16-71) sampled during each run",
-        "bytes over the RPC socket per run",
-        "token identity across the three runs within each arm"
-      ],
-      "arms": [
-        {
-          "name": "incumbent-local",
-          "profile": "ornith-397b",
-          "overrides": {},
-          "requires_nodes": [],
-          "note": "The profile exactly as saved. This is the 0.37-class, SSD-bound placement recorded on 2026-08-01; it is the baseline, not a control to be tuned."
-        },
-        {
-          "name": "rpc-augmented",
-          "profile": "ornith-397b",
-          "overrides": {
-            "_plan_source": "fleet-rpc"
-          },
-          "requires_nodes": [
-            "ph16-71-cuda0"
-          ],
-          "note": "The planner's fleet-rpc variant for this profile: a contiguous trailing layer range on ph16-71-cuda0, everything else identical. Must not be run with the node absent -- the fallback is byte-identical to the incumbent and would answer a different question."
-        }
-      ],
-      "enabled": false,
-      "registered": "2026-08-02",
-      "note": "Pre-registered during RPC node enablement. Not scheduled. Ornith is a tier-4 model whose CPU-resident portion streams from SSD via mmap, so load times are long and the page cache state before each run is part of the measurement, not noise to be discarded."
-    }
-  ]
+  "jobs": []
 }

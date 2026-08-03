@@ -56,12 +56,15 @@ def tearDownModule():
     os.environ.pop("MODELCTL_CI_SCRATCH_ROOT", None)
     shutil.rmtree(_TMP, ignore_errors=True)
 
-RPC_PAIRS = ["ornith-rpc-criterion-2026-08-02"]
-# Pruned from the registry 2026-08-03 (42f412f): the four maiden jobs, which
-# ran 2026-08-02, and the qwen122b RPC pair -- all five referenced the deleted
-# 122B IQ1_M weights. Retirement is now expressed by deletion, not by a
-# disabled entry; these IDs must stay absent or the registry has regressed.
-PRUNED = ["qwen122b-remote-experts-hypothesis-2026-08-02",
+RPC_PAIRS = []
+# The registry ships empty. Pruned 2026-08-03: the four maiden jobs (ran
+# 2026-08-02) and the qwen122b RPC pair went in 42f412f with the deleted
+# 122B IQ1_M weights; the ornith RPC pair went later the same day on Aaron's
+# word, with the 122B partials purge (mission focus: daily driver).
+# Retirement is expressed by deletion, not by a disabled entry; these IDs
+# must stay absent or the registry has regressed.
+PRUNED = ["ornith-rpc-criterion-2026-08-02",
+          "qwen122b-remote-experts-hypothesis-2026-08-02",
           "determinism-cost-c1-static-2026-08-02",
           "determinism-cost-c2-cache-2026-08-02",
           "re-anchor-c1-c2-c3-2026-08-02",
@@ -106,12 +109,21 @@ def _repro_fixture():
                 arms=(nl.Arm(name="only", profile="p"),))
 
 
+def _rpc_fixture(enabled=False):
+    # Shape of the retired RPC pairs: one local arm, one arm needing the
+    # fleet node, held (not released) by default.
+    return _job("rpc-fixture", enabled=enabled,
+                arms=(nl.Arm(name="incumbent-local", profile="p"),
+                      nl.Arm(name="rpc-augmented", profile="p",
+                             requires_nodes=("ph16-71-cuda0",))))
+
+
 class TestShippedRegistry(unittest.TestCase):
     def setUp(self):
         self.jobs = nl.load_jobs()
         self.by_id = {j.id: j for j in self.jobs}
 
-    def test_the_registry_holds_exactly_the_surviving_rpc_pair(self):
+    def test_the_registry_ships_empty(self):
         self.assertEqual(sorted(self.by_id), sorted(RPC_PAIRS))
 
     def test_the_rpc_pairs_stay_disabled(self):
@@ -210,33 +222,32 @@ class TestTheRpcPairsAreUntouched(unittest.TestCase):
         # What keeps the above true as the schema grows: to_dict() emits a
         # new field only when it carries something, so re-saving the
         # registry cannot make an untouched job look edited.
-        job = nl.job_by_id(RPC_PAIRS[0])
+        job = _job("block-mode-default")
         self.assertEqual(job.mode, "block")
         self.assertNotIn("mode", job.to_dict())
 
-    def test_each_rpc_pair_still_has_exactly_one_arm_needing_the_node(self):
+    def test_an_rpc_pair_has_exactly_one_arm_needing_the_node(self):
         # A pair where both arms need the node has no baseline, and one
         # where neither does is not testing the fleet.
-        for job_id in RPC_PAIRS:
-            job = nl.job_by_id(job_id)
-            needing = [a for a in job.arms if a.requires_nodes]
-            self.assertEqual(len(needing), 1, job_id)
-            self.assertEqual(list(needing[0].requires_nodes), ["ph16-71-cuda0"])
+        job = _rpc_fixture()
+        needing = [a for a in job.arms if a.requires_nodes]
+        self.assertEqual(len(needing), 1)
+        self.assertEqual(list(needing[0].requires_nodes), ["ph16-71-cuda0"])
 
 
 class TestBlocking(unittest.TestCase):
     def test_a_disabled_job_is_blocked_even_with_the_node_present(self):
-        job = nl.job_by_id("ornith-rpc-criterion-2026-08-02")
+        job = _rpc_fixture()
         reasons = nl.blocking_reasons(job, usable_node_names=["ph16-71-cuda0"])
         self.assertIn("pre-registered but not enabled", reasons)
 
     def test_a_missing_node_blocks_independently_of_enablement(self):
-        job = nl.job_by_id("ornith-rpc-criterion-2026-08-02")
+        job = _rpc_fixture()
         reasons = nl.blocking_reasons(job, usable_node_names=[])
         self.assertTrue(any("ph16-71-cuda0" in r for r in reasons))
 
     def test_required_nodes_are_collected_across_arms(self):
-        job = nl.job_by_id("ornith-rpc-criterion-2026-08-02")
+        job = _rpc_fixture()
         self.assertEqual(job.required_nodes, {"ph16-71-cuda0"})
 
     def test_nothing_in_the_shipped_registry_is_due(self):
