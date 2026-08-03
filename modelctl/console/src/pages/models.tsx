@@ -125,7 +125,7 @@ export function Models() {
                     <thead>
                       <tr>
                         <th>model</th><th class="opt">placement</th><th>state</th>
-                        <th class="opt">MoE cache</th><th class="num">size</th>
+                        <th class="opt">expert cache</th><th class="num">size</th>
                         <th class="num">tok/s</th>
                       </tr>
                     </thead>

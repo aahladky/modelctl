@@ -635,7 +635,7 @@ function RegisterStep({ w, apply, retry }:
         </fieldset>
 
         <fieldset>
-          <legend>MoE cache</legend>
+          <legend>expert cache</legend>
           <div class="check">
             <input type="checkbox" id="reg-cache" checked={draft.cache_enabled}
                    onChange={(e) => setDraft({

@@ -226,12 +226,12 @@ def _last_lines(text, n):
     return "\n".join(text.splitlines()[-n:])
 
 
-# ---- admission preview + typed configure save ---------------------------
+# ---- fit preview + typed configure save ---------------------------
 
 def admission_preview(name, ctx=None, budgets_bytes=None, moe_mode=None):
     """The tier planner's answer for a draft config, without saving.
 
-    Draft values overlay a deep copy; stored planning inputs still win, so
+    Draft values overlay a deep copy; stored machine snapshot still win, so
     the preview is exactly what apply would compute (same path as
     /api/tiers/{name}). The gate compares against the SAVED profile, so a
     structural draft shows its confirm before anything is written.
@@ -267,7 +267,7 @@ def classify_config_save(profile, updates, budgets_bytes=None,
     """The configure form's structural-change gate.
 
     Reuses the planner's own diff classifier so "structural" means the
-    same thing here as on the tier apply path; cache-budget and
+    same thing here as on the auto-place path; cache-budget and
     cache-mode changes are structural for the same reason
     tier_change_gate treats an effective budget change that way."""
     import modelctl_tiers

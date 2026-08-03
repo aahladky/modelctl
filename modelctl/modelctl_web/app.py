@@ -584,7 +584,7 @@ def create_app(token=None, store=None, runner=None, collector=None,
                         "decision_data": pl.decision_data}
         return JSONResponse({"error": "plan not found"}, status_code=404)
 
-    # ---- runtime policy --------------------------------------------------
+    # ---- placement mode --------------------------------------------------
     @app.get("/api/profiles/{name}/runtime-policy")
     def api_runtime_policy(name: str):
         p = modelctl.load_profile(name)
@@ -795,7 +795,7 @@ def create_app(token=None, store=None, runner=None, collector=None,
         A structural change (placement, cache budgets) answers 409 with
         the gate until the client re-sends accept_structural=true -- the
         explicit confirm the spec requires. Field updates and cache
-        budgets ride the same mutation lane the old console used."""
+        budgets ride the same change queue the old console used."""
         p = modelctl.load_profile(name)
         try:
             body = await request.json()
@@ -905,11 +905,11 @@ def create_app(token=None, store=None, runner=None, collector=None,
     def api_v2_plan_test(name: str, plan_id: str):
         return {"job_id": mutate.submit_plan_test(runner, name, plan_id)}
 
-    # ---- tier apply, behind the admission preview and its gate ----------
+    # ---- auto-place, behind the fit preview and its gate ----------
 
     @app.post("/api/v2/models/{name}/tier/apply")
     async def api_v2_tier_apply(request: Request, name: str):
-        """Apply the tier plan the admission preview just showed.
+        """Apply the tier plan the fit preview just showed.
 
         The gate is answered here as a 409 carrying its own changes list,
         exactly like the configure form's structural gate, so the confirm
@@ -938,7 +938,7 @@ def create_app(token=None, store=None, runner=None, collector=None,
         return {"job_id": mutate.submit_tier_apply(
             runner, name, accept_tier_change=accept), "gate": gate}
 
-    # ---- runtime policy (typed form) -------------------------------------
+    # ---- placement mode (typed form) -------------------------------------
     # The GET survived the cutover; this is the write it never had on the
     # v2 surface. The objectives offered are exactly the ones the endpoint
     # accepts, which are exactly the ones the ranker scores -- the phase-3
@@ -1355,7 +1355,7 @@ def create_app(token=None, store=None, runner=None, collector=None,
         # files in the state dir.
         import modelctl_capabilities
         modelctl_capabilities.clear_cache()
-        return {"ok": True, "message": "capability cache cleared; the next "
+        return {"ok": True, "message": "build-features cache cleared; the next "
                                        "read reprobes the backend"}
 
     # Runtime actions for the operate page. These replace the old console's
@@ -1394,7 +1394,7 @@ def create_app(token=None, store=None, runner=None, collector=None,
     @app.post("/api/v2/settings/hardware/calibrate")
     def api_v2_settings_calibrate():
         # Storage calibration is a measurement job, not a setting: it goes
-        # on the mutation lane like every other write and the page follows
+        # on the change queue like every other write and the page follows
         # it on the shared job stream.
         job_id = mutate.submit_calibrate_storage(runner)
         return {"job_id": job_id}

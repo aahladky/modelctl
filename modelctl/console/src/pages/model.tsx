@@ -1,7 +1,7 @@
 /* per-model page: overview + placement, compiled plans with
    measured/estimated tags, full measurement history from the store, log
    tail, and the typed configure form. The form's save path fetches the
-   planner's admission preview (requested / assumed / chosen + warnings,
+   planner's fit preview (requested / assumed / chosen + warnings,
    the server's own wording) and surfaces the structural-change gate as
    an explicit confirm -- never a silent rewrite. */
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
@@ -69,12 +69,12 @@ function Overview({ d, live, stale, lastAt, retryIn }: {
               ? `split ${d.config.tensor_split} (${d.config.split_mode || "layer"})`
               : (d.config.device || "(backend default)")}
               {d.config.extra ? <div class="sub">{d.config.extra}</div> : null}</td></tr>
-          <tr><td class="sub">planning inputs</td>
+          <tr><td class="sub">machine snapshot</td>
             <td>{d.planning.has_stored_inputs
               ? <>stored{d.planning.recorded_at ? <span class="sub"> · recorded {d.planning.recorded_at}</span> : null}</>
               : <span class="sub">not recorded — the next plan apply freezes them</span>}
               {" "}
-              <Info label="about planning inputs">
+              <Info label="about machine snapshot">
                 The planner reads recorded machine facts (RAM, GPU inventory,
                 limits) instead of probing live on every replan, so planning
                 twice gives the same answer. Inputs are recorded the first
@@ -121,10 +121,10 @@ function RuntimeActions({ d, live, onChanged }: {
         <button type="button" class={busy === "cache" ? "busy" : undefined}
                 disabled={!!busy || !running || d.moe_cache.mode === "off"}
                 onClick={() => run("cache", () => resetModelCache(d.name),
-                                   `MoE cache reset for ${d.name}`,
+                                   `expert cache reset for ${d.name}`,
                                    ((r: { port: number }) =>
                                      `cleared on port ${r.port} · the cache relearns from the next request`) as never)}>
-          reset MoE cache
+          reset expert cache
         </button>
       </div>
       {!running && (
@@ -135,7 +135,7 @@ function RuntimeActions({ d, live, onChanged }: {
       )}
       {running && d.moe_cache.mode === "off" && (
         <div class="sub" style="margin-top:.4rem">
-          no MoE cache to reset — this profile's cache mode is off
+          no expert cache to reset — this profile's cache mode is off
         </div>
       )}
     </div>
@@ -250,7 +250,7 @@ function DangerZone({ d, onChanged }: {
   );
 }
 
-/* ---- tier apply ------------------------------------------------------ */
+/* ---- auto-place ------------------------------------------------------ */
 
 function TierApply({ name, revision, onApplied }: {
   name: string; revision: number; onApplied: () => void;
@@ -273,7 +273,7 @@ function TierApply({ name, revision, onApplied }: {
     setGate(null);
     applyTier(name, accept)
       .then((r) => {
-        toast("ok", `tier apply ${name} submitted`,
+        toast("ok", `auto-place ${name} submitted`,
               `job ${r.job_id} · watch it on the jobs page`);
         onApplied();
       })
@@ -281,13 +281,13 @@ function TierApply({ name, revision, onApplied }: {
         if (e instanceof ApiError && e.status === 409 && e.body.gate) {
           setGate(e.body.gate as Gate);
         } else if (e instanceof ApiError && e.status === 405) {
-          toast("err", "✗ tier apply refused",
+          toast("err", "✗ auto-place refused",
                 String(e.body.reason ?? e.message), 9000);
         } else if (e instanceof ApiError) {
-          toast("err", `✗ tier apply ${name} failed`,
+          toast("err", `✗ auto-place ${name} failed`,
                 String(e.body.error ?? e.message), 9000);
         } else {
-          toast("err", `✗ tier apply ${name} failed`, String(e), 9000);
+          toast("err", `✗ auto-place ${name} failed`, String(e), 9000);
         }
       })
       .finally(() => setBusy(false));
@@ -302,7 +302,7 @@ function TierApply({ name, revision, onApplied }: {
           The planner picks a placement tier from the recorded machine
           facts: tier 1 is GPU-only, 2 adds RAM, 3 adds storage. Applying
           writes the tier's placement into the profile and resyncs. This
-          is the same plan and the same gate the CLI's tier apply uses.
+          is the same plan and the same gate the CLI's auto-place uses.
         </Info></span>
       </div>
       {err && <p class="sub">planner unavailable: {err}</p>}
@@ -671,7 +671,7 @@ export function Configure({ d, onSaved }:
 
   const set = (patch: Partial<Draft>) => setDraft((old) => ({ ...old, ...patch }));
 
-  /* Live admission preview: what the planner would say about the draft.
+  /* Live fit preview: what the planner would say about the draft.
      Debounced — this is a read, but not a free one. */
   useEffect(() => {
     if (debounce.current) clearTimeout(debounce.current);
@@ -726,7 +726,7 @@ export function Configure({ d, onSaved }:
     try {
       const res = await saveModelConfig(d.name, body);
       toast("ok", `configure ${d.name} submitted`,
-            "queued on the mutation lane · watch it on the jobs page");
+            "queued — watch it on the jobs page");
       onSaved();
       void res;
     } catch (e) {
@@ -748,7 +748,7 @@ export function Configure({ d, onSaved }:
       <p class="sub" style="margin:.2rem 0 .9rem">
         Typed form, no JSON. The file on disk stays hand-editable from the
         shell; this is the only editor the console offers. Saving shows
-        the planner's admission answer first.
+        the fit answer first.
       </p>
       <form style="display:grid;gap:1rem" onSubmit={(e) => e.preventDefault()}>
         <fieldset>
@@ -760,7 +760,7 @@ export function Configure({ d, onSaved }:
                 <Info label="about context length">
                   KV cache grows linearly with this; it is the biggest
                   single VRAM lever. The planner sizes KV at exactly this
-                  value during admission.
+                  value during the fit check.
                 </Info>
               </div>
               <input id="cfg-ctx" type="number" min={512} step={1024} value={draft.ctx}
@@ -796,7 +796,7 @@ export function Configure({ d, onSaved }:
               <div class="lbl"><label for="cfg-fa">flash attention</label>
                 <Info label="about flash attention">
                   Faster prompt processing on SYCL. "auto" lets the backend
-                  decide from its probed capabilities.
+                  decide from the build's features.
                 </Info>
               </div>
               <select id="cfg-fa" value={draft.flash_attn}
@@ -844,7 +844,7 @@ export function Configure({ d, onSaved }:
           <div class="frow">
             <div class="field" style="max-width:220px">
               <div class="lbl"><label for="cfg-moe">mode</label>
-                <Info label="about the MoE cache">
+                <Info label="about the expert cache">
                   Reserves a VRAM budget per GPU for hot experts. Learning
                   starts at load; watch the hit-ratio meter on operate.
                   Off means experts run where the placement puts them.
@@ -890,10 +890,10 @@ export function Configure({ d, onSaved }:
           </div>
         </fieldset>
 
-        {/* admission preview: the server's own answer, inline and visible */}
+        {/* fit preview: the server's own answer, inline and visible */}
         <fieldset>
-          <legend>admission preview{" "}
-            <Info label="about admission">
+          <legend>fit preview{" "}
+            <Info label="about the fit preview">
               Computed by the planner at plan time from recorded inputs:
               requested is what this form asks for, assumed is the machine
               facts the plan used, chosen is what would actually launch
@@ -978,7 +978,7 @@ export function Configure({ d, onSaved }:
   );
 }
 
-/* ---- runtime policy (typed form) ------------------------------------- */
+/* ---- placement mode (typed form) ------------------------------------- */
 
 function RuntimePolicyForm({ name, revision, onSaved }: {
   name: string; revision: number; onSaved: () => void;
@@ -1034,17 +1034,17 @@ function RuntimePolicyForm({ name, revision, onSaved }: {
         }
       : { mode: "fixed" };
     submitAction(() => saveRuntimePolicy(name, body),
-                 `runtime policy for ${name}`, onSaved)
+                 `placement mode for ${name}`, onSaved)
       .finally(() => setBusy(false));
   };
 
   return (
     <div class="widget" style="max-width:880px">
-      <h2>runtime policy{" "}
-        <Info label="about runtime policy">
+      <h2>placement mode{" "}
+        <Info label="about placement mode">
           Fixed renders one command from the saved config, forever.
           Managed lets the planner rank the compiled plans at launch and
-          pick the best one for the objective — it can only pick plans it
+          pick the best one for what you optimize for — it can only pick plans it
           has evidence for unless untested plans are allowed.
         </Info>
       </h2>
@@ -1061,7 +1061,7 @@ function RuntimePolicyForm({ name, revision, onSaved }: {
                         onChange={(e) => setManaged(
                           (e.target as HTMLSelectElement).value === "managed")}>
                   <option value="fixed">fixed command</option>
-                  <option value="managed">managed placement</option>
+                  <option value="managed">auto placement</option>
                 </select>
                 <div class="help">
                   {managed
@@ -1078,12 +1078,12 @@ function RuntimePolicyForm({ name, revision, onSaved }: {
                 <legend>ranking</legend>
                 <div class="frow">
                   <div class="field" style="max-width:260px">
-                    <div class="lbl"><label for="rp-objective">objective</label>
-                      <Info label="about objectives">
+                    <div class="lbl"><label for="rp-objective">optimize for</label>
+                      <Info label="about these options">
                         What the ranker maximizes. Every option here is one
                         the ranker actually scores differently — the list
                         comes from the server, so the form cannot offer an
-                        objective the write rejects.
+                        option the server rejects.
                       </Info>
                     </div>
                     <select id="rp-objective" value={objective}

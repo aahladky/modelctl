@@ -135,7 +135,7 @@ function RemoteFleet({ ns, stale, note }:
       <div class={ns.pins_agree ? "sub" : "msg error"} style="margin-top:.3rem">
         {ns.present} present · {ns.pins_agree
           ? "versions match"
-          : "VERSION MISMATCH — not usable for planning"} · RPC {ns.protocol || DASH}
+          : "VERSION MISMATCH — rebuild the node to use it"} · RPC {ns.protocol || DASH}
       </div>
       {ns.nodes.map((n, i) => (
         <NodeBlock key={n.name} n={n} first={i === 0} />
@@ -583,8 +583,8 @@ export function Operate() {
             <div class={cls("models")} key={`cache-${m.name}`}>
               <div class="label">
                 <span>
-                  {m.name} · MoE cache{" "}
-                  <Info label="about the MoE cache">
+                  {m.name} · expert cache{" "}
+                  <Info label="about the expert cache">
                     Expert-cache hit ratio for this model, scraped from its
                     runtime metrics. While the cache is still learning which
                     experts recur, the ratio is provisional; "learning done"
@@ -594,7 +594,7 @@ export function Operate() {
                 <LiveMark stale={bad("models")} />
               </div>
               <Meter value={pct} max={pct == null ? null : 100}
-                     label={`${m.name} MoE cache hit ratio`}
+                     label={`${m.name} expert cache hit ratio`}
                      valuetext={pct == null
                        ? `${m.name} cache hit ratio not reported`
                        : `${pct.toFixed(1)}% cache hit ratio for ${m.name}`} />
@@ -613,7 +613,7 @@ export function Operate() {
       </div>
       {cacheModels.length === 0 && (
         <EmptyState>
-          no MoE cache active — cache meters appear here when a
+          no expert cache active — cache meters appear here when a
           cache-enabled model runs
         </EmptyState>
       )}

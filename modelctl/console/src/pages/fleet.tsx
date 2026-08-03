@@ -38,16 +38,16 @@ const PRESENCE: Record<PresenceState,
                        { chip: string; label: string; blurb: string }> = {
   PRESENT: {
     chip: "chip ok", label: "present",
-    blurb: "reachable and running the matching build — the planner will use it",
+    blurb: "reachable, matching build — usable for placement",
   },
   STALE: {
     chip: "chip warn", label: "stale",
-    blurb: "not a planning target: plans fall back to local placement",
+    blurb: "not usable — placement falls back to local",
   },
   PIN_MISMATCH: {
     chip: "chip err", label: "version mismatch",
-    blurb: "reachable, but built from a different llama.cpp commit — NOT a "
-         + "planning target; the two ends would disagree on kernels",
+    blurb: "reachable, but built from a different llama.cpp commit — rebuild the "
+         + "node to use it; the two ends would disagree on kernels",
   },
 };
 
@@ -136,7 +136,7 @@ function BudgetField({ node, device, staleNames, onDone }: {
         <div class="lbl">
           <label for={id}>budget <span class="sub">GiB</span></label>
           <Info label="about this budget">
-            What admission is allowed to place here — an operator
+            The most auto-place may use here — an operator
             declaration, not a measurement of the device. The ceiling is
             {" "}{device.ceiling_basis}, minus runtime headroom for the
             RPC server's own memory. A budget above the ceiling is
@@ -162,7 +162,7 @@ function BudgetField({ node, device, staleNames, onDone }: {
           {node.name}/{device.name}: {fmtGiB(device.budget_bytes, 2)} →{" "}
           {bytes != null ? (bytes / GIB).toFixed(2) : "—"} GiB.{" "}
           {staleNames.length > 0
-            ? <>Stored planning inputs for {staleNames.join(", ")} were
+            ? <>Stored machine snapshot for {staleNames.join(", ")} were
                 recorded against the old number and go stale; their plans
                 keep placing on it until replanned.</>
             : <>Plans compiled from here on use the new number.</>}
@@ -310,7 +310,7 @@ function StaleBanner({ rows }: { rows: StaleProfileRow[] }) {
     <div class="widget">
       <div class="label">
         <span>
-          stored planning inputs out of step{" "}
+          stored machine snapshot out of step{" "}
           <Info label="what out of step means here">
             These profiles recorded a fleet budget that is no longer the
             one in force. Their stored plans still place against the old
@@ -345,7 +345,7 @@ function NightLane({ view }: { view: FleetView }) {
   return (
     <div class="widget">
       <div class="label">
-        <span>night-lane comparisons that need a node</span>
+        <span>overnight comparisons that need a node</span>
         <span class="sub" style="display:inline-flex;align-items:center;gap:.35em">
           read-only
           <Info label="why this table is read-only">

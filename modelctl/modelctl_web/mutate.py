@@ -39,16 +39,16 @@ def submit_tier_apply(runner, name, accept_tier_change=False):
         plan, inputs, source = modelctl.plan_tiers_for_profile(profile)
         if plan is None:
             raise RuntimeError(f"couldn't analyze model layout for '{name}'")
-        ctx.log(f"planning inputs: {source}")
+        ctx.log(f"machine snapshot: {source}")
         for w in plan["warnings"]:
             ctx.log(f"WARNING: {w}")
         gate = modelctl_tiers.tier_change_gate(profile, plan)
         if gate["requires_accept"] and not accept_tier_change:
-            ctx.log("NOT APPLIED: this replan changes tier, split, or "
+            ctx.log("NOT APPLIED: this recalculation changes level, split, or "
                     "placement beyond pins:")
             for c in gate["changes"]:
                 ctx.log(f"  {c}")
-            ctx.log("re-apply with 'accept tier change' checked; the "
+            ctx.log("re-apply with 'accept placement change' checked; the "
                     "profile is untouched.")
             return {"applied": False, "requires_accept_tier_change": True,
                     "changes": gate["changes"], "tier": plan["tier"],
@@ -56,7 +56,7 @@ def submit_tier_apply(runner, name, accept_tier_change=False):
         if modelctl_tiers.record_planning_inputs(
                 profile, inputs,
                 recorded_at=time.strftime("%Y-%m-%dT%H:%M:%S")):
-            ctx.log(f"planning inputs recorded ({source})")
+            ctx.log(f"machine snapshot recorded ({source})")
         modelctl_tiers.apply_plan_cache_budgets(profile, plan, log=ctx.log)
         cfg = profile.get("config", {})
         cfg.update(plan["config"])
@@ -74,7 +74,7 @@ def submit_tier_apply(runner, name, accept_tier_change=False):
         return {"applied": True, "tier": plan["tier"],
                 "config": plan["config"], "warnings": plan["warnings"],
                 "admission": plan.get("admission")}
-    return runner.submit("tier-apply", f"tier apply {name}", fn,
+    return runner.submit("tier-apply", f"auto-place {name}", fn,
                          payload={"name": name,
                                   "accept_tier_change": accept_tier_change},
                          lane="mutation")
@@ -256,11 +256,11 @@ def submit_unload_all(runner):
 
 def submit_runtime_policy(runner, name, runtime):
     def fn(ctx):
-        ctx.log(f"runtime policy for '{name}': " + json.dumps(runtime))
+        ctx.log(f"placement mode for '{name}': " + json.dumps(runtime))
         modelctl.update_runtime_policy(name, runtime)
         ctx.log("profile saved, artifacts regenerated, synced")
         return {"name": name, "runtime": runtime}
-    return runner.submit("mutation", f"runtime policy {name}", fn,
+    return runner.submit("mutation", f"placement mode {name}", fn,
                          payload={"name": name, "runtime": runtime})
 
 
@@ -342,8 +342,8 @@ def submit_autotune(runner, name, objective="balanced", candidate_ids=None):
             log=ctx.log, proc_register=ctx.register_process,
             cancel_check=ctx.is_cancelled)
         return res
-    # lane="benchmark", not the default mutation lane: a multi-minute
-    # autotune launches real servers, and on the serialized mutation lane
+    # lane="benchmark", not the default change queue: a multi-minute
+    # autotune launches real servers, and on the serialized change queue
     # it blocked every profile save, config edit and sync for its whole
     # duration -- the head-of-line blocking the lanes exist to prevent.
     return runner.submit("benchmark", f"autotune {name}", fn,
@@ -415,7 +415,7 @@ def submit_fleet_budget(runner, node, device, budget_bytes):
             ctx.log(f"{node}/{device} budget already {gib:.2f} GiB; "
                     f"nothing written")
         for p in result["staled_profiles"]:
-            ctx.log(f"stale planning inputs: {p['name']} -- its stored plan "
+            ctx.log(f"stale machine snapshot: {p['name']} -- its stored plan "
                     f"was built against the old budget; replan to use the new "
                     f"one")
         if not result["staled_profiles"]:

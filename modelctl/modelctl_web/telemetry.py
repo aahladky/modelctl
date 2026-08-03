@@ -1,6 +1,6 @@
 """Telemetry for the /v2 console: one SSE stream feeding the operate and
 jobs pages -- service status, per-GPU VRAM, system RAM, per-resident-model
-tok/s, MoE cache hit ratio + learning state, remote fleet node stats, and
+tok/s, expert cache hit ratio + learning state, remote fleet node stats, and
 the job list.
 
 Every probe is injectable so tests run hermetically (no xpu-smi, no
@@ -102,7 +102,7 @@ def parse_worker_metrics(text):
 
 
 def summarize_cache(moe):
-    """Per-device MoE cache map -> the one-line summary the operate page
+    """Per-device expert cache map -> the one-line summary the operate page
     shows: aggregate hit ratio from the raw counters, and "learning" as
     "any device still learning". None when there is nothing to summarize."""
     if not moe:
@@ -283,7 +283,7 @@ class TelemetryCollector:
             extras.append("tensor overrides")
         mc = profile.get("moe_cache") or {}
         if mc.get("mode", "off") != "off":
-            extras.append(f"MoE cache {mc['mode']}")
+            extras.append(f"expert cache {mc['mode']}")
         return base + (f" + {', '.join(extras)}" if extras else "")
 
     def _size_bytes(self, profile):
@@ -330,7 +330,7 @@ class TelemetryCollector:
             flags.append("tensor overrides")
         mc = profile.get("moe_cache") or {}
         if mc.get("mode", "off") != "off":
-            flags.append(f"MoE cache {mc['mode']}")
+            flags.append(f"expert cache {mc['mode']}")
         if not devices and not flags:
             return None
         return {"devices": devices, "flags": flags}

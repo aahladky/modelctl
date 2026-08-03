@@ -69,7 +69,7 @@ const HELP: Record<string, string> = {
     "fussier about a quantized V than a quantized K.",
   flash_attn:
     "Faster prompt processing on SYCL. \"auto\" lets the backend decide " +
-    "from its own probed capabilities, which is what the capability " +
+    "from its own probed build features, which is what the capability " +
     "report below reads.",
   mtp:
     "Multi-token prediction, where a model ships a draft head for it. " +
@@ -194,9 +194,8 @@ function Defaults({ s, onSaved }: { s: SettingsOverview; onSaved: () => void }) 
     <div class="widget" style="max-width:900px">
       <h2>profile defaults</h2>
       <p class="sub" style="margin:.2rem 0 .9rem">
-        What a newly created profile inherits. Changing them never touches
-        an existing profile — edit those on their own page. The same
-        validation runs here and in <span class="num">modelctl defaults</span>.
+        Defaults for new profiles. Existing profiles keep their own
+        settings — edit those on their pages.
       </p>
       {cur.error && <div class="msg error">✗ {cur.error}</div>}
       <form style="display:grid;gap:1rem" onSubmit={(e) => e.preventDefault()}>
@@ -368,8 +367,9 @@ function Hardware({ hw, onSaved }: { hw: HardwareSection; onSaved: () => void })
     return (
       <div class="widget"><h2>hardware policy</h2>
         <div class="msg error">✗ {hw.error}</div>
-        <p class="sub">Device policy is unreadable, so it is not editable
-          here. Everything else on this page still works.</p>
+        <p class="sub">Couldn't read the current device policy — check the
+          service log, then reload. Everything else on this page still
+          works.</p>
       </div>
     );
   }
@@ -378,8 +378,8 @@ function Hardware({ hw, onSaved }: { hw: HardwareSection; onSaved: () => void })
     <div class="widget" style="max-width:900px">
       <h2>hardware policy</h2>
       <p class="sub" style="margin:.2rem 0 .9rem">
-        What the planner is allowed to use. Machine facts are shown beside
-        each control; only the controls are yours.
+        Limits for auto-place. Measured values are shown next to each
+        field.
       </p>
       <form style="display:grid;gap:1rem" onSubmit={(e) => e.preventDefault()}>
         {hw.devices.map((g) => {
@@ -405,17 +405,16 @@ function Hardware({ hw, onSaved }: { hw: HardwareSection; onSaved: () => void })
                          onChange={(e) => set(g.device,
                            { enabled: (e.target as HTMLInputElement).checked })} />
                   <div><b><label for={`hw-en-${g.device}`}>enabled</label></b>
-                    <div class="help">a disabled device is invisible to the
-                      planner</div>
+                    <div class="help">a disabled device is never used for
+                      placement</div>
                   </div>
                 </div>
                 <div class="field">
                   <div class="lbl">
                     <label for={`hw-role-${g.device}`}>role</label>
                     <Info label="about device role">
-                      The planner fills the primary GPU first and sorts it to
-                      the front. Leaving every device unset lets it choose by
-                      size. "primary" is the only role the planner reads.
+                      Auto-place fills the primary GPU first. Leave every
+                      device unset to pick by size.
                     </Info>
                   </div>
                   <select id={`hw-role-${g.device}`} value={d.role}
@@ -430,10 +429,9 @@ function Hardware({ hw, onSaved }: { hw: HardwareSection; onSaved: () => void })
                     <label for={`hw-res-${g.device}`}>reserve{" "}
                       <span class="sub">GiB</span></label>
                     <Info label="about the device reserve">
-                      Memory held back from the planner on this device — for
-                      the compositor, another process, or allocator
-                      fragmentation. The planner treats total minus reserve
-                      as the ceiling it may plan against.
+                      Keep this much free on this GPU. The desktop needs
+                      some — 1–2 GiB is typical for a display GPU, 0 for a
+                      compute-only one.
                     </Info>
                   </div>
                   <input id={`hw-res-${g.device}`} type="number" min={0}
@@ -451,10 +449,9 @@ function Hardware({ hw, onSaved }: { hw: HardwareSection; onSaved: () => void })
                     <label for={`hw-bw-${g.device}`}>bandwidth override{" "}
                       <span class="sub">GB/s</span></label>
                     <Info label="about the bandwidth override">
-                      The planner's memory-bandwidth figure for this device,
-                      used to judge whether a tier is bandwidth-bound. Leave
-                      empty to use the probed value; set it only when you
-                      have measured better.
+                      Memory bandwidth used to estimate speed. Leave empty
+                      for the probed value; set it only if you've measured
+                      better.
                     </Info>
                   </div>
                   <input id={`hw-bw-${g.device}`} type="number" min={0}
@@ -488,9 +485,8 @@ function Hardware({ hw, onSaved }: { hw: HardwareSection; onSaved: () => void })
               <div class="lbl">
                 <label for="hw-ram">RAM reserve <span class="sub">GiB</span></label>
                 <Info label="about the RAM reserve">
-                  Host memory held back from planning — the desktop, the
-                  page cache, and whatever else shares this machine. CPU-side
-                  expert tiers are planned against total minus this.
+                  Keep this much RAM free for everything that isn't the
+                  model. 4–6 GiB is typical with a desktop running.
                 </Info>
               </div>
               <input id="hw-ram" type="number" min={0} step={1} value={ram}
@@ -553,7 +549,7 @@ function Hardware({ hw, onSaved }: { hw: HardwareSection; onSaved: () => void })
       </table>
       <div class="actions" style="margin-top:.6rem">
         <button type="button" onClick={calibrate}>measure read speeds</button>
-        <span class="sub">runs on the mutation lane · a few seconds of
+        <span class="sub">runs as a change job · a few seconds of
           reading, no writes</span>
       </div>
     </div>
@@ -824,7 +820,7 @@ function Diagnostics({ s }: { s: SettingsOverview }) {
           <tr><td class="sub">binary</td>
             <td class="num">{caps.binary || "none found"}</td></tr>
           {caps.capability_fingerprint && (
-            <tr><td class="sub">capability fingerprint</td>
+            <tr><td class="sub">build fingerprint</td>
               <td class="num">{caps.capability_fingerprint}</td></tr>
           )}
           {(caps.candidates ?? []).length > 1 && (
@@ -844,7 +840,7 @@ function Diagnostics({ s }: { s: SettingsOverview }) {
       )}
       <div class="actions" style="margin-top:.6rem">
         <button type="button" onClick={() => reprobeCapabilities()
-          .then((r) => toast("ok", "capability cache cleared", r.message))
+          .then((r) => toast("ok", "build-features cache cleared", r.message))
           .catch((e) => toast(
             "err", "✗ reprobe refused",
             e instanceof ApiError ? String(e.body.reason ?? e.message) : String(e),
@@ -877,7 +873,7 @@ function Diagnostics({ s }: { s: SettingsOverview }) {
 
       <h3 style="margin-top:1rem">support bundle</h3>
       <p class="sub">
-        Manifest, capability probe, environment, redacted profiles and
+        Manifest, build-features probe, environment, redacted profiles and
         recent logs in one zip. Tokens and credentials are redacted before
         it is written.
       </p>

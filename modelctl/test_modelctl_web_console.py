@@ -127,7 +127,7 @@ class TestCollector(unittest.TestCase):
         self.assertEqual(m["name"], "m1")
         self.assertEqual(m["state"], "ready")
         self.assertEqual(m["placement"], "split 22,10 (layer) + CPU experts, "
-                                         "tensor overrides, MoE cache auto")
+                                         "tensor overrides, expert cache auto")
         self.assertIsNotNone(m["cache"])
         json.dumps(snap)  # the SSE stream serializes this verbatim
 

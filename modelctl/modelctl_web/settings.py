@@ -376,7 +376,7 @@ def paths_section():
 def diagnostics_section():
     """Manifest, backend capabilities and environment, degrading per part.
 
-    A failing capability probe must not blank the manifest beside it, so
+    A failing build-features probe must not blank the manifest beside it, so
     each part is tried on its own.
     """
     import modelctl_diagnostics

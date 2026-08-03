@@ -136,7 +136,7 @@ export function Job({ id }: { id: string }) {
           <tbody>
             <tr><td class="sub">status</td>
               <td><span class={chip.cls}><span class="dot"></span>{chip.label}</span></td></tr>
-            <tr><td class="sub">lane</td><td>{job.lane}</td></tr>
+            <tr><td class="sub">queue</td><td>{job.lane}</td></tr>
             <tr><td class="sub">type</td><td>{job.type}</td></tr>
             <tr><td class="sub">id</td><td class="num">{job.id}</td></tr>
             <tr><td class="sub">created</td>
@@ -179,7 +179,7 @@ export function Job({ id }: { id: string }) {
           )}
         </div>
         {!job.cancellable && !finished && (
-          <div class="sub">this lane's jobs cannot be cancelled once started</div>
+          <div class="sub">these jobs can't be cancelled once started</div>
         )}
       </div>
       <div class="widget">
@@ -279,7 +279,7 @@ export function Jobs() {
                           copy: inline and always visible, never a title
                           attribute only a mouse can reach */}
                       {!j.cancellable && (
-                        <div class="sub">this lane's jobs cannot be cancelled
+                        <div class="sub">these jobs can't be cancelled
                           once started</div>
                       )}
                       </div>

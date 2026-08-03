@@ -92,7 +92,7 @@ export const fetchAdmission = (name: string, ctx?: number | null,
   get<AdmissionPreview>(
     `/api/v2/models/${enc(name)}/admission${admissionQuery(ctx, budgets, moeMode)}`);
 
-/* Runtime actions: the mutation lane answers with the job id, and the
+/* Runtime actions: the change queue answers with the job id, and the
    tick stream carries the rest. */
 export const loadModel = (name: string) =>
   postJson<{ job_id: string }>(`/api/v2/models/${enc(name)}/load`);
