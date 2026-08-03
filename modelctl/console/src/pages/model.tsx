@@ -11,8 +11,7 @@ import {
   fetchAdmission, fetchLogTail, fetchModelDetail, fetchModelHistory,
   fetchModelPlans, fetchRunCommand, fetchRuntimePolicy, fmtAgo, fmtClock,
   fmtGiB, planAction, resetModelCache, restartModel, saveModelConfig,
-  saveRuntimePolicy, smokeModel,
-} from "../lib/api";
+  saveRuntimePolicy, smokeModel, stateLabel } from "../lib/api";
 import type { PlanAction } from "../lib/api";
 import { ConfirmButton, submitAction } from "../lib/actions";
 import { Info } from "../lib/info";
@@ -55,7 +54,7 @@ function Overview({ d, live, stale, lastAt, retryIn }: {
       <table>
         <tbody>
           <tr><td class="sub">state</td>
-            <td><span class={`chip ${cls}`}><span class="dot"></span>{state}</span>
+            <td><span class={`chip ${cls}`}><span class="dot"></span>{stateLabel(state)}</span>
               {rt?.tok_s != null && <span class="num"> · {rt.tok_s.toFixed(1)} tok/s</span>}
             </td></tr>
           <tr><td class="sub">source</td>
@@ -68,7 +67,12 @@ function Overview({ d, live, stale, lastAt, retryIn }: {
             <td>{d.config.tensor_split
               ? `split ${d.config.tensor_split} (${d.config.split_mode || "layer"})`
               : (d.config.device || "(backend default)")}
-              {d.config.extra ? <div class="sub">{d.config.extra}</div> : null}</td></tr>
+              {d.config.extra ? (
+                <details>
+                  <summary class="sub">exact launch flags</summary>
+                  <div class="sub" style="word-break:break-all">{d.config.extra}</div>
+                </details>
+              ) : null}</td></tr>
           <tr><td class="sub">machine snapshot</td>
             <td>{d.planning.has_stored_inputs
               ? <>stored{d.planning.recorded_at ? <span class="sub"> · recorded {d.planning.recorded_at}</span> : null}</>
@@ -129,8 +133,8 @@ function RuntimeActions({ d, live, onChanged }: {
       </div>
       {!running && (
         <div class="sub" style="margin-top:.4rem">
-          restart and cache reset need the model resident — it is
-          currently {live ? live.state : d.runtime.state}
+          restart and cache reset only apply while the model is loaded —
+          right now it is {stateLabel(live ? live.state : d.runtime.state)}
         </div>
       )}
       {running && d.moe_cache.mode === "off" && (
@@ -297,12 +301,12 @@ function TierApply({ name, revision, onApplied }: {
   const admission = plan?.admission ?? null;
   return (
     <div class="widget">
-      <div class="label"><span>tier plan{" "}
-        <Info label="about tiers">
-          The planner picks a placement tier from the recorded machine
-          facts: tier 1 is GPU-only, 2 adds RAM, 3 adds storage. Applying
-          writes the tier's placement into the profile and resyncs. This
-          is the same plan and the same gate the CLI's auto-place uses.
+      <div class="label"><span>memory fit{" "}
+        <Info label="about the memory fit">
+          The planner works out where this model's pieces should live:
+          fit level 1 is all-GPU (fastest), 2 spills into RAM, 3 leans on
+          storage. Applying writes that layout into the model and pushes
+          it to the router — the same plan the CLI's auto-place uses.
         </Info></span>
       </div>
       {err && <p class="sub">planner unavailable: {err}</p>}
@@ -314,7 +318,7 @@ function TierApply({ name, revision, onApplied }: {
       {plan && (
         <>
           <div class="sub">
-            tier {plan.tier} · inputs {preview?.planning_inputs_source}
+            fit level {plan.tier} · machine facts: {preview?.planning_inputs_source}
             {admission && (admission.fits
               ? " · fits as chosen"
               : " · does not fit even degraded")}
@@ -335,7 +339,7 @@ function TierApply({ name, revision, onApplied }: {
           ))}
           {preview?.gate && preview.gate.changes.length > 0 && (
             <div class="sub" style="margin-top:.4rem">
-              this replan differs from what is saved:
+              this new fit differs from what's saved now:
               {preview.gate.changes.map((c) => (
                 <div class="sub" key={c}>· {c}</div>
               ))}
@@ -344,10 +348,10 @@ function TierApply({ name, revision, onApplied }: {
           {gate && (
             <fieldset style="border-color:var(--warn);margin-top:.6rem">
               <legend style="color:var(--warn)">
-                tier change — confirm required
+                bigger change — confirm required
               </legend>
-              <p class="sub">This replan changes tier, split, or placement
-                beyond the profile's pins:</p>
+              <p class="sub">This new fit changes how the model is placed,
+                not just fine-tuning:</p>
               {gate.changes.map((c) => (
                 <div class="msg warning" key={c}>⚠ {c}</div>
               ))}
@@ -355,7 +359,7 @@ function TierApply({ name, revision, onApplied }: {
                 <button type="button" onClick={() => setGate(null)}>cancel</button>
                 <button type="button" class="btn-danger" disabled={busy}
                         onClick={() => apply(true)}>
-                  apply the tier change
+                  yes, apply it
                 </button>
               </div>
             </fieldset>
@@ -363,7 +367,7 @@ function TierApply({ name, revision, onApplied }: {
           <div class="actions" style="justify-content:flex-end;margin-top:.6rem">
             <button type="button" class={busy ? "busy" : undefined}
                     disabled={busy} onClick={() => apply(false)}>
-              apply tier {plan.tier}
+              apply this fit
             </button>
           </div>
         </>

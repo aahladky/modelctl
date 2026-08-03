@@ -213,6 +213,24 @@ class TestLegacyReplanProperties(unittest.TestCase):
             {"config": new, "cache_budgets": None})
         self.assertFalse(gate["requires_accept"])
 
+    def test_diff_messages_are_human_readable(self):
+        # The gate text reaches the console verbatim; a python repr of
+        # regex tuple lists is not an acceptable user-facing diff.
+        old = {"device": "", "split_mode": "layer", "tensor_split": "8,3",
+               "extra": r"--fit off --device SYCL0,SYCL1 "
+                        r"-ot blk\\.(?:[0-9]|1[0-9])\\.ffn_.*_exps=SYCL0,"
+                        r"ffn_.*_exps=CPU --no-mmap"}
+        new = {"device": "", "split_mode": "layer", "tensor_split": "22,10",
+               "extra": r"--fit off --device SYCL0,SYCL1 "
+                        r"-ot blk\\.(?:[0-9]|1[0-7])\\.ffn_.*_exps=SYCL0,"
+                        r"blk\\.(?:1[8-9]|2[0-2])\\.ffn_.*_exps=SYCL1,"
+                        r"ffn_.*_exps=CPU"}
+        diff = modelctl_tiers.classify_config_diff(old, new)
+        text = " | ".join(diff["changes"])
+        self.assertNotIn("[(", text)
+        self.assertNotIn("\\\\", text)
+        self.assertIn("expert", text)
+
     def test_structural_diff_requires_flag(self):
         old = {"device": "SYCL0", "split_mode": "", "tensor_split": "",
                "extra": ""}

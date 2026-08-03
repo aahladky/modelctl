@@ -5,7 +5,7 @@
    click-defense code for buttons-inside-a-link-row went with them. */
 import { useState } from "preact/hooks";
 import { useStream } from "../lib/stream";
-import { fmtGiB } from "../lib/api";
+import { fmtGiB, stateLabel } from "../lib/api";
 import { EmptyState, PlacementChips } from "../lib/ui";
 import { Info } from "../lib/info";
 import type { ModelRow } from "../lib/types";
@@ -31,7 +31,7 @@ function HubRow({ m }: { m: ModelRow }) {
         <PlacementChips summary={m.placement_summary} fallback={m.placement} />
       </td>
       <td>
-        <span class={chipClass}><span class="dot"></span>{m.state}</span>
+        <span class={chipClass}><span class="dot"></span>{stateLabel(m.state)}</span>
         {!m.enabled && <span class="tag" style="margin-left:.4em">disabled</span>}
       </td>
       <td class="opt sub">
@@ -100,7 +100,7 @@ export function Models() {
                       onChange={(e) => setState((e.target as HTMLSelectElement).value)}>
                 <option value="all">all states</option>
                 <option value="running">running</option>
-                <option value="stopped">stopped</option>
+                <option value="stopped">idle</option>
                 <option value="disabled">disabled</option>
                 <option value="unmanaged">unmanaged</option>
               </select>

@@ -231,14 +231,14 @@ class TelemetryCollector:
             swap["ok"] = True
             swap["latency_ms"] = round((time.monotonic() - t0) * 1000)
         except ModelctlSwapError as e:
-            swap["detail"] = e.code
+            swap["detail"] = e.message
         try:
             t0 = time.monotonic()
             client.registered_models()
             api["ok"] = True
             api["latency_ms"] = round((time.monotonic() - t0) * 1000)
         except ModelctlSwapError as e:
-            api["detail"] = e.code
+            api["detail"] = e.message
         return {"swap": swap, "api": api}
 
     def _node_stats(self):

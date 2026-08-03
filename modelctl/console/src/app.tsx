@@ -110,7 +110,7 @@ function ModelShell() {
   const { params } = useRoute();
   const name = params.name ?? "";
   return (
-    <Shell title={`models · ${name}`} live="telemetry live">
+    <Shell title={`models · ${name}`} live="updating live">
       <Model name={name} />
     </Shell>
   );
@@ -120,7 +120,7 @@ function JobShell() {
   const { params } = useRoute();
   const id = params.id ?? "";
   return (
-    <Shell title={`job · ${id.slice(0, 12)}`} live="job stream live">
+    <Shell title={`job · ${id.slice(0, 12)}`} live="updating live">
       <Job id={id} />
     </Shell>
   );
@@ -130,7 +130,7 @@ function WizardShell() {
   const { params } = useRoute();
   const id = params.id ?? "";
   return (
-    <Shell title="add model" live="wizard live">
+    <Shell title="add model" live="updating live">
       <Wizard id={id} />
     </Shell>
   );
@@ -142,25 +142,25 @@ export function App() {
       <Side />
       <Router>
         <Route path="/v2/" component={() => (
-          <Shell title="overview" live="telemetry live"><Operate /></Shell>
+          <Shell title="overview" live="updating live"><Operate /></Shell>
         )} />
         <Route path="/v2/fleet" component={() => (
-          <Shell title="fleet" live="telemetry live"><Fleet /></Shell>
+          <Shell title="fleet" live="updating live"><Fleet /></Shell>
         )} />
         <Route path="/v2/jobs" component={() => (
-          <Shell title="jobs" live="job stream live"><Jobs /></Shell>
+          <Shell title="jobs" live="updating live"><Jobs /></Shell>
         )} />
         <Route path="/v2/jobs/:id" component={JobShell} />
         <Route path="/v2/models" component={() => (
-          <Shell title="models" live="telemetry live"><Models /></Shell>
+          <Shell title="models" live="updating live"><Models /></Shell>
         )} />
         <Route path="/v2/models/:name" component={ModelShell} />
         <Route path="/v2/add" component={() => (
-          <Shell title="add model" live="wizard live"><Add /></Shell>
+          <Shell title="add model" live="updating live"><Add /></Shell>
         )} />
         <Route path="/v2/add/:id" component={WizardShell} />
         <Route path="/v2/settings" component={() => (
-          <Shell title="settings" live="telemetry live"><Settings /></Shell>
+          <Shell title="settings" live="updating live"><Settings /></Shell>
         )} />
         <Route default component={() => (
           <Shell title="not found" live="">

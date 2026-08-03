@@ -249,3 +249,16 @@ export function fmtUp(startedEpoch: number): string {
   if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 86400) % 3600 / 60)}m`;
   return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
 }
+
+/* Plain words for llama-swap worker states. The raw value stays in the
+   API and filters; only what people read changes. */
+export const stateLabel = (state: string): string =>
+  (({
+    ready: "running",
+    loading: "starting",
+    queued: "waiting to start",
+    unloading: "stopping",
+    stopped: "idle",
+    failed: "failed",
+    unregistered: "not serving",
+  } as Record<string, string>)[state] ?? state);

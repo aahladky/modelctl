@@ -471,6 +471,46 @@ def _placement_view(extra):
     return view
 
 
+def _describe_rules(rules):
+    """A rule list as people read it: where things go, not the regexes.
+
+    The exact patterns are machine-generated and visible in the profile;
+    the diff only needs to say what moved at a glance.
+    """
+    if not rules:
+        return "(none)"
+    targets = []
+    counts = {}
+    for _pattern, device in rules:
+        if device not in counts:
+            targets.append(device)
+        counts[device] = counts.get(device, 0) + 1
+    body = ", ".join(f"{d} x{counts[d]}" if counts[d] > 1 else d
+                     for d in targets)
+    n = len(rules)
+    return f"{n} rule{'s' if n != 1 else ''} ({body})"
+
+
+_DIFF_LABELS = {
+    "routed": "expert placement",
+    "ngl": "GPU layer count (-ngl)",
+    "no_mmap": "memory-map mode",
+    "device_list": "devices",
+    "fit": "auto-fit",
+    "other": "other flags",
+}
+
+
+def _describe_view_value(key, value):
+    if key == "routed":
+        return _describe_rules(value)
+    if key == "no_mmap":
+        return "off" if value else "on"
+    if isinstance(value, list):
+        return " ".join(str(v) for v in value) or "(none)"
+    return str(value) if value not in (None, "") else "(none)"
+
+
 def classify_config_diff(old_cfg, new_cfg):
     """Classify a replan's config diff: "none", "pins", or "structural".
 
@@ -478,7 +518,8 @@ def classify_config_diff(old_cfg, new_cfg):
     differ -- tier, split, device, routed-expert placement, -ngl, mmap
     mode, and every non-placement flag are unchanged. Anything beyond that
     is "structural" and (in the apply paths) requires an explicit
-    --accept-tier-change."""
+    --accept-tier-change. The change strings are user-facing (CLI and
+    console) -- keep them in words, never raw rule-list reprs."""
     changes = []
     structural = False
     for key in ("device", "split_mode", "tensor_split"):
@@ -491,10 +532,13 @@ def classify_config_diff(old_cfg, new_cfg):
     for key in ("routed", "ngl", "no_mmap", "device_list", "fit", "other"):
         if old_v[key] != new_v[key]:
             structural = True
-            changes.append(f"extra {key}: {old_v[key]} -> {new_v[key]}")
+            changes.append(f"{_DIFF_LABELS[key]}: "
+                           f"{_describe_view_value(key, old_v[key])} -> "
+                           f"{_describe_view_value(key, new_v[key])}")
     pins_changed = old_v["pins"] != new_v["pins"]
     if pins_changed:
-        changes.append(f"extra pins: {old_v['pins']} -> {new_v['pins']}")
+        changes.append(f"pinned tensors: {_describe_rules(old_v['pins'])} -> "
+                       f"{_describe_rules(new_v['pins'])}")
     if structural:
         kind = "structural"
     elif pins_changed:
@@ -1152,9 +1196,9 @@ def _plan_moe_spill(tier, layout, devs, usable, primary, kv, ram_budget,
     if tier == 3 and cpu_gib > analysis["ram_budget_gib"]:
         # Fixed+GPU consumed the model but the CPU share still exceeds RAM:
         # effective streaming anyway -- downgrade the label, keep the plan.
-        warnings.append("CPU-resident share exceeds the RAM budget even "
-                        "though the whole model fits on paper -- treat this "
-                        "as tier 4 in practice.")
+        warnings.append("the CPU share is bigger than the RAM budget, so "
+                        "part of the model will stream from disk -- expect "
+                        "tier-4 (slowest) speed in practice.")
     layout_rows = [("all GPUs (fixed)" if len(used_devs) > 1 else f"{primary} (fixed)",
                     _gib(fixed_total),
                     "attention/embeddings/KV, split by capacity"

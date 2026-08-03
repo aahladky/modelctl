@@ -12,7 +12,8 @@ import { Info } from "../lib/info";
 import { Meter } from "../lib/meter";
 import { ConfirmButton, submitAction } from "../lib/actions";
 import { cancelJob, fmtAgo, fmtClock, fmtGiB, fmtUp, loadModel, probeFleet,
-  unloadAll, unloadModel } from "../lib/api";
+  unloadAll, unloadModel,
+  stateLabel } from "../lib/api";
 import { EmptyState, Pipeline, PlacementChips, SectionHead, StatBlock }
   from "../lib/ui";
 import { toast } from "../lib/toasts";
@@ -196,7 +197,7 @@ function RunningCard({ m, spark, stale }:
           <h3 style="font-size:1.02rem;margin:0">
             <a href={`/v2/models/${encodeURIComponent(m.name)}`}>{m.name}</a>
             <span style={`color:var(--${m.state_class === "ok" || m.running ? "ok" : "muted"});font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;margin-left:.6em`}>
-              {m.state}
+              {stateLabel(m.state)}
             </span>
           </h3>
           <div class="sub num" style="margin:.15rem 0 .4rem">
@@ -472,12 +473,13 @@ export function Operate() {
       <div class="widget" style="display:flex;gap:1.2rem;align-items:center;flex-wrap:wrap">
         <span class={services.swap.ok ? "chip ok" : "chip err"}>
           <span class="dot"></span>
-          llama-swap · {services.swap.ok ? "running" : "down"} · {services.swap.detail}
+          model router · {services.swap.ok ? "running" : "not reachable"}
+          {!services.swap.ok && services.swap.detail ? ` · ${services.swap.detail}` : ""}
           {services.swap.ok && services.swap.latency_ms != null ? ` · ${services.swap.latency_ms}ms` : ""}
         </span>
         <span class={services.api.ok ? "chip ok" : "chip err"}>
           <span class="dot"></span>
-          API · {services.api.ok ? "ok" : "down"}
+          console API · {services.api.ok ? "ok" : "down"}
           {services.api.latency_ms != null ? ` · ${services.api.latency_ms}ms` : ""}
         </span>
         {stale && (
@@ -496,7 +498,7 @@ export function Operate() {
       </div>
 
       <SectionHead title="active workloads">
-        {nActive} of {models.length} profiles
+        {nActive} of {models.length} models
         {active.running.length > 1 && <>
           {" · "}
           <UnloadAll running={active.running.length} stale={stale} />
@@ -650,7 +652,7 @@ export function Operate() {
           ? (err["models"]
               ? <p class="sub stale-note">could not read the profile store —
                   {" "}{err["models"]}. This is not an empty install.</p>
-              : <p class="sub">no profiles registered yet — <a href="/v2/add">add a model</a></p>)
+              : <p class="sub">no models yet — <a href="/v2/add">add one</a></p>)
           : library.length === 0
             ? <EmptyState>nothing matches</EmptyState>
             : (
