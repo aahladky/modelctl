@@ -36,6 +36,20 @@ export interface CacheStats {
   devices: string[];
 }
 
+/* Structured placement summary: the resulting allocation, for chip
+   rendering ("B70 22 GiB" + flags) instead of plan grammar. Optional on
+   the tick until the server serializes it; renderers fall back to the
+   `placement` string (see lib/ui.tsx PlacementChips). */
+export interface PlacementDevice {
+  name: string;
+  text: string;
+}
+
+export interface PlacementSummary {
+  devices: PlacementDevice[];
+  flags: string[];
+}
+
 export interface ModelRow {
   name: string;
   file: string;
@@ -49,6 +63,7 @@ export interface ModelRow {
   port: number | null;
   size_bytes: number | null;
   moe_cache_mode: string;
+  placement_summary?: PlacementSummary | null;
   tok_s: number | null;
   tok_s_avg: number | null;
   cache: CacheStats | null;
