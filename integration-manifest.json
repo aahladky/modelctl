@@ -5,7 +5,7 @@
   "upstream_base": "9b2a08881",
   "validation_report": "modelctl/docs/evidence/2026-08-01-onednn-determinism.md",
   "modelctl_commit": "dfcebc8",
-  "llama_cpp_commit": "85b7e6556b6b83026d1a17df2635bc1173db1f97",
+  "llama_cpp_commit": "f3e7141dd0481f815d0a32b10853b47a520a1848",
   "llama_cpp_upstream_base": "9b2a08881",
   "llama_cpp_pre_sync_tag": "moe-cache-pre-upstream-2026-07-30",
   "llama_cpp_pre_sync_commit": "e7af6cf1996cb3d850963213b043d876ffe959ea",
@@ -26,6 +26,6 @@
   ],
   "release_channel": "experimental",
   "acceptance_report": "modelctl/docs/evidence/2026-08-01-onednn-determinism.md",
-  "field_notes": "validated_* names the last modelctl+llama.cpp pair that passed hardware acceptance together -- the rollback target. The legacy modelctl_commit/llama_cpp_commit/llama_cpp_upstream_base/acceptance_report keys are the same values under their old ambiguous names, kept for ci/checks.sh and older readers.",
+  "field_notes": "validated_* names the last modelctl+llama.cpp pair that passed hardware acceptance together -- the rollback target. llama_cpp_commit tracks the current RATIFIED submodule pin and is what ci/checks.sh compares against the checkout; it may run ahead of validated_llama_commit between acceptance passes (f3e7141dd ratified 2026-08-03: two moe_cpu_pool race fixes + async fills default-off; fleet re-enrolled at it same day). modelctl_commit/llama_cpp_upstream_base/acceptance_report remain the validated pair's values under their old names.",
   "notes": "oneDNN determinism pair: the 122B greedy nondeterminism this chain had filed against the MoE transfer cache was oneDNN matmul reduction order (DnnlGemmWrapper built its primitive without set_deterministic). It reproduced with no cache configured and under static placement. GGML_SYCL_DETERMINISTIC (default 1) pins it. Rail: 10/10 identical tokens AND logprobs at 122B for cache-on, cache+hybrid and +advise, with byte-identical execution fingerprints; advise-on == advise-off bit for bit, closing the P1 C4 flicker; tiny fixture 8/8. Cost, same binary, attribute off: C1 -15.20%, C2 -8.01%, C3 -14.87% (dets are the slower arm). The pin advances the determinism fix and the hybrid CPU kernel work together as one validated pair."
 }

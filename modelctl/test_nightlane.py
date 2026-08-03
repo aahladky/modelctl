@@ -56,9 +56,13 @@ def tearDownModule():
     os.environ.pop("MODELCTL_CI_SCRATCH_ROOT", None)
     shutil.rmtree(_TMP, ignore_errors=True)
 
-RPC_PAIRS = ["ornith-rpc-criterion-2026-08-02",
-             "qwen122b-remote-experts-hypothesis-2026-08-02"]
-MAIDEN = ["determinism-cost-c1-static-2026-08-02",
+RPC_PAIRS = ["ornith-rpc-criterion-2026-08-02"]
+# Pruned from the registry 2026-08-03 (42f412f): the four maiden jobs, which
+# ran 2026-08-02, and the qwen122b RPC pair -- all five referenced the deleted
+# 122B IQ1_M weights. Retirement is now expressed by deletion, not by a
+# disabled entry; these IDs must stay absent or the registry has regressed.
+PRUNED = ["qwen122b-remote-experts-hypothesis-2026-08-02",
+          "determinism-cost-c1-static-2026-08-02",
           "determinism-cost-c2-cache-2026-08-02",
           "re-anchor-c1-c2-c3-2026-08-02",
           "sdpa-reproducibility-2026-08-02"]
@@ -79,13 +83,36 @@ def _job(job_id, enabled=True, **kw):
     return nl.NightLaneJob(**fields)
 
 
+# Behaviour-test stand-ins for the pruned registry jobs (see PRUNED above):
+# same shapes the maiden jobs had, no dependence on what ships in the registry.
+def _paired_fixture():
+    return _job("paired-fixture", mode="paired", pairs=5,
+                metric="generation_tps",
+                arms=(nl.Arm(name="deterministic-on", profile="p"),
+                      nl.Arm(name="deterministic-off", profile="p")))
+
+
+def _battery_fixture():
+    return _job("battery-fixture", mode="battery", runs=5,
+                metric="generation_tps",
+                arms=(nl.Arm(name="C1-static", profile="p"),
+                      nl.Arm(name="C2-cache", profile="p"),
+                      nl.Arm(name="C3-cache-hybrid", profile="p")))
+
+
+def _repro_fixture():
+    return _job("repro-fixture", mode="reproducibility", runs=8,
+                metric="max_abs_dlogprob",
+                arms=(nl.Arm(name="only", profile="p"),))
+
+
 class TestShippedRegistry(unittest.TestCase):
     def setUp(self):
         self.jobs = nl.load_jobs()
         self.by_id = {j.id: j for j in self.jobs}
 
-    def test_the_registry_holds_the_rpc_pairs_and_the_maiden_jobs(self):
-        self.assertEqual(sorted(self.by_id), sorted(RPC_PAIRS + MAIDEN))
+    def test_the_registry_holds_exactly_the_surviving_rpc_pair(self):
+        self.assertEqual(sorted(self.by_id), sorted(RPC_PAIRS))
 
     def test_the_rpc_pairs_stay_disabled(self):
         # Pre-registered by the RPC enablement session and explicitly not
@@ -93,15 +120,12 @@ class TestShippedRegistry(unittest.TestCase):
         for job_id in RPC_PAIRS:
             self.assertFalse(self.by_id[job_id].enabled, job_id)
 
-    def test_the_maiden_jobs_are_retired_now_that_they_have_run(self):
-        # A pre-registration that has been executed must not stay enabled,
-        # or the next open window runs it again and the registry stops
-        # describing what is outstanding.
-        for job_id in MAIDEN:
-            job = self.by_id[job_id]
-            self.assertFalse(job.enabled, job_id)
-            self.assertIn("RAN 2026-08-02", job.note, job_id)
-            self.assertIn("2026-08-02-maiden-runs.md", job.note, job_id)
+    def test_the_pruned_jobs_stay_pruned(self):
+        # A job that ran (maiden set) or that references deleted weights
+        # (qwen122b pair) must not reappear, or the next open window runs
+        # something that cannot or must not run again.
+        for job_id in PRUNED:
+            self.assertNotIn(job_id, self.by_id)
 
     def test_nothing_is_queued(self):
         self.assertEqual(nl.enabled_jobs(), [])
@@ -212,20 +236,14 @@ class TestBlocking(unittest.TestCase):
         self.assertTrue(any("ph16-71-cuda0" in r for r in reasons))
 
     def test_required_nodes_are_collected_across_arms(self):
-        job = nl.job_by_id("qwen122b-remote-experts-hypothesis-2026-08-02")
+        job = nl.job_by_id("ornith-rpc-criterion-2026-08-02")
         self.assertEqual(job.required_nodes, {"ph16-71-cuda0"})
-
-    def test_the_maiden_jobs_need_no_fleet_node(self):
-        # They measure the rig. A maiden job that quietly required ph16-71
-        # would have been blocked on a node instead of running.
-        for job_id in MAIDEN:
-            self.assertEqual(nl.job_by_id(job_id).required_nodes, set())
 
     def test_nothing_in_the_shipped_registry_is_due(self):
         runnable, skipped = nl.due_jobs()
         self.assertEqual(runnable, [])
         self.assertEqual(sorted(j.id for j, _ in skipped),
-                         sorted(RPC_PAIRS + MAIDEN))
+                         sorted(RPC_PAIRS))
         for _job, reasons in skipped:
             self.assertTrue(reasons)
 
@@ -560,7 +578,7 @@ class TestDispatch(unittest.TestCase):
                                  conditions=self.quiet())
         self.assertEqual(result.submitted, [])
         self.assertEqual(sorted(j for j, _ in result.skipped),
-                         sorted(RPC_PAIRS + MAIDEN))
+                         sorted(RPC_PAIRS))
 
     def test_a_job_needing_an_unreachable_node_is_still_blocked(self):
         # Not a condition of the machine: the local-fallback plan is
@@ -617,7 +635,7 @@ class TestDispatch(unittest.TestCase):
 
 class TestEvidence(unittest.TestCase):
     def setUp(self):
-        self.job = nl.job_by_id("determinism-cost-c1-static-2026-08-02")
+        self.job = _paired_fixture()
 
     def test_evidence_is_filed_with_a_one_line_summary(self):
         with tempfile.TemporaryDirectory() as d:
@@ -772,7 +790,7 @@ class TestGpuLockIsHeld(unittest.TestCase):
     stops them measuring each other."""
 
     def _job(self):
-        return nl.job_by_id("re-anchor-c1-c2-c3-2026-08-02")
+        return _battery_fixture()
 
     def test_every_measurement_happens_inside_the_lock(self):
         events = []
@@ -866,7 +884,7 @@ class TestGpuLockIsHeld(unittest.TestCase):
 
 class TestRunJob(unittest.TestCase):
     def test_a_paired_job_produces_per_pair_deltas(self):
-        job = nl.job_by_id("determinism-cost-c1-static-2026-08-02")
+        job = _paired_fixture()
         values = {"deterministic-on": 6.0, "deterministic-off": 7.0}
         record = nl.run_job(
             job, lambda arm, i, slot: {"generation_tps": values[arm.name]},
@@ -879,7 +897,7 @@ class TestRunJob(unittest.TestCase):
     def test_the_record_carries_what_the_cleanup_pass_did(self):
         # The morning's question is "what ran, and on what machine". The
         # cleanup pass is half that answer and it goes in the evidence.
-        job = nl.job_by_id("sdpa-reproducibility-2026-08-02")
+        job = _repro_fixture()
         record = nl.run_job(
             job, lambda *a: {"max_abs_dlogprob": 0.0}, clock=lambda: 0.0,
             cleanup=lambda: {"scratch_bytes": 842_000_000,
@@ -901,7 +919,7 @@ class TestRunJob(unittest.TestCase):
                                     cleanup=NO_CLEANUP)["status"], "refused")
 
     def test_a_battery_runs_every_arm_the_declared_number_of_times(self):
-        job = nl.job_by_id("re-anchor-c1-c2-c3-2026-08-02")
+        job = _battery_fixture()
         record = nl.run_job(job, lambda arm, i, slot: {"generation_tps": 5.0},
                             clock=lambda: 0.0, cleanup=NO_CLEANUP)
         self.assertEqual(sorted(record["arms"]),
@@ -910,7 +928,7 @@ class TestRunJob(unittest.TestCase):
             self.assertEqual(len(arm["runs"]), 5)
 
     def test_a_failed_run_is_recorded_not_fatal(self):
-        job = nl.job_by_id("re-anchor-c1-c2-c3-2026-08-02")
+        job = _battery_fixture()
 
         def measure(arm, i, slot):
             if arm.name == "C2-cache" and i == 2:
@@ -925,7 +943,7 @@ class TestRunJob(unittest.TestCase):
         self.assertEqual(len(record["arms"]["C3-cache-hybrid"]["runs"]), 5)
 
     def test_every_run_carries_its_own_load_trace(self):
-        job = nl.job_by_id("re-anchor-c1-c2-c3-2026-08-02")
+        job = _battery_fixture()
         record = nl.run_job(job, lambda *a: {"generation_tps": 5.0},
                             clock=lambda: 0.0, cleanup=NO_CLEANUP)
         for arm in record["arms"].values():
@@ -933,13 +951,13 @@ class TestRunJob(unittest.TestCase):
                 self.assertIn("samples", run["load"])
 
     def test_every_record_carries_the_criterion_it_was_judged_by(self):
-        job = nl.job_by_id("sdpa-reproducibility-2026-08-02")
+        job = _repro_fixture()
         record = nl.run_job(job, lambda *a: {"max_abs_dlogprob": 0.0},
                             clock=lambda: 0.0, cleanup=NO_CLEANUP)
         self.assertEqual(record["criterion"], job.criterion)
 
     def test_the_load_summary_says_it_was_folded_from_per_run_traces(self):
-        job = nl.job_by_id("sdpa-reproducibility-2026-08-02")
+        job = _repro_fixture()
         record = nl.run_job(job, lambda *a: {"max_abs_dlogprob": 0.0},
                             clock=lambda: 0.0, cleanup=NO_CLEANUP)
         self.assertIn("note", record["load_summary"])
@@ -953,7 +971,7 @@ class TestRunJob(unittest.TestCase):
                 self.n += 1
                 return self.n > 3
 
-        job = nl.job_by_id("re-anchor-c1-c2-c3-2026-08-02")
+        job = _battery_fixture()
         record = nl.run_job(job, lambda *a: {"generation_tps": 1.0},
                             ctx=Ctx(), clock=lambda: 0.0,
                             cleanup=NO_CLEANUP)
