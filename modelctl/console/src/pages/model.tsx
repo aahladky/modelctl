@@ -40,9 +40,9 @@ function Overview({ d, live, stale, lastAt, retryIn }: {
         <span>overview</span>
         {/* the mark used to say "live" whenever a runtime row existed, so a
             dropped stream showed frozen numbers under a pulsing green dot */}
-        {rt && (stale
-          ? <span class="live stale"><span class="dot"></span>stale</span>
-          : <span class="live"><span class="dot"></span>live</span>)}
+        {rt && stale && (
+          <span class="live stale"><span class="dot"></span>stale</span>
+        )}
       </div>
       {stale && (
         <div class="sub stale-note">

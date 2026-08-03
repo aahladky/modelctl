@@ -132,7 +132,7 @@ measured effective rate is ~3-4 s of a ~36 s run; the remaining gap is
 the per-op offload machinery itself (~1,300 expert-projection staging
 decisions + D2D hit copies per token vs zero for static residency).
 
-## 4. Session state
+## 4. Session state (superseded by section 5 addendum where they touch)
 
 - Fork: `vibe/async-fills` at 3 commits ahead of the pin; pin NOT
   moved; superproject untouched except this evidence file.
@@ -142,3 +142,32 @@ decisions + D2D hit copies per token vs zero for static residency).
 - Not run tonight: Vulkan-vs-SYCL A/B (build was compiling at session
   end), prefill-path measurements (cache prefill value untested here),
   35B C1 re-anchor on the new binary.
+
+## 5. Vulkan vs SYCL (addendum, 2026-08-03, after glslc install)
+
+Vulkan build of the SAME fork tree (SPIRV-Headers vendored to scratch,
+`-I` via CXX flags; build dir `.vibe-scratch/build-vulkan`, not in the
+repo). llama-bench, B70 only (device 0 verified by name), `-p 2048
+-n 128 -ub 2048 -fa 1 -ngl 99 -r 2`, quiet machine (load ~0.6-2.0):
+
+| model | backend | pp2048 | tg128 |
+|---|---|---|---|
+| Qwen3.5-35B-A3B IQ4_XS (16.28 GiB, all-VRAM) | SYCL | 1156.56 +-3.99 | 44.82 +-0.08 |
+| Qwen3.5-35B-A3B IQ4_XS | Vulkan | 1837.64 +-5.08 | 62.21 +-0.69 |
+| Qwen3.6-27B IQ4_NL (15.21 GiB, dense, all-VRAM) | SYCL | 270.57 +-0.30 | 5.78 +-0.00 |
+| Qwen3.6-27B IQ4_NL | Vulkan | 537.57 +-0.63 | 15.35 +-0.01 |
+
+- All-resident MoE: Vulkan +59% prefill, +39% decode over SYCL.
+- Dense IQ4_NL is pathological on SYCL (5.78 tok/s on a model whose
+  608 GB/s bandwidth ceiling is ~38) and still slow on Vulkan (15.35):
+  the quant format itself is a bad citizen on this stack, worst on
+  SYCL. Laguna, Qwen3.6-35B and Qwen-AgentWorld on disk are all
+  UD-IQ4_NL-family.
+
+Laguna L1 shape on the fork's Vulkan server (live argv with device
+names rewritten SYCL->Vulkan, same -ot, default ubatch, 3 x 256 greedy
+after warmup, load_s 39): 9.0265 / 9.1699 / 9.0476 tok/s, prompt
+13.2-15.3 tok/s -- vs the SYCL fork's 12.66/13.20/13.65 in section 3.
+Backend choice is workload-split: Vulkan wins all-resident decisively;
+SYCL wins the CPU-expert layer-split serving shape as configured
+(prompt path especially). Not investigated further tonight.

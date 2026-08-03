@@ -60,12 +60,12 @@ function useCancel() {
         return rest;
       }), 2600);
       toast("err", `✗ ${verb} failed — ${job.title}`,
-            `server refused: ${refusal}. The optimistic ${verb} was rolled back.`, 9000);
+            `server said: ${refusal}`, 9000);
     } else {
-      toast("ok", `${job.title} ${verb === "dequeue" ? "dequeued" : "cancelled"}`,
-            verb === "dequeue"
-              ? "removed before it started · nothing to roll back"
-              : "server confirmed the cancel");
+      toast("ok", `${job.title} ${verb === "remove" ? "removed from the queue" : "cancelled"}`,
+            verb === "remove"
+              ? "it never started"
+              : "the server confirmed it");
     }
   };
   return { pending, flash, request };
@@ -119,8 +119,7 @@ export function Job({ id }: { id: string }) {
           <span>{job.title}</span>
           {!finished && !live && (
             <span class="live stale"><span class="dot"></span>
-              not in the live stream — read once at{" "}
-              {fmtClock(Date.now())}
+              as of {fmtClock(Date.now())}
             </span>
           )}
         </div>
@@ -159,8 +158,8 @@ export function Job({ id }: { id: string }) {
             <button class={pending[job.id] ? "btn-danger busy" : "btn-danger"}
                     disabled={!!pending[job.id] || !job.cancellable}
                     onClick={() => request(job, job.status === "queued"
-                      ? "dequeue" : "cancel")}>
-              {job.status === "queued" ? "dequeue" : "cancel"}
+                      ? "remove" : "cancel")}>
+              {job.status === "queued" ? "remove" : "cancel"}
             </button>
           )}
         </div>
@@ -224,7 +223,7 @@ export function Jobs() {
                         : <span class="chip active"><span class="dot"></span>running</span>}
                     </td>
                     <td>
-                      <JobLink job={j} /> <span class="sub">· lane {j.lane}</span>
+                      <JobLink job={j} />
                       <Meter value={Math.round(j.progress * 100)} max={100}
                              style="max-width:340px"
                              label={`${j.title} progress`}
@@ -283,22 +282,22 @@ export function Jobs() {
                   <tr key={rowKey(j.id)} class={rowClass(j.id)}>
                     <td style="width:110px">
                       {pending[j.id]
-                        ? <span class="chip warn"><span class="dot"></span>dequeuing</span>
+                        ? <span class="chip warn"><span class="dot"></span>removing</span>
                         : <span class="chip"><span class="dot"></span>queued #{i + 1}</span>}
                     </td>
                     <td>
                       <JobLink job={j} />{" "}
                       <span class="sub">
-                        · lane {j.lane}{j.detail ? ` · ${j.detail}` : ""}
+                        {j.detail}
                       </span>
                     </td>
                     <td style="width:120px">
                       <div class="actions">
                       <button class={pending[j.id] ? "busy" : undefined}
                               disabled={!!pending[j.id]}
-                              aria-label={`dequeue ${j.title}`}
-                              onClick={() => request(j, "dequeue")}>
-                        dequeue
+                              aria-label={`remove ${j.title} from the queue`}
+                              onClick={() => request(j, "remove")}>
+                        remove
                       </button>
                       </div>
                     </td>
@@ -331,8 +330,8 @@ export function Jobs() {
                       <td>
                         <JobLink job={j} />{" "}
                         <span class="sub">
-                          · lane {j.lane}{sub ? ` · ${sub}` : ""}
-                          {j.finished ? ` · ${fmtAgo(j.finished)}` : ""}
+                          · {[sub, j.finished ? fmtAgo(j.finished) : ""]
+                            .filter(Boolean).join(" · ")}
                         </span>
                       </td>
                       {/* history has no actions: an empty cell, not a

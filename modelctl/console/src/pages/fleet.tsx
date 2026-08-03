@@ -38,14 +38,14 @@ const PRESENCE: Record<PresenceState,
                        { chip: string; label: string; blurb: string }> = {
   PRESENT: {
     chip: "chip ok", label: "present",
-    blurb: "probed reachable on the pinned commit — the planner will use it",
+    blurb: "reachable and running the matching build — the planner will use it",
   },
   STALE: {
     chip: "chip warn", label: "stale",
     blurb: "not a planning target: plans fall back to local placement",
   },
   PIN_MISMATCH: {
-    chip: "chip err", label: "pin mismatch",
+    chip: "chip err", label: "version mismatch",
     blurb: "reachable, but built from a different llama.cpp commit — NOT a "
          + "planning target; the two ends would disagree on kernels",
   },
@@ -71,13 +71,13 @@ function Pin({ node }: { node: FleetNodeRow }) {
   if (agrees) {
     return (
       <div class="sub">
-        pin {theirs.slice(0, 12)} <span style="color:var(--ok)">✓ agrees</span>
+        build {theirs.slice(0, 12)} <span style="color:var(--ok)">✓ matches</span>
       </div>
     );
   }
   return (
     <div class="msg error" style="margin:.3rem 0 0">
-      pin {theirs ? theirs.slice(0, 12) : "(none recorded)"} ≠ this checkout's{" "}
+      build {theirs ? theirs.slice(0, 12) : "(none recorded)"} ≠ this machine's{" "}
       {expected ? expected.slice(0, 12) : "(unknown)"}
     </div>
   );
@@ -235,7 +235,7 @@ function NodeCard({ node, staleNames, onDone }: {
   const cls = state === "PRESENT" ? "widget" : "widget stale";
   const probe = () => {
     setBusy(true);
-    submitAction(() => probeNode(node.name), `probe ${node.name}`,
+    submitAction(() => probeNode(node.name), `check ${node.name}`,
                  undefined,
                  (r) => {
                    const one = r.probed[0];
@@ -264,8 +264,8 @@ function NodeCard({ node, staleNames, onDone }: {
           <Pin node={node} />
           <div class="sub" style="margin-top:.25rem">
             {node.presence.probed_at
-              ? `probed ${fmtAgo(node.presence.probed_at)}`
-              : "never probed"}
+              ? `checked ${fmtAgo(node.presence.probed_at)}`
+              : "never checked"}
             {node.presence.protocol ? ` · RPC ${node.presence.protocol}` : ""}
             {node.enabled ? "" : " · disabled in the registry"}
             {node.presence.detail ? ` · ${node.presence.detail}` : ""}
@@ -289,7 +289,7 @@ function NodeCard({ node, staleNames, onDone }: {
       {node.location === "remote" && (
         <div class="actions" style="margin-top:.8rem">
           <button type="button" class={busy ? "busy" : undefined}
-                  disabled={busy} onClick={probe}>probe now</button>
+                  disabled={busy} onClick={probe}>check now</button>
         </div>
       )}
     </div>
@@ -400,8 +400,8 @@ export function Fleet() {
 
   const reprobeAll = () => {
     setProbing(true);
-    submitAction(probeFleet, "probe every node", undefined,
-                 (r) => `${r.probed.length} node(s) probed`)
+    submitAction(probeFleet, "check all nodes", undefined,
+                 (r) => `${r.probed.length} node(s) checked`)
       .then(() => load())
       .finally(() => setProbing(false));
   };
@@ -422,21 +422,6 @@ export function Fleet() {
 
   return (
     <>
-      <div class="widget" style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
-        <span class="sub">
-          this checkout pins {view.local_pin
-            ? view.local_pin.slice(0, 12) : "(unknown)"}
-        </span>
-        <span class="sub">
-          presence TTL {Math.round(
-            (view.nodes[0]?.presence.ttl_seconds ?? 900) / 60)} min
-        </span>
-        <span class="grow" style="flex:1"></span>
-        {probing && <span class="sub">probing…</span>}
-        <button type="button" class={probing ? "busy" : undefined}
-                disabled={probing} onClick={reprobeAll}>probe every node</button>
-      </div>
-
       {errs.map(([section, message]) => (
         <div class="widget" key={section}>
           <p class="msg error">{section}: {message}</p>
@@ -450,6 +435,21 @@ export function Fleet() {
           <NodeCard key={n.name} node={n} staleNames={staleNames}
                     onDone={load} />
         ))}
+      </div>
+
+      <div class="widget" style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
+        <span class="sub">
+          this machine's build {view.local_pin
+            ? view.local_pin.slice(0, 12) : "(unknown)"}
+        </span>
+        <span class="sub">
+          checks expire after {Math.round(
+            (view.nodes[0]?.presence.ttl_seconds ?? 900) / 60)} min
+        </span>
+        <span class="grow" style="flex:1"></span>
+        {probing && <span class="sub">checking…</span>}
+        <button type="button" class={probing ? "busy" : undefined}
+                disabled={probing} onClick={reprobeAll}>check all nodes</button>
       </div>
 
       <NightLane view={view} />

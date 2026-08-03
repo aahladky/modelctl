@@ -25,7 +25,7 @@ import type {
 const STEP_LABELS: Record<WizardStep, string> = {
   source: "source", inspect: "inspect", download: "download",
   analyze: "analyze", plans: "plans", test: "test",
-  register: "register", done: "done",
+  register: "save profile", done: "done",
 };
 
 function Stepper({ w }: { w: WizardDetail }) {
@@ -397,7 +397,7 @@ function PlansStep({ w, apply }:
       <div class="actions" style="justify-content:flex-end">
         <button type="button" disabled={!plans || !picked}
                 onClick={() => apply(wizardPlansSubmit(w.wizard_id, picked, "register"))}>
-          skip test, register untested →
+          skip test, save untested →
         </button>
         <button type="button" class="btn-primary" disabled={!plans || !picked}
                 onClick={() => apply(wizardPlansSubmit(w.wizard_id, picked, "test"))}>
@@ -446,7 +446,7 @@ function TestStep({ w, apply, retry }:
               if (e instanceof ApiError && e.status === 409) setBlocked(e.message);
               throw e;
             }));
-          }}>continue to register →</button>
+          }}>continue to save →</button>
         )}
       </div>
     </div>
@@ -569,7 +569,7 @@ function RegisterStep({ w, apply, retry }:
 
   return (
     <div class="widget" style="max-width:880px">
-      <h2>register profile</h2>
+      <h2>save profile</h2>
       <p class="sub" style="margin:.2rem 0 .9rem">
         Everything below writes the profile the service launches from. The
         file on disk stays hand-editable from the shell; this form is the

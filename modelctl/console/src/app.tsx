@@ -28,15 +28,9 @@ function ThemeButton() {
               toggleTheme();
               bump((n) => n + 1);
             }}>
-      {dark ? "☾ dark" : "☀ light"}
+      {dark ? "☀ light" : "☾ dark"}
     </button>
   );
-}
-
-/* The glyphs are decoration. Wrapped so a screen reader reads "operate",
-   not "black square containing white square operate". */
-function Glyph({ children }: { children: ComponentChildren }) {
-  return <span aria-hidden="true">{children}</span>;
 }
 
 function Side() {
@@ -59,24 +53,24 @@ function Side() {
     <aside class="side">
       <div class="brand">modelctl</div>
       <a class={here("/v2/")} aria-current={cur("/v2/", here)} href="/v2/">
-        <Glyph>▣</Glyph> operate</a>
+        overview</a>
       {/* next to operate, not under settings: where a model can run is an
           operational question, and the rig is one of the nodes on it */}
       <a class={under("/v2/fleet")} aria-current={cur("/v2/fleet", under)}
-         href="/v2/fleet"><Glyph>⬡</Glyph> fleet</a>
+         href="/v2/fleet">fleet</a>
       <a class={under("/v2/models")} aria-current={cur("/v2/models", under)}
-         href="/v2/models"><Glyph>◇</Glyph> model hub</a>
+         href="/v2/models">models</a>
       <a class={under("/v2/add")} aria-current={cur("/v2/add", under)}
-         href="/v2/add"><Glyph>＋</Glyph> add</a>
+         href="/v2/add">add</a>
       {/* `under`, not `here`: a per-job page is still the jobs section */}
       <a class={under("/v2/jobs")} aria-current={cur("/v2/jobs", under)}
          href="/v2/jobs">
-        <Glyph>≡</Glyph> jobs{running > 0 && <span class="badge">{running}</span>}
+        jobs{running > 0 && <span class="badge">{running}</span>}
       </a>
       <span class="spacer"></span>
       <a class={here("/v2/settings")} aria-current={cur("/v2/settings", here)}
-         href="/v2/settings"><Glyph>⚙</Glyph> settings</a>
-      <a class="item" href="/logout"><Glyph>←</Glyph> logout</a>
+         href="/v2/settings">settings</a>
+      <a class="item" href="/logout">sign out</a>
     </aside>
   );
 }
@@ -117,7 +111,7 @@ function ModelShell() {
   const { params } = useRoute();
   const name = params.name ?? "";
   return (
-    <Shell title={`model hub · ${name}`} live="telemetry live">
+    <Shell title={`models · ${name}`} live="telemetry live">
       <Model name={name} />
     </Shell>
   );
@@ -149,7 +143,7 @@ export function App() {
       <Side />
       <Router>
         <Route path="/v2/" component={() => (
-          <Shell title="operate" live="telemetry live"><Operate /></Shell>
+          <Shell title="overview" live="telemetry live"><Operate /></Shell>
         )} />
         <Route path="/v2/fleet" component={() => (
           <Shell title="fleet" live="telemetry live"><Fleet /></Shell>
@@ -159,7 +153,7 @@ export function App() {
         )} />
         <Route path="/v2/jobs/:id" component={JobShell} />
         <Route path="/v2/models" component={() => (
-          <Shell title="model hub" live="telemetry live"><Models /></Shell>
+          <Shell title="models" live="telemetry live"><Models /></Shell>
         )} />
         <Route path="/v2/models/:name" component={ModelShell} />
         <Route path="/v2/add" component={() => (

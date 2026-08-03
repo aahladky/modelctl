@@ -36,10 +36,13 @@ function useSeries(tick: Tick | null): Series {
   return ref.current;
 }
 
+/* A region marks itself only when its data is not trustworthy. The
+   header's global badge already says the stream is live; a healthy
+   region repeating it nineteen times is noise, so it renders nothing. */
 function LiveMark({ stale }: { stale: boolean }) {
   return stale
     ? <span class="live stale"><span class="dot"></span>stale</span>
-    : <span class="live"><span class="dot"></span>live</span>;
+    : null;
 }
 
 function StaleSub({ lastAt, retryIn }: { lastAt: number | null; retryIn: number | null }) {
@@ -143,8 +146,8 @@ function RemoteFleet({ ns, stale, note }:
           a healthy protocol version, and it is unusable. */}
       <div class={ns.pins_agree ? "sub" : "msg error"} style="margin-top:.3rem">
         {ns.present} present · {ns.pins_agree
-          ? "pins agree"
-          : "PIN MISMATCH — not a planning target"} · RPC {ns.protocol || DASH}
+          ? "versions match"
+          : "VERSION MISMATCH — not usable for planning"} · RPC {ns.protocol || DASH}
       </div>
       {ns.nodes.map((n, i) => (
         <NodeBlock key={n.name} n={n} first={i === 0} />
@@ -314,7 +317,7 @@ export function Operate() {
             {section} · probe failed
           </span>
         ))}
-        <span class="sub num">console up {fmtUp(services.console_started)}</span>
+        <span class="sub num">console restarted {fmtUp(services.console_started)} ago</span>
         <span class="grow" style="flex:1"></span>
         <a href="/v2/jobs" class="sub">
           {runningJobs} job{runningJobs === 1 ? "" : "s"} running →
@@ -468,8 +471,7 @@ export function Operate() {
             </div>
           )}
         <p class="sub" style="margin:.5rem 0 0">
-          rows update in place over SSE · the model name links to its hub
-          (overview · plans · measurements · logs · configure)
+          each model name links to its detail page
         </p>
         {sectionNote("models")}
       </div>

@@ -74,7 +74,7 @@ function RowActions({ m }: { m: ModelRow }) {
         <button type="button" class={busy === "smoke" ? "busy" : undefined}
                 disabled={!!busy}
                 onClick={() => run("smoke", () => smokeModel(m.name),
-                                   `smoke test ${m.name}`)}>smoke</button>
+                                   `test ${m.name}`)}>test</button>
         <button type="button" class={busy === "tune" ? "busy" : undefined}
                 disabled={!!busy}
                 onClick={() => run("tune",
@@ -134,7 +134,7 @@ export function Models() {
     <div class={wcls}>
       <h2>
         models{" "}
-        <Info label="about the model hub">
+        <Info label="about this list">
           Every registered profile, with its live runtime state. Click a
           row for placement, plans, measurement history, logs, and the
           typed configure form. Measurements outrank estimates everywhere:
@@ -152,11 +152,10 @@ export function Models() {
                 <th>measure{" "}
                   <Info label="about the measurement triggers">
                     A benchmark runs the speed harness and records the
-                    result; a smoke test proves the model answers at all;
+                    result; a test proves the model answers at all;
                     autotune launches candidate plans and keeps the one
-                    that measures best. All three go on the benchmark
-                    lane, which runs one job at a time so two
-                    measurements never share the machine.
+                    that measures best. All three queue one at a time,
+                    so two measurements never share the machine.
                   </Info>
                 </th>
               </tr>
@@ -167,8 +166,7 @@ export function Models() {
           </table>
         )}
       <p class="sub" style="margin:.5rem 0 0">
-        rows update in place over SSE · click a row for the model hub
-        (overview · plans · measurements · logs · configure)
+        click a row for plans, measurements, logs, and configuration
       </p>
     </div>
   );

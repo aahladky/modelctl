@@ -35,7 +35,7 @@ export function Add() {
       const w = await createWizard();
       location.href = `/v2/add/${w.wizard_id}`;
     } catch (e) {
-      toast("err", "✗ couldn't start a wizard", String(e), 9000);
+      toast("err", "✗ couldn't start the add flow", String(e), 9000);
       setBusy(false);
     }
   };
@@ -76,7 +76,7 @@ export function Add() {
           <div class="actions">
             <button type="button" onClick={search}>search</button>
             <button type="button" class="btn-primary" disabled={busy}
-                    onClick={start}>start blank wizard</button>
+                    onClick={start}>add manually</button>
           </div>
         </div>
         {/* colour alone is never the status marker (spec) */}
@@ -104,7 +104,7 @@ export function Add() {
                           source_type: "hf_repo", repo_id: r.repo_id });
                         location.href = `/v2/add/${w.wizard_id}`;
                       } catch (e) {
-                        toast("err", "✗ couldn't start wizard", String(e), 9000);
+                        toast("err", "✗ couldn't start the add flow", String(e), 9000);
                         setBusy(false);
                       }
                     }}>add →</button>
@@ -119,10 +119,10 @@ export function Add() {
       </div>
 
       <div class="widget">
-        <h2>wizards in progress</h2>
+        <h2>unfinished additions</h2>
         {!wizards && <p class="sub">loading…</p>}
         {wizards && wizards.length === 0 && (
-          <p class="sub">none active — start one above</p>
+          <p class="sub">none — start one above</p>
         )}
         {wizards && wizards.length > 0 && (
           <div class="table-scroll">
@@ -147,7 +147,7 @@ export function Add() {
                     <button type="button" class="btn-danger" onClick={async () => {
                       try {
                         await wizardDelete(w.wizard_id);
-                        toast("ok", "wizard abandoned", "its jobs keep their history");
+                        toast("ok", "addition abandoned", "you can start a new one anytime");
                         refresh();
                       } catch (e) {
                         toast("err", "✗ couldn't abandon wizard", String(e), 9000);
