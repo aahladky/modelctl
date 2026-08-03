@@ -25,7 +25,6 @@ from modelctl_web import wizard as wiz
 from modelctl_web.app import create_app, scratch_missing_redirections
 from modelctl_web.jobs import JobRunner, JobStore, sse_job_stream
 
-TOKEN = "test-token"
 
 # Env names the wizard carve-out requires; tests clear them to simulate a
 # scratch instance pointed at the live install.
@@ -177,11 +176,11 @@ class ScratchGateBase(unittest.TestCase):
         store = JobStore(self.root / "jobs.db", scratch_safe=True)
         runner = JobRunner(store)
         self.addCleanup(lambda: runner._thread.join(timeout=1) or None)
-        app = create_app(token=TOKEN, store=store, runner=runner)
+        app = create_app(store=store, runner=runner)
         self.store = store
         return TestClient(app)
 
-    auth = {"Authorization": f"Bearer {TOKEN}"}
+    auth = {}  # auth removed 2026-08-03: console is LAN-open
 
 
 class TestScratchGateAgainstLiveState(ScratchGateBase):
@@ -195,11 +194,6 @@ class TestScratchGateAgainstLiveState(ScratchGateBase):
         self.assertEqual(r.json()[0]["name"], "m1")
         self.assertEqual(
             self.client.get("/api/jobs", headers=self.auth).status_code, 200)
-
-    def test_login_stays_reachable(self):
-        r = self.client.post("/login", data={"next": "/", "token_field": TOKEN},
-                             follow_redirects=False)
-        self.assertEqual(r.status_code, 303)
 
     def test_api_mutation_refused_with_reason(self):
         r = self.client.post("/api/v2/jobs/nope/cancel", headers=self.auth)
@@ -279,7 +273,7 @@ class TestScratchGateAgainstLiveState(ScratchGateBase):
                                            "detail": ""}})
         runner = JobRunner(self.store)
         self.addCleanup(lambda: runner._thread.join(timeout=1) or None)
-        app = create_app(token=TOKEN, store=self.store, runner=runner,
+        app = create_app(store=self.store, runner=runner,
                          collector=collector, tick_interval=0.01,
                          tick_max_seconds=0.05)
         client = TestClient(app)
@@ -441,9 +435,8 @@ class HubBase(unittest.TestCase):
         self.store = store
         self.runner = runner
         self.addCleanup(lambda: runner._thread.join(timeout=1) or None)
-        self.client = TestClient(create_app(token=TOKEN, store=store,
-                                            runner=runner))
-        self.auth = {"Authorization": f"Bearer {TOKEN}"}
+        self.client = TestClient(create_app(store=store, runner=runner))
+        self.auth = {}
 
     def wait_job(self, job_id, timeout=10):
         deadline = time.time() + timeout

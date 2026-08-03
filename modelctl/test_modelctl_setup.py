@@ -13,7 +13,6 @@ import modelctl_setup
 from modelctl_web.app import create_app
 from modelctl_web.jobs import JobStore, JobRunner
 
-TOKEN = "test-token"
 
 
 class SetupBase(unittest.TestCase):
@@ -136,8 +135,8 @@ class TestSetupOverTheWeb(SetupBase):
         store = JobStore(self.root / "jobs.db")
         runner = JobRunner(store)
         self.addCleanup(lambda: runner._thread.join(timeout=1) or None)
-        client = TestClient(create_app(token=TOKEN, store=store, runner=runner))
-        return client, {"Authorization": f"Bearer {TOKEN}"}
+        client = TestClient(create_app(store=store, runner=runner))
+        return client, {}
 
     def test_settings_readiness_lists_every_check(self):
         # The checklist is only worth having if it names every check in
@@ -211,7 +210,6 @@ class TestWebEntryPointCommands(unittest.TestCase):
 
             with mock.patch.object(modelctl, "WEB_UNIT_PATH", unit), \
                  mock.patch.object(modelctl.subprocess, "run", fake_run), \
-                 mock.patch.object(modelctl, "web_token", return_value="tok"), \
                  mock.patch("builtins.print") as pr:
                 rc = modelctl.cmd_web_install(
                     mock.Mock(bind="127.0.0.1:9293"))
@@ -224,7 +222,6 @@ class TestWebEntryPointCommands(unittest.TestCase):
             self.assertIn(["systemctl", "--user", "daemon-reload"], calls)
             printed = " ".join(str(c.args[0]) for c in pr.call_args_list if c.args)
             self.assertIn("http://127.0.0.1:9293/", printed)
-            self.assertIn("tok", printed)
 
     def test_install_reports_systemctl_failure(self):
         with TemporaryDirectory() as d:
@@ -233,7 +230,6 @@ class TestWebEntryPointCommands(unittest.TestCase):
                  mock.patch.object(modelctl.subprocess, "run",
                                    return_value=mock.Mock(
                                        returncode=1, stdout="", stderr="nope")), \
-                 mock.patch.object(modelctl, "web_token", return_value="tok"), \
                  mock.patch("builtins.print"):
                 rc = modelctl.cmd_web_install(mock.Mock(bind=None))
         self.assertEqual(rc, 1)

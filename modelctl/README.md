@@ -107,8 +107,10 @@ Beyond the console: `modelctl ovms-add`/`ovms-convert` manage OpenVINO
 Model Server profiles (a second backend), `modelctl test --evals` runs
 lm-eval suites, and `modelctl doctor [--bundle]` produces diagnostics.
 
-Auth: one shared token (Bearer header or login cookie; tokens in URLs
-are rejected), stored at `~/.local/share/modelctl/web_token`.
+Auth: none. The console is deliberately LAN-open (owner decision
+2026-08-03, same posture as llama-swap on :9292). Cross-origin POSTs
+are rejected so a random website cannot drive the mutating API from a
+LAN browser.
 
 ### Network exposure
 
@@ -216,12 +218,12 @@ all documented in
 | `MODELCTL_LLAMA_SERVER` | Path to the `llama-server` binary |
 | `MODELCTL_LLAMA_SWAP_CONFIG`, `MODELCTL_LLAMA_SWAP_SERVICE`, `MODELCTL_LLAMA_SWAP_BASE_URL`, `MODELCTL_LLAMA_SWAP_DIR` | Router config path / systemd unit / API base / install dir (the port comes from the base URL) |
 | `MODELCTL_OVMS_*` | OpenVINO Model Server backend knobs (`ovms-add`/`ovms-convert`) |
-| `MODELCTL_PROBE_TIMEOUT`, `MODELCTL_WEB_SECURE_COOKIE`, `MODELCTL_BENCH_SH`, `MODELCTL_SPEED_PY` | Probe timeout / cookie policy / benchmark script overrides |
+| `MODELCTL_PROBE_TIMEOUT`, `MODELCTL_BENCH_SH`, `MODELCTL_SPEED_PY` | Probe timeout / benchmark script overrides |
 | `MODELCTL_DEFAULT_*` | Defaults for new profiles (device, ctx, split, KV quant, flash-attn, TTL, MTP, primary GPU, VRAM limit) |
 | `MODELCTL_GPU_EXCLUDE` | Regex to exclude devices from placement inventory (e.g. iGPUs that misreport shared RAM as VRAM) |
 | `MODELCTL_HERMES_CONFIG` | Path to sync an external agent config's custom-provider list |
 | `MODELCTL_PASSTHROUGH_ENV` | Extra env vars to forward into generated `run.sh`/preset entries |
-| `MODELCTL_WEB_TOKEN`, `MODELCTL_WEB_BIND` | Web console auth/bind |
+| `MODELCTL_WEB_BIND` | Web console bind address |
 
 `modelctl defaults` reads/writes these as a persisted JSON file so you
 don't need to export them every session.

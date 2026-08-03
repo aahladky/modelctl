@@ -182,8 +182,6 @@ class TestWebInstallEnvPropagation(unittest.TestCase):
             with mock.patch.object(modelctl, "WEB_UNIT_PATH", unit_path), \
                  mock.patch.object(modelctl.subprocess, "run",
                                    return_value=ok), \
-                 mock.patch.object(modelctl, "web_token",
-                                   return_value="tok"), \
                  mock.patch.dict(os.environ,
                                  {"MODELCTL_HOME": "/data/mc"}), \
                  redirect_stdout(io.StringIO()):

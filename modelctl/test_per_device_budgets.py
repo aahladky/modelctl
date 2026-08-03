@@ -197,7 +197,7 @@ class TestCacheEditorRoundTrip(unittest.TestCase):
             }))
             store = JobStore(Path(tmp) / "jobs.db")
             runner = JobRunner(store)
-            client = TestClient(create_app(token="t", store=store, runner=runner))
+            client = TestClient(create_app(store=store, runner=runner))
 
             with mock.patch.object(modelctl, "PROFILES_DIR", profiles), \
                  mock.patch("modelctl_web.mutate.submit_moe_cache",

@@ -22,11 +22,10 @@ import modelctl_baseline
 import modelctl_errors
 import modelctl_tiers
 import modelctl_vram
-from modelctl_web import app as web_app
 from modelctl_web.jobs import JobRunner, JobStore
 
 from test_launch_truth import LaunchTruthBase
-from test_modelctl_web import TOKEN, WebTestBase
+from test_modelctl_web import WebTestBase
 
 
 class TestLoadProfileContract(unittest.TestCase):
@@ -265,66 +264,6 @@ class TestPlaceTiersCacheParity(unittest.TestCase):
         self.assertEqual(saved["moe_cache"]["gpu"]["budgets_bytes"],
                          {"SYCL0": 4 << 30},
                          "effective budgets must be written back before save")
-
-
-class TestAuthFailsClosed(unittest.TestCase):
-    def test_empty_token_file_regenerates(self):
-        # An empty/whitespace token file used to be returned as "", which
-        # matched an anonymous request's empty credentials: auth wide open.
-        with TemporaryDirectory() as tmp:
-            token_path = Path(tmp) / "web_token"
-            token_path.write_text("\n")
-            with mock.patch.object(web_app, "TOKEN_PATH", token_path), \
-                 mock.patch.dict("os.environ",
-                                 {"MODELCTL_WEB_TOKEN": ""}, clear=False):
-                tok = web_app.load_or_create_token()
-        self.assertTrue(tok.strip(),
-                        "empty token file must fail closed, not auth-open")
-
-    def test_whitespace_env_token_rejected(self):
-        with TemporaryDirectory() as tmp:
-            token_path = Path(tmp) / "web_token"
-            with mock.patch.object(web_app, "TOKEN_PATH", token_path), \
-                 mock.patch.dict("os.environ",
-                                 {"MODELCTL_WEB_TOKEN": "   "}, clear=False):
-                tok = web_app.load_or_create_token()
-        self.assertTrue(tok.strip())
-
-
-class TestLoginFlow(WebTestBase):
-    """POST /login used Starlette's default 307 redirect, which re-POSTs:
-    a correct login ended on 405, a wrong token looped, and a crafted
-    ?next= could re-POST a fresh login into a mutating endpoint."""
-
-    def test_successful_login_lands_on_a_get(self):
-        # /healthz is GET-only: under the old 307 the follow-up re-POSTed
-        # and got 405; under 303 the browser switches to GET and succeeds.
-        r = self.client.post(
-            "/login", data={"token_field": TOKEN, "next": "/healthz"},
-            follow_redirects=True)
-        self.assertEqual(r.status_code, 200)
-
-    def test_successful_login_is_303(self):
-        r = self.client.post(
-            "/login", data={"token_field": TOKEN, "next": "/healthz"},
-            follow_redirects=False)
-        self.assertEqual(r.status_code, 303)
-        self.assertIn("set-cookie", r.headers)
-
-    def test_wrong_token_renders_error_not_redirect_loop(self):
-        r = self.client.post("/login", data={"token_field": "wrong"},
-                             follow_redirects=False)
-        self.assertEqual(r.status_code, 401)
-        self.assertIn("Wrong token", r.text)
-
-    def test_repeated_failures_backoff(self):
-        for _ in range(5):
-            r = self.client.post("/login", data={"token_field": "wrong"},
-                                 follow_redirects=False)
-            self.assertEqual(r.status_code, 401)
-        r = self.client.post("/login", data={"token_field": "wrong"},
-                             follow_redirects=False)
-        self.assertEqual(r.status_code, 429)
 
 
 class TestBaselineOffloadRegex(unittest.TestCase):

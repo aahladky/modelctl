@@ -28,7 +28,6 @@ import modelctl_plans
 from modelctl_web.app import create_app
 from modelctl_web.jobs import JobStore, JobRunner
 
-TOKEN = "test-token"
 
 # A stock upstream llama-server: --version works, --modelctl-capabilities
 # is an unrecognized argument and exits non-zero.  This is what the probe
@@ -178,8 +177,8 @@ class LaunchTruthBase(unittest.TestCase):
         store = JobStore(Path(self.tmp.name) / "jobs.db")
         runner = JobRunner(store)
         self.addCleanup(lambda: runner._thread.join(timeout=1) or None)
-        client = TestClient(create_app(token=TOKEN, store=store, runner=runner))
-        return client, {"Authorization": f"Bearer {TOKEN}"}
+        client = TestClient(create_app(store=store, runner=runner))
+        return client, {}
 
 
 class TestStockBinaryNeverGetsCacheFlags(LaunchTruthBase):

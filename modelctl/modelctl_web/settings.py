@@ -8,14 +8,12 @@ Scope rule from the phase-3 order: this module exposes only settings that
 already exist and already have a backing implementation. Everything
 writable here routes through `settings_service.update_defaults` (profile
 defaults) or `modelctl_hardware.load/save_settings` (device policy) --
-the same code paths the CLI uses -- plus token rotation, which is a write
-to the token file the auth layer already reads. Nothing here invents a
-settings store. Settings the system has but exposes no API for (bind
-address, state paths) are reported read-only, labelled with where they
-actually come from.
+the same code paths the CLI uses. Nothing here invents a settings store.
+Settings the system has but exposes no API for (bind address, state
+paths) are reported read-only, labelled with where they actually come
+from.
 """
 import os
-import secrets
 
 import modelctl
 
@@ -300,53 +298,22 @@ def update_hardware(payload):
 
 # ---- access + paths (read-only unless noted) ----------------------------
 
-def access_section(token_path, bind_default="0.0.0.0:9293"):
-    """How the console is reached, and where its token lives.
+def access_section(bind_default="0.0.0.0:9293"):
+    """How the console is reached.
 
     Bind is process configuration (systemd unit / MODELCTL_WEB_BIND) --
     reported with its source so the page can say why it is not editable
     here, rather than offering a control that could not take effect
-    without a restart nobody asked for.
+    without a restart nobody asked for. There is no token or sign-in:
+    the console is deliberately LAN-open (owner decision 2026-08-03).
     """
     bind = os.environ.get("MODELCTL_WEB_BIND", "")
     return {
         "bind": bind or bind_default,
         "bind_source": "MODELCTL_WEB_BIND" if bind else "built-in default",
         "bind_editable": False,
-        "token_path": str(token_path),
-        "token_source": ("MODELCTL_WEB_TOKEN"
-                         if os.environ.get("MODELCTL_WEB_TOKEN", "").strip()
-                         else "token file"),
-        # An env-supplied token is owned by whoever set the variable;
-        # rotating the file underneath it would change nothing and read
-        # as a no-op failure.
-        "token_rotatable": not os.environ.get("MODELCTL_WEB_TOKEN", "").strip(),
-        "secure_cookie": os.environ.get("MODELCTL_WEB_SECURE_COOKIE", "") == "1",
+        "auth": "none",
     }
-
-
-def rotate_token(token_path):
-    """Write a fresh token and return it.
-
-    The caller re-issues the session cookie with the new value, so the
-    operator who rotated stays signed in and every other session is the
-    one that gets logged out -- which is the point of rotating.
-    """
-    if os.environ.get("MODELCTL_WEB_TOKEN", "").strip():
-        return {"ok": False, "token": "",
-                "error": "token comes from MODELCTL_WEB_TOKEN; rotate it "
-                         "where that variable is set (the systemd unit), "
-                         "not here"}
-    token = secrets.token_hex(16)
-    try:
-        token_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = token_path.with_suffix(".tmp")
-        tmp.write_text(token + "\n")
-        os.chmod(tmp, 0o600)
-        tmp.replace(token_path)
-    except OSError as e:
-        return {"ok": False, "token": "", "error": f"could not write token: {e}"}
-    return {"ok": True, "token": token, "error": ""}
 
 
 def paths_section():
@@ -437,13 +404,13 @@ def readiness_section():
             "checks": checks, "error": ""}
 
 
-def overview(token_path):
+def overview():
     """Everything the settings page renders on first paint."""
     return {
         "readiness": readiness_section(),
         "defaults": defaults_section(),
         "hardware": hardware_section(),
-        "access": access_section(token_path),
+        "access": access_section(),
         "paths": paths_section(),
         "diagnostics": diagnostics_section(),
     }

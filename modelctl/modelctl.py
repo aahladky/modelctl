@@ -4116,15 +4116,10 @@ def web_exposure(bind=None):
     }
 
 
-def web_token():
-    """The console's bearer token, creating one if this is a first run."""
-    from modelctl_web.app import load_or_create_token
-    return load_or_create_token()
-
-
 def cmd_web(args):
     """Run the web console in the foreground (the systemd unit runs it the
-    same way). Bind/token via MODELCTL_WEB_BIND / MODELCTL_WEB_TOKEN."""
+    same way). Bind via MODELCTL_WEB_BIND. No token: the console is
+    deliberately LAN-open (owner decision 2026-08-03)."""
     import uvicorn
     from modelctl_web.app import create_app
     app = create_app()
@@ -4135,7 +4130,6 @@ def cmd_web(args):
           f"bound to {exposure['bind']})")
     if exposure["warning"]:
         print(f"note: {exposure['warning']}")
-    print(f"token: {web_token()}")
     uvicorn.run(app, host=host or "0.0.0.0", port=int(port or 9293),
                 log_level="info")
 
@@ -5013,19 +5007,18 @@ def cmd_doctor(args):
 
 
 def cmd_web_url(args):
-    """Print where the console is and how to authenticate to it."""
+    """Print where the console is."""
     exposure = web_exposure()
     print(exposure["url"])
     print(f"mode: {exposure['mode']} (bound to {exposure['bind']})")
     if exposure["warning"]:
         print(f"note: {exposure['warning']}")
-    print(f"token: {web_token()}")
     return 0
 
 
 def cmd_web_install(args):
     """Install and start the console as a systemd user service, then print
-    the URL and token.
+    the URL.
 
     This is the single bootstrap command: the browser is the
     product entry point, so getting to a working browser must not require
@@ -5066,7 +5059,6 @@ def cmd_web_install(args):
 
     print()
     print(f"modelctl web console: {web_console_url(bind)}")
-    print(f"token: {web_token()}")
     print()
     print(f"  status: systemctl --user status {WEB_SERVICE_NAME}")
     print(f"  logs:   journalctl --user -u {WEB_SERVICE_NAME} -f")

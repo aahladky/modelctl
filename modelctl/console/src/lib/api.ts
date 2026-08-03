@@ -29,15 +29,10 @@ async function fail(r: Response, path: string): Promise<never> {
   throw new ApiError(r.status, body, path);
 }
 
-/* Session-cookie auth: an expired session answers 401 on /api/*; the
-   only recovery is the login page, so go there instead of rendering a
-   dead console. */
+/* No auth: the console is deliberately LAN-open (owner decision
+   2026-08-03), so there is no 401 path to handle. */
 export async function get<T>(path: string): Promise<T> {
   const r = await fetch(path, { headers: { Accept: "application/json" } });
-  if (r.status === 401) {
-    location.href = "/login?next=" + encodeURIComponent(location.pathname);
-    throw new Error("unauthorized");
-  }
   if (!r.ok) return fail(r, path);
   return r.json();
 }
@@ -48,10 +43,6 @@ export async function postJson<T>(path: string, body: unknown = {}): Promise<T> 
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify(body ?? {}),
   });
-  if (r.status === 401) {
-    location.href = "/login?next=" + encodeURIComponent(location.pathname);
-    throw new Error("unauthorized");
-  }
   if (!r.ok) return fail(r, path);
   return r.json();
 }
@@ -226,16 +217,8 @@ export const reprobeCapabilities = () =>
     "/api/v2/settings/capabilities/reprobe");
 export const calibrateStorage = () =>
   postJson<{ job_id: string }>("/api/v2/settings/hardware/calibrate");
-export const rotateToken = (confirm: boolean) =>
-  postJson<{ ok: boolean; token_path: string; message: string }>(
-    "/api/v2/settings/token/rotate", { confirm });
-
 export async function cancelJob(id: string): Promise<CancelResult> {
   const r = await fetch(`/api/v2/jobs/${id}/cancel`, { method: "POST" });
-  if (r.status === 401) {
-    location.href = "/login?next=" + encodeURIComponent(location.pathname);
-    throw new Error("unauthorized");
-  }
   if (!r.ok) throw new Error(`cancel ${id} -> ${r.status}`);
   return r.json();
 }

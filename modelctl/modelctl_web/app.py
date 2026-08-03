@@ -1,21 +1,22 @@
 """FastAPI application for the modelctl web console.
 
 Reads are direct calls into modelctl (concurrent); every write goes through
-the single JobRunner worker (see jobs.py). Auth: one shared token, checked
-as Bearer header or the login cookie (never a query param -- tokens in URLs
-leak into logs and history).
+the single JobRunner worker (see jobs.py). No auth: the console is
+deliberately LAN-open (owner decision 2026-08-03, same posture as
+llama-swap on :9292). Cross-origin POSTs are still rejected -- that guard
+is what keeps a random website open in a LAN browser from driving the
+mutating API.
 """
 import json
 import os
-import secrets
 import time
 import urllib.request
 from dataclasses import asdict
 from urllib.parse import quote
 from pathlib import Path
 
-from fastapi import FastAPI, Form, Request
-from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+from fastapi import FastAPI, Request
+from fastapi.responses import (FileResponse, JSONResponse,
                                PlainTextResponse, RedirectResponse, Response,
                                StreamingResponse)
 from fastapi.templating import Jinja2Templates
@@ -27,8 +28,6 @@ from . import mutate, telemetry
 from .jobs import (JobRunner, JobStore, STATE_DIR, scratch_safe_mode,
                    scratch_missing_redirections)
 
-TOKEN_PATH = STATE_DIR / "web_token"
-COOKIE_NAME = "modelctl_web_token"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 CONSOLE_DIST = Path(__file__).parent.parent / "console" / "dist"
 
@@ -37,51 +36,6 @@ from .swap import LlamaSwapClient, ModelctlSwapError
 LLAMA_SWAP_BASE = os.environ.get("MODELCTL_LLAMA_SWAP_BASE_URL",
                                  "http://127.0.0.1:9292/v1/")
 LLAMA_SWAP_ROOT = LLAMA_SWAP_BASE.rsplit("/v1/", 1)[0]
-
-
-def load_or_create_token():
-    env = os.environ.get("MODELCTL_WEB_TOKEN", "").strip()
-    if env:
-        return env
-    try:
-        stored = TOKEN_PATH.read_text().strip()
-        # An empty token file (interrupted write, `touch`, full disk) must
-        # never mean "no auth": an anonymous request supplies "" too, and
-        # "" == "" would open the whole console. Regenerate instead.
-        if stored:
-            return stored
-    except OSError:
-        pass
-    token = secrets.token_hex(16)
-    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    TOKEN_PATH.write_text(token + "\n")
-    os.chmod(TOKEN_PATH, 0o600)
-    return token
-
-
-def _set_session_cookie(response, token):
-    """The one place session-cookie flags are decided.
-
-    Login and token rotation both issue this cookie; when they disagreed
-    about httponly/samesite the rotated session was the weaker one.
-    """
-    response.set_cookie(
-        COOKIE_NAME, token, httponly=True, samesite="strict",
-        secure=os.environ.get("MODELCTL_WEB_SECURE_COOKIE", "") == "1")
-
-
-def _safe_next(target):
-    """An internal path to return to after login, or the console root.
-
-    `next` is reflected into the form and followed on success; a
-    "javascript:..." or "//evil.example" value there would execute in the
-    console's origin with the session cookie attached, able to drive any
-    mutating API.
-    """
-    target = str(target or "/v2/")
-    if not target.startswith("/") or target.startswith("//"):
-        return "/v2/"
-    return target
 
 
 def _fetch_json(url, timeout=2):
@@ -139,19 +93,17 @@ def _scratch_refusal(request):
     return PlainTextResponse(reason + "\n", status_code=405)
 
 
-def create_app(token=None, store=None, runner=None, collector=None,
+def create_app(store=None, runner=None, collector=None,
                tick_interval=2.0, tick_max_seconds=3600):
-    token = token or load_or_create_token()
     store = store or JobStore()
     runner = runner or JobRunner(store)
     collector = collector or telemetry.TelemetryCollector(store=store)
-    # Two server-rendered pages survive the phase-3 cutover: login (you
-    # cannot be inside the SPA before authenticating) and the last-resort
-    # error page. No filters -- the pages that needed them are gone.
+    # One server-rendered page survives the phase-3 cutover: the
+    # last-resort error page. No filters -- the pages that needed them
+    # are gone.
     templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
     app = FastAPI(title="modelctl-web", docs_url=None, redoc_url=None)
-    app.state.token = token
     app.state.store = store
     app.state.runner = runner
 
@@ -186,22 +138,11 @@ def create_app(token=None, store=None, runner=None, collector=None,
     scratch = scratch_safe_mode()
 
     @app.middleware("http")
-    async def auth(request: Request, call_next):
-        # /login stays reachable in scratch mode too: authenticating is
-        # how a scratch walk gets in, and it mutates nothing server-side.
-        if request.url.path in ("/login", "/healthz"):
-            return await call_next(request)
-        supplied = (
-            request.headers.get("authorization", "").removeprefix("Bearer ").strip()
-            or request.cookies.get(COOKIE_NAME, ""))
-        # app.state, not the closure variable: token rotation replaces it
-        # in-process, and a stale closure would keep honouring the old
-        # token until the next restart.
-        if not supplied or not secrets.compare_digest(supplied, app.state.token):
-            if request.url.path.startswith("/api/"):
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
-            return RedirectResponse(f"/login?next={request.url.path}",
-                                    status_code=303)
+    async def guard(request: Request, call_next):
+        # No auth check here on purpose -- LAN-open by owner decision.
+        # The origin check stays: without any cookie or token, it is the
+        # only thing stopping a cross-site form POST from a random website
+        # aimed at this console's LAN address.
         if request.method == "POST":
             origin = (request.headers.get("origin")
                       or request.headers.get("referer") or "")
@@ -254,54 +195,10 @@ def create_app(token=None, store=None, runner=None, collector=None,
             extras.append("partial ngl")
         return base + (f" +{','.join(extras)}" if extras else "")
 
-    # ---- auth pages -----------------------------------------------------
+    # ---- health ---------------------------------------------------------
     @app.get("/healthz", response_class=PlainTextResponse)
     def healthz():
         return "ok"
-
-    def _login_page(request, next, error, status_code=200):
-        return templates.TemplateResponse(
-            request=request, name="login.html", status_code=status_code,
-            context={"next": next, "error": error,
-                     "token_path": str(TOKEN_PATH)})
-
-    @app.get("/login", response_class=HTMLResponse)
-    def login_form(request: Request, next: str = "/v2/"):
-        return _login_page(request, _safe_next(next), "")
-
-    # Global (not per-IP): this is a single-user console; the goal is to
-    # blunt unattended guessing, not to referee concurrent users.
-    login_failures = {"count": 0, "last": 0.0}
-
-    @app.post("/login")
-    def login(request: Request, next: str = Form("/v2/"), token_field: str = Form("")):
-        next = _safe_next(next)
-        now = time.monotonic()
-        if login_failures["count"] >= 5 and now - login_failures["last"] < 30.0:
-            return _login_page(request, next,
-                               "Too many failed attempts -- wait 30 seconds.",
-                               status_code=429)
-        if not token_field or not secrets.compare_digest(token_field,
-                                                         app.state.token):
-            login_failures["count"] += 1
-            login_failures["last"] = now
-            # Render the form with the error instead of redirecting: a 307
-            # redirect used to re-POST the same body in a loop, and the old
-            # template had no error slot at all.
-            return _login_page(request, next, "Wrong token.", status_code=401)
-        login_failures["count"] = 0
-        # 303 turns the follow-up into a GET; the default 307 re-POSTed to
-        # `next`, which both broke the login flow (405 on /) and let a
-        # crafted ?next= re-POST a fresh login into a mutating endpoint.
-        resp = RedirectResponse(next, status_code=303)
-        _set_session_cookie(resp, app.state.token)
-        return resp
-
-    @app.get("/logout")
-    def logout():
-        resp = RedirectResponse("/login", status_code=303)
-        resp.delete_cookie(COOKIE_NAME)
-        return resp
 
     # ---- dashboard ------------------------------------------------------
     # ---- first run / setup ----------------------------------------------
@@ -1345,7 +1242,7 @@ def create_app(token=None, store=None, runner=None, collector=None,
     @app.get("/api/v2/settings")
     def api_v2_settings():
         from . import settings as settings_mod
-        return settings_mod.overview(TOKEN_PATH)
+        return settings_mod.overview()
 
     @app.post("/api/v2/settings/capabilities/reprobe")
     def api_v2_reprobe():
@@ -1408,34 +1305,6 @@ def create_app(token=None, store=None, runner=None, collector=None,
             content=data, media_type="application/zip",
             headers={"content-disposition":
                      f'attachment; filename="modelctl-support-{stamp}.zip"'})
-
-    @app.post("/api/v2/settings/token/rotate")
-    async def api_v2_settings_rotate_token(request: Request):
-        from . import settings as settings_mod
-        body = await request.json()
-        # Rotation signs out every other session; it is destructive enough
-        # to need the same explicit confirm a structural profile change
-        # gets, so an accidental POST cannot lock the operator's phone out.
-        if not (isinstance(body, dict) and body.get("confirm") is True):
-            return JSONResponse(
-                {"error": "rotation needs an explicit confirm",
-                 "gate": {"changes": [
-                     "every signed-in session except this one is signed out",
-                     "any script or bookmark holding the old token stops"
-                     " working until it is updated",
-                 ]}}, status_code=409)
-        result = settings_mod.rotate_token(TOKEN_PATH)
-        if not result["ok"]:
-            return JSONResponse({"error": result["error"]}, status_code=400)
-        app.state.token = result["token"]
-        # The rotating session keeps working: re-issue its cookie with the
-        # new value. The token itself is never returned in the body -- it
-        # would land in the browser's memory and in any logging proxy.
-        resp = JSONResponse({"ok": True, "token_path": str(TOKEN_PATH),
-                             "message": "token rotated; this session was "
-                                        "re-signed, others must sign in again"})
-        _set_session_cookie(resp, result["token"])
-        return resp
 
     @app.get("/api/v2/wizards")
     def api_v2_wizards():

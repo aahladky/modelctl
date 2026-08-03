@@ -11,7 +11,7 @@ from modelctl_web import telemetry
 from modelctl_web.app import create_app
 from modelctl_web.jobs import JobRunner, JobStore
 
-from test_modelctl_web import TOKEN, WebTestBase
+from test_modelctl_web import WebTestBase
 
 METRICS_TEXT = """\
 # HELP llamacpp:tokens_predicted_total Number of generation tokens processed.
@@ -197,17 +197,16 @@ class ConsoleApiBase(WebTestBase):
     def make_client(self, collector, **app_kwargs):
         from fastapi.testclient import TestClient
         runner = JobRunner(self.store)
-        app = create_app(token=TOKEN, store=self.store, runner=runner,
+        app = create_app(store=self.store, runner=runner,
                          collector=collector, **app_kwargs)
         return TestClient(app), runner
 
 
 class TestV2Api(ConsoleApiBase):
-    def test_auth_required(self):
+    def test_api_open_without_credentials(self):
+        # Auth removed 2026-08-03 (owner decision: LAN-open like :9292).
         for path in ("/api/v2/models", "/api/v2/jobs"):
-            self.assertEqual(self.client.get(path).status_code, 401, path)
-        self.assertEqual(
-            self.client.post("/api/v2/jobs/x/cancel").status_code, 401)
+            self.assertEqual(self.client.get(path).status_code, 200, path)
 
     def test_models_endpoint_typed(self):
         client, _ = self.make_client(make_collector(store=self.store))
@@ -287,8 +286,8 @@ class TestV2Api(ConsoleApiBase):
         self.assertIn("models", payload)
         self.assertIn("jobs", payload)
 
-    def test_events_stream_requires_auth(self):
-        self.assertEqual(self.client.get("/api/v2/events").status_code, 401)
+    # Unauthenticated stream access is covered by the stream test above:
+    # self.auth is empty since the auth layer was removed (2026-08-03).
 
 
 class TestV2Spa(WebTestBase):
@@ -313,10 +312,9 @@ class TestV2Spa(WebTestBase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("javascript", resp.headers["content-type"])
 
-    def test_spa_requires_auth(self):
+    def test_spa_open_without_credentials(self):
         resp = self.client.get("/v2/", follow_redirects=False)
-        self.assertEqual(resp.status_code, 303)
-        self.assertIn("/login", resp.headers["location"])
+        self.assertEqual(resp.status_code, 200)
 
     def test_no_traversal_out_of_dist(self):
         resp = self.client.get("/v2/%2e%2e/%2e%2e/app.py", headers=self.auth)

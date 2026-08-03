@@ -20,7 +20,6 @@ from modelctl_web.jobs import JobStore, JobRunner
 
 MB = 1 << 20
 GB = 1 << 30
-TOKEN = "test-token"
 
 
 def run(cache_metrics=None, **kw):
@@ -138,8 +137,8 @@ class TestHistoryAPI(unittest.TestCase):
         store = JobStore(self.root / "jobs.db")
         runner = JobRunner(store)
         self.addCleanup(lambda: runner._thread.join(timeout=1) or None)
-        self.client = TestClient(create_app(token=TOKEN, store=store, runner=runner))
-        self.auth = {"Authorization": f"Bearer {TOKEN}"}
+        self.client = TestClient(create_app(store=store, runner=runner))
+        self.auth = {}
 
     def record(self, **kw):
         payload = {

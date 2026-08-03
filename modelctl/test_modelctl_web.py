@@ -13,8 +13,6 @@ import modelctl_runtime
 from modelctl_web.app import create_app
 from modelctl_web.jobs import JobStore, JobRunner
 
-TOKEN = "test-token"
-
 PROFILE = {
     "name": "m1", "repo_id": "r/m", "file": "m-Q4_K_M",
     "model_path": "/x/m.gguf", "mmproj_path": None, "mtp_path": None,
@@ -37,9 +35,11 @@ class WebTestBase(unittest.TestCase):
         runner = JobRunner(store)
         self.store = store
         self.addCleanup(lambda: runner._thread.join(timeout=1) or None)
-        app = create_app(token=TOKEN, store=store, runner=runner)
+        app = create_app(store=store, runner=runner)
         self.client = TestClient(app)
-        self.auth = {"Authorization": f"Bearer {TOKEN}"}
+        # Auth removed 2026-08-03 (owner decision: LAN-open like :9292).
+        # Empty dict keeps the many headers=self.auth call sites valid.
+        self.auth = {}
         # Endpoints construct RuntimeDB() with its default path, which is
         # the real ~/.local/share/modelctl/runtime.db -- that is how test
         # plan-run rows (m1/p1) leaked into production plan history.
@@ -94,38 +94,40 @@ class WebTestBase(unittest.TestCase):
         self.fail(f"job {job_id} never finished")
 
 
-class TestAuth(WebTestBase):
-    def test_api_requires_token(self):
-        self.assertEqual(self.client.get("/api/jobs").status_code, 401)
+class TestOpenAccess(WebTestBase):
+    """No auth layer: the console is deliberately LAN-open (owner decision
+    2026-08-03, same posture as llama-swap on :9292). What remains is the
+    cross-origin POST rejection -- without it any website open in a LAN
+    browser could drive the mutating API blind."""
 
-    def test_page_redirects_to_login(self):
+    def test_api_open_without_credentials(self):
+        self.assertEqual(self.client.get("/api/jobs").status_code, 200)
+
+    def test_root_moves_to_console(self):
         resp = self.client.get("/", follow_redirects=False)
-        # 303, never 307: a 307 preserves the method, so an unauthenticated
-        # POST would be re-POSTed at /login instead of landing on the form.
-        self.assertEqual(resp.status_code, 303)
-        self.assertIn("/login", resp.headers["location"])
+        self.assertEqual(resp.headers["location"], "/v2/")
 
-    def test_bearer_works(self):
-        self.assertEqual(self.client.get("/api/jobs", headers=self.auth).status_code, 200)
+    def test_login_routes_gone(self):
+        self.assertEqual(self.client.get("/login").status_code, 404)
+        self.assertEqual(
+            self.client.post("/login", data={"token_field": "x"}).status_code,
+            404)
+        self.assertEqual(self.client.get("/logout").status_code, 404)
 
-    def test_query_token_rejected(self):
-        # tokens in URLs leak via logs/history -- only Bearer/cookie are accepted
-        self.assertEqual(self.client.get(f"/api/jobs?token={TOKEN}").status_code, 401)
+    def test_token_rotation_gone(self):
+        resp = self.client.post("/api/v2/settings/token/rotate",
+                                json={"confirm": True})
+        self.assertEqual(resp.status_code, 404)
 
     def test_cross_origin_post_rejected(self):
         resp = self.client.post("/api/profiles/m1", headers={
-            **self.auth, "Origin": "http://evil.example"}, json={})
+            "Origin": "http://evil.example"}, json={})
         self.assertEqual(resp.status_code, 403)
 
-    def test_login_next_validated(self):
-        resp = self.client.get("/login?next=https://evil.example")
-        self.assertEqual(resp.status_code, 200)
-        self.assertNotIn("evil.example", resp.text)
-
-    def test_login_sets_cookie(self):
-        resp = self.client.post("/login", data={"token_field": TOKEN},
-                                follow_redirects=False)
-        self.assertIn("modelctl_web_token", resp.headers.get("set-cookie", ""))
+    def test_settings_access_reports_no_token(self):
+        access = self.client.get("/api/v2/settings").json()["access"]
+        self.assertNotIn("token_path", access)
+        self.assertIn("bind", access)
 
     def test_healthz_open(self):
         self.assertEqual(self.client.get("/healthz").status_code, 200)

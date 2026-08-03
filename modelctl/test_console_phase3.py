@@ -23,9 +23,6 @@ from modelctl_web import wizard as wiz
 from modelctl_web.app import create_app
 from modelctl_web.jobs import JobRunner, JobStore
 
-TOKEN = "test-token"
-
-
 class SettingsBase(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()
@@ -35,7 +32,6 @@ class SettingsBase(unittest.TestCase):
         self.profiles_dir.mkdir()
         self.defaults_path = self.root / "defaults.json"
         self.hardware_path = self.root / "hardware.json"
-        self.token_path = self.root / "web_token"
         no_binaries = str(self.root / "no-binaries" / "*")
 
         for p in (mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir),
@@ -81,12 +77,9 @@ class SettingsBase(unittest.TestCase):
         runner = JobRunner(store)
         self.store = store
         self.addCleanup(lambda: runner._thread.join(timeout=1) or None)
-        p = mock.patch("modelctl_web.app.TOKEN_PATH", self.token_path)
-        p.start()
-        self.addCleanup(p.stop)
-        self.client = TestClient(create_app(token=TOKEN, store=store,
-                                            runner=runner))
-        self.auth = {"Authorization": f"Bearer {TOKEN}"}
+        self.client = TestClient(create_app(store=store, runner=runner))
+        # Auth removed 2026-08-03 (owner decision: LAN-open like :9292).
+        self.auth = {}
 
 
 class TestSettingsOverview(SettingsBase):
@@ -250,46 +243,6 @@ class TestHardwareWrite(SettingsBase):
         self.assertEqual(dev["bandwidth_gbs"], 400.0)
 
 
-class TestTokenRotation(SettingsBase):
-    def test_rotation_needs_an_explicit_confirm(self):
-        r = self.client.post("/api/v2/settings/token/rotate", headers=self.auth,
-                             json={})
-        self.assertEqual(r.status_code, 409)
-        self.assertTrue(r.json()["gate"]["changes"])
-        self.assertFalse(self.token_path.exists())
-
-    def test_confirmed_rotation_replaces_the_token_and_resigns_this_session(self):
-        r = self.client.post("/api/v2/settings/token/rotate", headers=self.auth,
-                             json={"confirm": True})
-        self.assertEqual(r.status_code, 200)
-        new_token = self.token_path.read_text().strip()
-        self.assertTrue(new_token)
-        self.assertNotEqual(new_token, TOKEN)
-        # never echoed in the body
-        self.assertNotIn(new_token, r.text)
-        # the rotating session keeps working: the cookie was re-issued
-        self.assertEqual(r.cookies.get("modelctl_web_token"), new_token)
-        # and the old bearer token is now rejected in-process, without a
-        # restart -- a stale closure would keep honouring it
-        self.assertEqual(
-            self.client.get("/api/v2/settings",
-                            headers={"Authorization": f"Bearer {TOKEN}"}).status_code,
-            401)
-        self.assertEqual(
-            self.client.get("/api/v2/settings",
-                            headers={"Authorization": f"Bearer {new_token}"}).status_code,
-            200)
-
-    def test_an_env_supplied_token_is_not_rotatable_here(self):
-        with mock.patch.dict(os.environ, {"MODELCTL_WEB_TOKEN": "from-env"}):
-            r = self.client.get("/api/v2/settings", headers=self.auth)
-            self.assertFalse(r.json()["access"]["token_rotatable"])
-            r = self.client.post("/api/v2/settings/token/rotate",
-                                 headers=self.auth, json={"confirm": True})
-            self.assertEqual(r.status_code, 400)
-            self.assertIn("MODELCTL_WEB_TOKEN", r.json()["error"])
-
-
 class TestReadiness(SettingsBase):
     def test_readiness_carries_the_setup_checks(self):
         r = self.client.get("/api/v2/settings", headers=self.auth)
@@ -433,12 +386,7 @@ class TestDemolition(SettingsBase):
         web_dir = Path(create_app.__module__ and
                        __import__("modelctl_web").__file__).parent
         present = {p.name for p in (web_dir / "templates").glob("*.html")}
-        self.assertEqual(present, {"base.html", "error.html", "login.html"})
-
-    def test_login_defaults_into_the_console_not_the_dead_dashboard(self):
-        r = self.client.get("/login", follow_redirects=False)
-        self.assertEqual(r.status_code, 200)
-        self.assertIn('value="/v2/"', r.text)
+        self.assertEqual(present, {"base.html", "error.html"})
 
     def test_the_spa_and_its_api_survive(self):
         for path in ("/v2/", "/v2/settings", "/api/v2/models", "/api/v2/jobs",
@@ -480,9 +428,8 @@ class TestScratchSafeCoversSettings(unittest.TestCase):
         store = JobStore(self.root / "jobs.db", scratch_safe=True)
         runner = JobRunner(store)
         self.addCleanup(lambda: runner._thread.join(timeout=1) or None)
-        self.client = TestClient(create_app(token=TOKEN, store=store,
-                                            runner=runner))
-        self.auth = {"Authorization": f"Bearer {TOKEN}"}
+        self.client = TestClient(create_app(store=store, runner=runner))
+        self.auth = {}
 
     def test_settings_writes_are_refused_with_the_reason(self):
         for path, body in (
@@ -490,7 +437,6 @@ class TestScratchSafeCoversSettings(unittest.TestCase):
                 ("/api/v2/settings/hardware", {"devices": {}}),
                 ("/api/v2/settings/hardware/calibrate", {}),
                 ("/api/v2/settings/capabilities/reprobe", {}),
-                ("/api/v2/settings/token/rotate", {"confirm": True}),
                 ("/api/v2/models/m1/load", {}),
                 ("/api/v2/models/m1/unload", {}),
         ):

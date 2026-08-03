@@ -23,7 +23,6 @@ from modelctl_web import wizard as wiz
 from modelctl_web.app import create_app
 from modelctl_web.jobs import JobStore, JobRunner
 
-TOKEN = "test-token"
 
 
 class TestStepOutcomes(unittest.TestCase):
@@ -140,9 +139,8 @@ class WizardWebBase(unittest.TestCase):
         self.jobs = JobStore(self.root / "jobs.db")
         runner = JobRunner(self.jobs)
         self.addCleanup(lambda: runner._thread.join(timeout=1) or None)
-        self.client = TestClient(create_app(token=TOKEN, store=self.jobs,
-                                            runner=runner))
-        self.auth = {"Authorization": f"Bearer {TOKEN}"}
+        self.client = TestClient(create_app(store=self.jobs, runner=runner))
+        self.auth = {}
 
     def new_wizard(self):
         resp = self.client.post("/api/v2/wizards", headers=self.auth)

@@ -544,10 +544,7 @@ export interface AccessSection {
   bind: string;
   bind_source: string;
   bind_editable: boolean;
-  token_path: string;
-  token_source: string;
-  token_rotatable: boolean;
-  secure_cookie: boolean;
+  auth: "none";
 }
 
 export interface PathRow {

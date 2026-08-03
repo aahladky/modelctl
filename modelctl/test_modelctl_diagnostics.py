@@ -21,7 +21,6 @@ import modelctl_diagnostics as diag
 from modelctl_web.app import create_app
 from modelctl_web.jobs import JobStore, JobRunner
 
-TOKEN = "test-token"
 
 
 class TestRedaction(unittest.TestCase):
@@ -373,8 +372,8 @@ class TestSettingsAPI(unittest.TestCase):
         store = JobStore(self.root / "jobs.db")
         runner = JobRunner(store)
         self.addCleanup(lambda: runner._thread.join(timeout=1) or None)
-        self.client = TestClient(create_app(token=TOKEN, store=store, runner=runner))
-        self.auth = {"Authorization": f"Bearer {TOKEN}"}
+        self.client = TestClient(create_app(store=store, runner=runner))
+        self.auth = {}
 
     def test_settings_api_reports_manifest_and_capabilities(self):
         """One read has to answer "what is this install running?".

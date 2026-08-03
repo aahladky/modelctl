@@ -11,7 +11,6 @@ export default defineConfig({
     proxy: {
       // Dev-only convenience: `vite` against a running backend.
       "/api": "http://127.0.0.1:9293",
-      "/login": "http://127.0.0.1:9293",
     },
   },
 });

@@ -10,7 +10,7 @@
 import { useEffect, useState } from "preact/hooks";
 import {
   ApiError, applyRouting, calibrateStorage, fetchRouting, fetchSettings,
-  fmtGiB, reprobeCapabilities, rotateToken, saveDefaults, saveHardware,
+  fmtGiB, reprobeCapabilities, saveDefaults, saveHardware,
 } from "../lib/api";
 import { ConfirmButton, submitAction } from "../lib/actions";
 import { Info } from "../lib/info";
@@ -556,32 +556,8 @@ function Hardware({ hw, onSaved }: { hw: HardwareSection; onSaved: () => void })
   );
 }
 
-function Access({ s, onRotated }: { s: SettingsOverview; onRotated: () => void }) {
+function Access({ s }: { s: SettingsOverview }) {
   const a = s.access;
-  const [gate, setGate] = useState<string[] | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const rotate = async (confirm: boolean) => {
-    setBusy(true);
-    try {
-      const res = await rotateToken(confirm);
-      setGate(null);
-      toast("ok", "token rotated", res.message, 9000);
-      onRotated();
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 409 && e.body.gate) {
-        setGate((e.body.gate as { changes: string[] }).changes);
-      } else if (e instanceof ApiError && e.status === 405) {
-        toast("err", "✗ rotation refused",
-              String(e.body.reason ?? e.message), 9000);
-      } else {
-        toast("err", "✗ rotating the token failed", String(e), 9000);
-      }
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <div class="widget" style="max-width:900px">
       <h2>access</h2>
@@ -601,48 +577,20 @@ function Access({ s, onRotated }: { s: SettingsOverview; onRotated: () => void }
             </td>
           </tr>
           <tr>
-            <td class="sub">session cookie</td>
-            <td class="num">{a.secure_cookie ? "secure" : "not secure-only"}</td>
+            <td class="sub">sign-in</td>
+            <td class="num">none</td>
             <td class="sub">
-              from MODELCTL_WEB_SECURE_COOKIE{" "}
-              <Info label="about the session cookie">
-                The cookie is always HttpOnly and SameSite=strict. The
-                secure flag additionally refuses to send it over plain
-                HTTP, which only makes sense once the console is behind
-                TLS.
+              anyone on this network can use the console{" "}
+              <Info label="about access">
+                There is no token or password on purpose: this console
+                serves one home network, and the sign-in step was more
+                friction than protection. To narrow reach, bind to
+                127.0.0.1 via MODELCTL_WEB_BIND or firewall the port.
               </Info>
             </td>
           </tr>
-          <tr>
-            <td class="sub">token</td>
-            <td class="num">{a.token_path}</td>
-            <td class="sub">from {a.token_source}</td>
-          </tr>
         </tbody>
       </table>
-
-      {gate && (
-        <fieldset style="border-color:var(--warn);margin-top:.9rem">
-          <legend style="color:var(--warn)">rotation — confirm required</legend>
-          {gate.map((c) => <div class="msg warning" key={c}>⚠ {c}</div>)}
-          <div class="actions">
-            <button type="button" onClick={() => setGate(null)}>cancel</button>
-            <button type="button" class="btn-danger" disabled={busy}
-                    onClick={() => rotate(true)}>rotate the token</button>
-          </div>
-        </fieldset>
-      )}
-
-      <div class="actions" style="margin-top:.7rem">
-        <button type="button" disabled={busy || !a.token_rotatable || !!gate}
-                onClick={() => rotate(false)}>rotate token</button>
-        <span class="sub">
-          {a.token_rotatable
-            ? "this session stays signed in; every other one is signed out"
-            : "the token comes from MODELCTL_WEB_TOKEN — rotate it where "
-              + "that variable is set"}
-        </span>
-      </div>
     </div>
   );
 }
@@ -1105,7 +1053,7 @@ export function Settings() {
         <Appearance />
       </>}
       {tab === "hardware" && <Hardware hw={s.hardware} onSaved={reload} />}
-      {tab === "access" && <Access s={s} onRotated={reload} />}
+      {tab === "access" && <Access s={s} />}
       {tab === "advanced" && <>
         <Routing />
         <Paths rows={s.paths} />

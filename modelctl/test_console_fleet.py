@@ -33,7 +33,6 @@ from modelctl_web import fleet as fleetview
 from modelctl_web.app import create_app
 from modelctl_web.jobs import JobRunner, JobStore
 
-TOKEN = "test-token"
 GIB = 1 << 30
 PIN = "85b7e6556b6b83026d1a17df2635bc1173db1f97"
 OTHER_PIN = "0000000000000000000000000000000000000000"
@@ -131,9 +130,8 @@ class ClientBase(FleetConsoleBase):
         runner = JobRunner(store)
         self.store, self.runner = store, runner
         self.addCleanup(lambda: runner._thread.join(timeout=0.05) or None)
-        self.client = TestClient(create_app(token=TOKEN, store=store,
-                                            runner=runner))
-        self.auth = {"Authorization": f"Bearer {TOKEN}"}
+        self.client = TestClient(create_app(store=store, runner=runner))
+        self.auth = {}
 
 
 class TestPresenceTriState(FleetConsoleBase):
@@ -433,9 +431,9 @@ class TestScratchSafeCoversTheFleet(FleetConsoleBase):
         store = JobStore(self.root / "jobs.db", scratch_safe=True)
         runner = JobRunner(store)
         self.addCleanup(lambda: runner._thread.join(timeout=0.05) or None)
-        self.app = create_app(token=TOKEN, store=store, runner=runner)
+        self.app = create_app(store=store, runner=runner)
         self.client = TestClient(self.app)
-        self.auth = {"Authorization": f"Bearer {TOKEN}"}
+        self.auth = {}
 
     def test_every_fleet_write_is_refused_with_a_reason(self):
         for path, body in FLEET_WRITES:

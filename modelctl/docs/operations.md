@@ -56,7 +56,7 @@ Regenerable state under `~/.local/share/modelctl/`:
 | `backend_capabilities/` | cached capability probes |
 | `runtime.db` | plan runs, reservations, runtime events (benchmark/observation history) |
 | `web_jobs.db` | web console job queue/history |
-| `web_token` | console auth token (regenerated on first start) |
+| `web_token` | leftover from the removed console auth (harmless; auth was removed 2026-08-03) |
 
 The llama-swap config lives at `~/services/llama-swap/config.yaml`
 (override `MODELCTL_LLAMA_SWAP_CONFIG`); modelctl owns the per-profile
@@ -66,8 +66,7 @@ with `modelctl regen <name>`.
 ## Recovery
 
 - Console unreachable: `systemctl --user status modelctl-web`, then
-  `modelctl web` in the foreground for the traceback. Token is in
-  `~/.local/share/modelctl/web_token`.
+  `modelctl web` in the foreground for the traceback.
 - Serving broken after a config change: profiles are plain JSON — fix
   or `git`-restore the profile, then `modelctl regen <name>` and
   `systemctl --user restart llama-swap.service`.

@@ -163,7 +163,7 @@ class TestReleaseAWebRoutes(unittest.TestCase):
     def test_web_app_creates(self):
         from fastapi.testclient import TestClient
         from modelctl_web.app import create_app
-        app = create_app(token="test-token", store=mock.MagicMock(),
+        app = create_app(store=mock.MagicMock(),
                         runner=mock.MagicMock())
         client = TestClient(app)
         # Dashboard
@@ -177,7 +177,7 @@ class TestReleaseAWebRoutes(unittest.TestCase):
         # is now that both entry points land on the same single workflow.
         from fastapi.testclient import TestClient
         from modelctl_web.app import create_app
-        app = create_app(token="test-token", store=mock.MagicMock(),
+        app = create_app(store=mock.MagicMock(),
                         runner=mock.MagicMock())
         client = TestClient(app)
         auth = {"Authorization": "Bearer test-token"}
@@ -191,7 +191,7 @@ class TestReleaseAWebRoutes(unittest.TestCase):
     def test_settings_page_accessible(self):
         from fastapi.testclient import TestClient
         from modelctl_web.app import create_app
-        app = create_app(token="test-token", store=mock.MagicMock(),
+        app = create_app(store=mock.MagicMock(),
                         runner=mock.MagicMock())
         client = TestClient(app)
         r = client.get("/settings", headers={"Authorization": "Bearer test-token"})
@@ -200,7 +200,7 @@ class TestReleaseAWebRoutes(unittest.TestCase):
     def test_add_wizard_page_accessible(self):
         from fastapi.testclient import TestClient
         from modelctl_web.app import create_app
-        app = create_app(token="test-token", store=mock.MagicMock(),
+        app = create_app(store=mock.MagicMock(),
                         runner=mock.MagicMock())
         client = TestClient(app)
         r = client.get("/add", headers={"Authorization": "Bearer test-token"})

@@ -1,5 +1,5 @@
 """python -m modelctl_web -- run the console. Bind via MODELCTL_WEB_BIND
-(default 0.0.0.0:9293), token via MODELCTL_WEB_TOKEN or the stored file."""
+(default 0.0.0.0:9293). No auth: deliberately LAN-open."""
 import os
 
 import uvicorn

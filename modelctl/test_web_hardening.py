@@ -99,27 +99,6 @@ class TestProfileNameValidation(unittest.TestCase):
                     modelctl.load_profile("../defaults")
 
 
-class TestSafeNext(unittest.TestCase):
-    """`next` is reflected into the login form and followed on success.
-
-    Phase 3 retired `_safe_back` with the job pages that used it; the same
-    escaping rule now guards login's `next`, and the fallback is the SPA
-    root rather than the demolished dashboard.
-    """
-
-    def test_javascript_url_is_neutralized(self):
-        self.assertEqual(web_app._safe_next("javascript:fetch('/x')"), "/v2/")
-
-    def test_protocol_relative_is_neutralized(self):
-        self.assertEqual(web_app._safe_next("//evil.example/x"), "/v2/")
-
-    def test_internal_path_is_kept(self):
-        self.assertEqual(web_app._safe_next("/v2/models/m1"), "/v2/models/m1")
-
-    def test_empty_defaults_to_the_console_root(self):
-        self.assertEqual(web_app._safe_next(""), "/v2/")
-
-
 class TestLaneRouting(unittest.TestCase):
     """Benchmarks belong on the benchmark lane; on the single-worker
     mutation lane a multi-minute autotune blocked every profile save."""
@@ -177,9 +156,8 @@ class TestVendoredAssets(unittest.TestCase):
                          "the /static mount was removed with the old console")
         self.assertEqual(
             sorted(p.name for p in (web_dir / "templates").glob("*.html")),
-            ["base.html", "error.html", "login.html"],
-            "only login and the last-resort error page are still rendered "
-            "server-side")
+            ["base.html", "error.html"],
+            "only the last-resort error page is still rendered server-side")
         for path in (web_dir / "templates").glob("*.html"):
             # Jinja comments cannot load anything; scan the markup only, so
             # a comment that mentions htmx is not a false positive.

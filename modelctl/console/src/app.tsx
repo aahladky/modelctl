@@ -70,7 +70,6 @@ function Side() {
       <span class="spacer"></span>
       <a class={here("/v2/settings")} aria-current={cur("/v2/settings", here)}
          href="/v2/settings">settings</a>
-      <a class="item" href="/logout">sign out</a>
     </aside>
   );
 }

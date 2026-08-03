@@ -27,7 +27,6 @@ from modelctl_web import wizard as wiz
 from modelctl_web.app import create_app
 from modelctl_web.jobs import JobRunner, JobStore
 
-TOKEN = "test-token"
 
 PROFILE = {
     "name": "m1", "repo_id": "r/m", "file": "m-Q4_K_M",
@@ -96,9 +95,9 @@ class Phase4Base(unittest.TestCase):
         # second per test waiting for a thread that is never going to
         # exit, which across this file is most of its wall time.
         self.addCleanup(lambda: runner._thread.join(timeout=0.05) or None)
-        self.client = TestClient(create_app(token=TOKEN, store=store,
-                                            runner=runner))
-        self.auth = {"Authorization": f"Bearer {TOKEN}"}
+        self.client = TestClient(create_app(store=store, runner=runner))
+        # Auth removed 2026-08-03 (owner decision: LAN-open like :9292).
+        self.auth = {}
 
     def running(self, port=9101):
         """Patch llama-swap into reporting m1 resident on `port`."""
@@ -653,9 +652,9 @@ class TestScratchSafeCoversPhase4(unittest.TestCase):
         store = JobStore(self.root / "jobs.db", scratch_safe=True)
         runner = JobRunner(store)
         self.addCleanup(lambda: runner._thread.join(timeout=0.05) or None)
-        self.client = TestClient(create_app(token=TOKEN, store=store,
-                                            runner=runner))
-        self.auth = {"Authorization": f"Bearer {TOKEN}"}
+        self.client = TestClient(create_app(store=store, runner=runner))
+        # Auth removed 2026-08-03 (owner decision: LAN-open like :9292).
+        self.auth = {}
 
     def test_every_phase4_write_is_refused_with_a_reason(self):
         for path, body in PHASE4_WRITES:
@@ -700,7 +699,7 @@ class TestScratchSafeCoversPhase4(unittest.TestCase):
         store = JobStore(self.root / "check.db", scratch_safe=True)
         runner = JobRunner(store)
         self.addCleanup(lambda: runner._thread.join(timeout=1) or None)
-        app = create_app(token=TOKEN, store=store, runner=runner)
+        app = create_app(store=store, runner=runner)
         phase4_prefixes = ("/api/v2/models/", "/api/v2/runtime/",
                            "/api/v2/settings/routing")
         mutating = set()
