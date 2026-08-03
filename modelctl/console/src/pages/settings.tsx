@@ -955,7 +955,7 @@ function Routing() {
               {m.rows.length} set(s) · {changing.length} would change ·{" "}
               {handAuthored.length} hand-authored (left alone)
               {m.generated.excluded.length > 0
-                ? ` · ${m.generated.excluded.length} profile(s) excluded`
+                ? ` · ${m.generated.excluded.length} profile${m.generated.excluded.length === 1 ? "" : "s"} excluded`
                 : ""}
             </p>
             <table>

@@ -117,7 +117,7 @@ def _check_state_dir() -> SetupCheck:
     count = len(list(path.glob("*.json")))
     return SetupCheck(
         id="state_dir", title="profile store", severity="ok",
-        detail=f"{path} — {count} profile(s)")
+        detail=f"{path} — {count} profile{'s' if count != 1 else ''}")
 
 
 def _check_backend(probe=False) -> SetupCheck:
@@ -150,7 +150,8 @@ def _check_backend(probe=False) -> SetupCheck:
     # default. Saying so prevents "no MoE cache" from reading as a property
     # of the machine when it is a property of which build got picked.
     others = len([c for c in dict.fromkeys(candidates) if os.access(c, os.X_OK)]) - 1
-    also = f" (+{others} other build(s); profiles can pin one)" if others > 0 else ""
+    also = ("" if others == 0 else
+        f" \u00b7 {others} other build{'s' if others > 1 else ''} available \u2014 a profile can pin one")
 
     if not probe:
         return SetupCheck(
@@ -165,7 +166,7 @@ def _check_backend(probe=False) -> SetupCheck:
     except Exception as e:
         return SetupCheck(
             id="backend", title="llama.cpp runtime", severity="warning",
-            detail=f"{binary} — capability probe failed: {e}",
+            detail=f"{binary} — build-features probe failed: {e}",
             fix="Experimental cache features stay disabled until the probe "
                 "succeeds.",
             fix_url="/v2/settings")
@@ -173,15 +174,15 @@ def _check_backend(probe=False) -> SetupCheck:
     if status == "unsupported":
         return SetupCheck(
             id="backend", title="llama.cpp runtime", severity="ok",
-            detail=f"{binary} — stock build, no MoE expert cache{also}",
+            detail=f"{binary} — stock build, no expert cache{also}",
             fix="Experimental cache plans need the moe-serving fork; stock "
                 "builds serve normally without them.",
             fix_url="/v2/settings")
     features = [k for k, v in (caps.get("features") or {}).items() if v]
     return SetupCheck(
         id="backend", title="llama.cpp runtime", severity="ok",
-        detail=f"{binary} — schema {caps.get('schema', 0)}"
-               + (f", features: {', '.join(sorted(features))}" if features else "")
+        detail=f"{binary} — expert cache supported"
+               + (f" ({len(features)} cache features)" if features else "")
                + also,
         fix_url="/v2/settings")
 

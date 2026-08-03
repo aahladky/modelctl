@@ -49,7 +49,7 @@ def sync_config(restart: bool = True, ctx=None) -> ServiceResult:
                                            restart_openarc=restart)
     except Exception as e:
         return ServiceResult.failure(f"sync failed: {e}")
-    result = ServiceResult(messages=[f"synced {count} profile(s)"],
+    result = ServiceResult(messages=[f"synced {count} profile{'s' if count != 1 else ''}"],
                            data={"profiles": count})
     return result.changed("llama-swap:config")
 
