@@ -32,25 +32,6 @@ def profile_claim(profile, inventory, defaults=None):
     cfg = profile.get("config", {})
 
     runtime = profile.get("runtime") or {}
-    if profile.get("backend") == "ovms":
-        import modelctl_hardware
-        snap = modelctl_hardware.capture_hardware_snapshot()
-        plans = modelctl_plans.compile_launch_plans(profile, snap)
-        if runtime.get("mode") == "managed" and runtime.get("pinned_plan_id"):
-            plans = [p for p in plans if p.id == runtime["pinned_plan_id"]]
-        # Conservative envelope: max admission claim per resource across
-        # eligible plans (peak VRAM including cache, resident RAM).
-        env = {}
-        for plan in plans:
-            for dev, b in plan.claim.vram_admission_bytes().items():
-                env[dev] = max(env.get(dev, 0), b)
-            ram = plan.claim.ram_admission_bytes()
-            if ram:
-                env["RAM"] = max(env.get("RAM", 0), ram)
-        if not any(env.values()):
-            return None  # unknown claim -- do not guess
-        return env
-
     if runtime.get("mode") == "managed":
         import modelctl_hardware
         snap = modelctl_hardware.capture_hardware_snapshot()

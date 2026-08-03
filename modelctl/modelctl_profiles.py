@@ -24,7 +24,7 @@ from modelctl_errors import ValidationMessage
 #   model_path: str (local absolute path)
 #   mmproj_path: str (optional multimodal projector)
 #   mtp_path: str (optional multi-token prediction draft)
-#   backend: "llama-cpp" | "ovms"
+#   backend: "llama-cpp"
 #   binary: str (optional pinned server binary)
 #   config: {device, split_mode, tensor_split, ctx, cache_type_k,
 #            cache_type_v, flash_attn, ttl, mtp, fit, extra}
@@ -104,7 +104,7 @@ _DEFAULT_CONFIG = {
     "extra": "",
 }
 
-_VALID_BACKENDS = {"llama-cpp", "ovms"}
+_VALID_BACKENDS = {"llama-cpp"}
 _VALID_CACHE_MODES = {"off", "auto", "manual"}
 _VALID_OBJECTIVES = {
     "balanced", "fastest_generation", "fastest_prompt",

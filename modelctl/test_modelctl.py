@@ -239,12 +239,10 @@ class TestSyncHermesCustomProviders(unittest.TestCase):
         self.assertEqual(self.hermes_config.read_text(), original)
 
 
-class TestSyncHermesCustomProvidersOvms(unittest.TestCase):
-    """ovms-backend profiles (added 2026-07-09, replacing the retired
-    OpenArc backend) fold into the SAME 'local-swap-managed' bucket as
-    llama-cpp profiles -- both run behind llama-swap now, so there's no
-    reason for modelctl to split them across two Hermes providers the way
-    OpenArc (a genuinely separate process/API) used to need."""
+class TestSyncHermesDropsRetiredProviders(unittest.TestCase):
+    """OVMS support was torn out 2026-08-03 (tag ovms-final). Profiles with
+    backend "ovms" are no longer managed into Hermes, and the stale
+    provider names from the OpenArc/OVMS eras keep getting cleaned up."""
 
     def setUp(self):
         self.tmp = TemporaryDirectory()
@@ -269,12 +267,10 @@ class TestSyncHermesCustomProvidersOvms(unittest.TestCase):
             modelctl.sync_hermes_custom_providers()
         return modelctl.yaml.safe_load(self.hermes_config.read_text())
 
-    def test_ovms_and_llama_cpp_profiles_share_one_provider(self):
+    def test_ovms_profile_is_not_managed(self):
         cfg = self._sync("model:\n  default: x\n")
-        providers = cfg["providers"]
-        self.assertIn("local-swap-managed", providers)
-        models = providers["local-swap-managed"]["models"]
-        self.assertIn("big-qwen", models)
+        models = cfg["providers"]["local-swap-managed"]["models"]
+        self.assertNotIn("big-qwen", models)
         self.assertIn("gemma4-26b", models)
         self.assertEqual(models["gemma4-26b"]["context_length"], 64000)
 
@@ -295,6 +291,23 @@ class TestSyncHermesCustomProvidersOvms(unittest.TestCase):
         cfg = self._sync(initial)
         self.assertNotIn("local-openarc", cfg["providers"])
         self.assertNotIn("ovms-qwen3-6-27b-int4-ov", cfg["providers"])
+
+
+class TestOvmsRetired(unittest.TestCase):
+    """The removed surface stays removed: these pin the teardown."""
+
+    def test_cli_commands_gone(self):
+        import contextlib, io
+        parser = modelctl.build_arg_parser()
+        for cmd in ("ovms-add", "ovms-convert"):
+            with self.subTest(cmd=cmd), \
+                 contextlib.redirect_stderr(io.StringIO()), \
+                 self.assertRaises(SystemExit):
+                parser.parse_args([cmd, "some/repo"])
+
+    def test_backends_registry_is_llama_cpp_only(self):
+        import modelctl_backends
+        self.assertEqual(set(modelctl_backends.BACKENDS), {"llama-cpp"})
 
 
 class TestEnsureBinaryLdLibraryPath(unittest.TestCase):
@@ -327,161 +340,6 @@ class TestEnsureBinaryLdLibraryPath(unittest.TestCase):
         env = {}
         result = modelctl.ensure_binary_ld_library_path(env, "/opt/llama/bin/llama-server")
         self.assertIs(result, env)
-
-
-class TestPreflightOvms(unittest.TestCase):
-    def _profile(self, **overrides):
-        p = {"name": "big-qwen", "repo_id": "OpenVINO/Qwen3.6-27B-int4-ov",
-             "config": {"target_device": "GPU.0"}}
-        p.update(overrides)
-        return p
-
-    def test_ok_when_script_docker_and_device_present(self):
-        with mock.patch.object(modelctl, "OVMS_PROXY_SCRIPT", Path(__file__)), \
-             mock.patch.object(modelctl.shutil, "which", return_value="/usr/bin/docker"), \
-             mock.patch.object(modelctl, "OVMS_MODEL_REPOSITORY", Path(__file__).parent):
-            ok, messages = modelctl.preflight_ovms(self._profile())
-        self.assertTrue(ok)
-
-    def test_missing_proxy_script_fails(self):
-        with mock.patch.object(modelctl, "OVMS_PROXY_SCRIPT", Path("/nonexistent/ovms-proxy.py")), \
-             mock.patch.object(modelctl.shutil, "which", return_value="/usr/bin/docker"):
-            ok, messages = modelctl.preflight_ovms(self._profile())
-        self.assertFalse(ok)
-        self.assertTrue(any("ovms-proxy.py" in m or "not found" in m for m in messages))
-
-    def test_missing_docker_fails(self):
-        with mock.patch.object(modelctl, "OVMS_PROXY_SCRIPT", Path(__file__)), \
-             mock.patch.object(modelctl.shutil, "which", return_value=None):
-            ok, messages = modelctl.preflight_ovms(self._profile())
-        self.assertFalse(ok)
-
-    def test_missing_target_device_fails(self):
-        with mock.patch.object(modelctl, "OVMS_PROXY_SCRIPT", Path(__file__)), \
-             mock.patch.object(modelctl.shutil, "which", return_value="/usr/bin/docker"):
-            ok, messages = modelctl.preflight_ovms(self._profile(config={}))
-        self.assertFalse(ok)
-
-    def test_missing_local_weights_is_a_note_not_an_error(self):
-        with mock.patch.object(modelctl, "OVMS_PROXY_SCRIPT", Path(__file__)), \
-             mock.patch.object(modelctl.shutil, "which", return_value="/usr/bin/docker"), \
-             mock.patch.object(modelctl, "OVMS_MODEL_REPOSITORY", Path("/nonexistent/ovms-models")):
-            ok, messages = modelctl.preflight_ovms(self._profile())
-        self.assertTrue(ok)
-        self.assertTrue(any("NOTE" in m for m in messages))
-
-
-class TestRenderOvmsLlamaSwapEntry(unittest.TestCase):
-    def _profile(self, **config_overrides):
-        config = {"target_device": "GPU.0", "task": "text_generation", "ttl": 1800}
-        config.update(config_overrides)
-        return {"name": "big-qwen", "repo_id": "OpenVINO/Qwen3.6-27B-int4-ov", "config": config}
-
-    def test_basic_entry_shape(self):
-        with mock.patch.object(modelctl, "preflight_ovms", return_value=(True, [])):
-            entry_text, ok, messages = modelctl.render_ovms_llama_swap_entry(self._profile())
-        self.assertTrue(ok)
-        parsed = modelctl.yaml.safe_load(entry_text)
-        self.assertIn("big-qwen", parsed)
-        cmd = parsed["big-qwen"]["cmd"]
-        self.assertIn("ovms-proxy.py", cmd)
-        self.assertIn("--source-model", cmd)
-        self.assertIn("OpenVINO/Qwen3.6-27B-int4-ov", cmd)
-        self.assertIn("--ovms-model-name", cmd)
-        self.assertIn("big-qwen", cmd)
-        self.assertIn("--target-device", cmd)
-        self.assertIn("GPU.0", cmd)
-        self.assertEqual(parsed["big-qwen"]["checkEndpoint"], "/v2/health/ready")
-        self.assertEqual(parsed["big-qwen"]["cmdStop"], "docker stop ${MODEL_ID}")
-        self.assertEqual(parsed["big-qwen"]["ttl"], 1800)
-
-    def test_cache_size_and_tool_parser_included_when_set(self):
-        with mock.patch.object(modelctl, "preflight_ovms", return_value=(True, [])):
-            entry_text, _, _ = modelctl.render_ovms_llama_swap_entry(
-                self._profile(cache_size=6, tool_parser="hermes3"))
-        cmd = modelctl.yaml.safe_load(entry_text)["big-qwen"]["cmd"]
-        self.assertIn("--cache-size", cmd)
-        self.assertIn("6", cmd)
-        self.assertIn("--tool-parser", cmd)
-        self.assertIn("hermes3", cmd)
-
-    def test_reasoning_parser_included_when_set(self):
-        with mock.patch.object(modelctl, "preflight_ovms", return_value=(True, [])):
-            entry_text, _, _ = modelctl.render_ovms_llama_swap_entry(
-                self._profile(tool_parser="hermes3", reasoning_parser="qwen3"))
-        cmd = modelctl.yaml.safe_load(entry_text)["big-qwen"]["cmd"]
-        self.assertIn("--reasoning-parser", cmd)
-        self.assertIn("qwen3", cmd)
-
-    def test_omitted_when_unset(self):
-        with mock.patch.object(modelctl, "preflight_ovms", return_value=(True, [])):
-            entry_text, _, _ = modelctl.render_ovms_llama_swap_entry(self._profile())
-        cmd = modelctl.yaml.safe_load(entry_text)["big-qwen"]["cmd"]
-        self.assertNotIn("--cache-size", cmd)
-        self.assertNotIn("--tool-parser", cmd)
-        self.assertNotIn("--reasoning-parser", cmd)
-
-
-class TestSyncLlamaSwapConfigOvms(unittest.TestCase):
-    """sync_llama_swap_config() merges ovms-backend profiles into the same
-    config.yaml as llama-cpp ones, and must never touch hand-authored
-    top-level keys (the matrix: section) or hand-authored models entries
-    (they have no logFile pointing under PROFILES_DIR, unlike anything
-    modelctl generates)."""
-
-    def setUp(self):
-        self.tmp = TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.profiles_dir = Path(self.tmp.name) / "profiles"
-        self.profiles_dir.mkdir()
-        self.config_path = Path(self.tmp.name) / "config.yaml"
-
-        (self.profiles_dir / "big-qwen.json").write_text(json.dumps({
-            "name": "big-qwen", "backend": "ovms", "enabled": True,
-            "repo_id": "OpenVINO/Qwen3.6-27B-int4-ov",
-            "config": {"target_device": "GPU.0", "task": "text_generation", "ttl": 1800},
-        }))
-
-    def _sync(self, initial_yaml=""):
-        self.config_path.write_text(initial_yaml)
-        with mock.patch.object(modelctl, "PROFILES_DIR", self.profiles_dir), \
-             mock.patch.object(modelctl, "LLAMA_SWAP_CONFIG_PATH", self.config_path), \
-             mock.patch.object(modelctl, "preflight_ovms", return_value=(True, [])), \
-             mock.patch.object(modelctl, "restart_llama_swap_service"):
-            modelctl.sync_llama_swap_config()
-        return modelctl.yaml.safe_load(self.config_path.read_text())
-
-    def test_adds_ovms_entry(self):
-        config = self._sync()
-        self.assertIn("big-qwen", config["models"])
-        self.assertIn("ovms-proxy.py", config["models"]["big-qwen"]["cmd"])
-
-    def test_preserves_matrix_section_and_hand_authored_model(self):
-        initial = (
-            "models:\n"
-            "  fast-7b:\n"
-            "    cmd: hand-authored-command\n"
-            "matrix:\n"
-            "  vars:\n"
-            "    f7: fast-7b\n"
-        )
-        config = self._sync(initial)
-        self.assertEqual(config["models"]["fast-7b"]["cmd"], "hand-authored-command")
-        self.assertEqual(config["matrix"]["vars"]["f7"], "fast-7b")
-        self.assertIn("big-qwen", config["models"])
-
-    def test_removed_profile_is_dropped(self):
-        # Simulate a previously-synced ovms entry (has a logFile under
-        # PROFILES_DIR, the "this is ours" marker) whose profile no longer
-        # exists -- must be dropped, same as a removed llama-cpp profile.
-        initial = (
-            f"models:\n"
-            f"  stale-model:\n"
-            f"    cmd: old\n"
-            f'    logFile: "{self.profiles_dir / "stale-model" / "llama-swap.log"}"\n'
-        )
-        config = self._sync(initial)
-        self.assertNotIn("stale-model", config["models"])
 
 
 class TestFitDefaults(unittest.TestCase):
@@ -1640,133 +1498,6 @@ class TestWaitForRouterModel(unittest.TestCase):
             self.assertIsNone(modelctl._wait_for_router_model("m", "loaded"))
 
 
-class TestDetectDefaultTask(unittest.TestCase):
-    """The signal here is the one that actually caused a real, live failure
-    earlier: a repo with vision_config is a VLM even when only used for text
-    chat, and registering it as 'llm' fails at inference time with a cryptic
-    port-mismatch error, not at conversion or load time."""
-
-    def _config_file(self, tmp, config: dict) -> str:
-        p = Path(tmp) / "config.json"
-        p.write_text(json.dumps(config))
-        return str(p)
-
-    def test_vision_config_top_level_detected_as_vlm(self):
-        with TemporaryDirectory() as tmp:
-            path = self._config_file(tmp, {"vision_config": {"hidden_size": 1152}})
-            with mock.patch.object(modelctl, "hf_hub_download", return_value=path):
-                task, is_vlm = modelctl.detect_default_task("some/repo")
-        self.assertTrue(is_vlm)
-        self.assertEqual(task, "image-text-to-text")
-
-    def test_vision_config_nested_in_text_config_detected_as_vlm(self):
-        with TemporaryDirectory() as tmp:
-            path = self._config_file(tmp, {"text_config": {"vision_config": {}}})
-            with mock.patch.object(modelctl, "hf_hub_download", return_value=path):
-                task, is_vlm = modelctl.detect_default_task("some/repo")
-        self.assertTrue(is_vlm)
-
-    def test_conditional_generation_with_image_token_detected_as_vlm(self):
-        with TemporaryDirectory() as tmp:
-            path = self._config_file(tmp, {
-                "architectures": ["Qwen3_5ForConditionalGeneration"],
-                "image_token_id": 248056,
-            })
-            with mock.patch.object(modelctl, "hf_hub_download", return_value=path):
-                task, is_vlm = modelctl.detect_default_task("some/repo")
-        self.assertTrue(is_vlm)
-
-    def test_plain_llm_not_detected_as_vlm(self):
-        with TemporaryDirectory() as tmp:
-            path = self._config_file(tmp, {"architectures": ["LlamaForCausalLM"]})
-            with mock.patch.object(modelctl, "hf_hub_download", return_value=path):
-                task, is_vlm = modelctl.detect_default_task("some/repo")
-        self.assertFalse(is_vlm)
-        self.assertEqual(task, "text-generation-with-past")
-
-    def test_unreachable_repo_degrades_to_llm_default(self):
-        with mock.patch.object(modelctl, "hf_hub_download", side_effect=OSError("network down")):
-            task, is_vlm = modelctl.detect_default_task("some/repo")
-        self.assertFalse(is_vlm)
-        self.assertEqual(task, "text-generation-with-past")
-
-
-class TestBuildOptimumExportArgs(unittest.TestCase):
-    def test_int4_includes_group_size_and_ratio(self):
-        args = modelctl.build_optimum_export_args("org/repo", "/out", {
-            "weight_format": "int4", "group_size": 128, "ratio": 1.0,
-            "sym": False, "task": "text-generation-with-past", "trust_remote_code": False,
-        })
-        self.assertEqual(args, [
-            "export", "openvino", "-m", "org/repo",
-            "--task", "text-generation-with-past",
-            "--weight-format", "int4",
-            "--group-size", "128",
-            "--ratio", "1.0",
-            "/out",
-        ])
-
-    def test_fp16_omits_group_size_and_ratio(self):
-        args = modelctl.build_optimum_export_args("org/repo", "/out", {
-            "weight_format": "fp16", "group_size": 128, "ratio": 1.0,
-            "sym": False, "task": None, "trust_remote_code": False,
-        })
-        self.assertNotIn("--group-size", args)
-        self.assertNotIn("--ratio", args)
-        self.assertIn("--weight-format", args)
-
-    def test_int8_includes_group_size_but_not_ratio(self):
-        args = modelctl.build_optimum_export_args("org/repo", "/out", {
-            "weight_format": "int8", "group_size": 64, "ratio": 1.0,
-            "sym": False, "task": None, "trust_remote_code": False,
-        })
-        self.assertIn("--group-size", args)
-        self.assertNotIn("--ratio", args)
-
-    def test_sym_and_trust_remote_code_flags(self):
-        args = modelctl.build_optimum_export_args("org/repo", "/out", {
-            "weight_format": "int4", "group_size": 128, "ratio": 1.0,
-            "sym": True, "task": None, "trust_remote_code": True,
-        })
-        self.assertIn("--sym", args)
-        self.assertIn("--trust-remote-code", args)
-
-    def test_output_dir_is_last_argument(self):
-        args = modelctl.build_optimum_export_args("org/repo", "/some/out/dir", {
-            "weight_format": "int4", "group_size": 128, "ratio": 1.0,
-            "sym": False, "task": None, "trust_remote_code": False,
-        })
-        self.assertEqual(args[-1], "/some/out/dir")
-
-
-class TestRunOptimumExport(unittest.TestCase):
-    def _cfg(self):
-        return {"weight_format": "int4", "group_size": 128, "ratio": 1.0,
-                "sym": False, "task": None, "trust_remote_code": False}
-
-    def test_missing_binary_fails_without_running_subprocess(self):
-        with mock.patch.object(modelctl, "OPTIMUM_CLI_BIN", "/nonexistent/optimum-cli"), \
-             mock.patch.object(modelctl.shutil, "which", return_value=None), \
-             mock.patch("modelctl.subprocess.run") as mock_run:
-            ok = modelctl.run_optimum_export("org/repo", "/out", self._cfg())
-        self.assertFalse(ok)
-        mock_run.assert_not_called()
-
-    def test_success_returns_true(self):
-        with mock.patch.object(modelctl, "OPTIMUM_CLI_BIN", "/usr/bin/optimum-cli"), \
-             mock.patch("modelctl.Path.exists", return_value=True), \
-             mock.patch("modelctl.subprocess.run", return_value=mock.Mock(returncode=0)):
-            ok = modelctl.run_optimum_export("org/repo", "/out", self._cfg())
-        self.assertTrue(ok)
-
-    def test_nonzero_exit_returns_false(self):
-        with mock.patch.object(modelctl, "OPTIMUM_CLI_BIN", "/usr/bin/optimum-cli"), \
-             mock.patch("modelctl.Path.exists", return_value=True), \
-             mock.patch("modelctl.subprocess.run", return_value=mock.Mock(returncode=1)):
-            ok = modelctl.run_optimum_export("org/repo", "/out", self._cfg())
-        self.assertFalse(ok)
-
-
 class TestVramFooter(unittest.TestCase):
     def test_footer_lines(self):
         inventory = [{"device": "SYCL0", "name": "big",
@@ -2080,20 +1811,12 @@ class TestRunProfileEvals(unittest.TestCase):
 
 class TestCmdTestEvalsDispatch(unittest.TestCase):
     def test_evals_flag_routes_to_run_profile_evals(self):
-        profile = {"name": "big-qwen", "backend": "ovms"}
-        args = argparse.Namespace(name="big-qwen", evals="gsm8k")
+        profile = {"name": "m1", "backend": "llama-cpp"}
+        args = argparse.Namespace(name="m1", evals="gsm8k")
         with mock.patch.object(modelctl, "load_profile", return_value=profile), \
              mock.patch.object(modelctl, "run_profile_evals") as mock_run_evals:
             modelctl.cmd_test(args)
         mock_run_evals.assert_called_once_with(profile, args)
-
-    def test_no_evals_flag_keeps_legacy_ovms_message(self):
-        profile = {"name": "big-qwen", "backend": "ovms"}
-        args = argparse.Namespace(name="big-qwen", evals=None)
-        with mock.patch.object(modelctl, "load_profile", return_value=profile), \
-             mock.patch.object(modelctl, "run_profile_evals") as mock_run_evals:
-            modelctl.cmd_test(args)
-        mock_run_evals.assert_not_called()
 
 
 class TestPreflightPinnedBinary(unittest.TestCase):

@@ -943,53 +943,6 @@ def current_profile_plan(profile, hardware=None, capabilities=None):
                       capabilities=capabilities)
 
 
-def _compile_ovms_plans(profile, hardware):
-    """OVMS plan candidates: one per enabled GPU (target_device), plus a
-    reduced-cache fallback per GPU. Claims come from the local IR directory
-    size when present (OVMS pulls its own copy on first start)."""
-    plans = []
-    cfg = profile["config"]
-    name = profile["name"]
-
-    ir_bytes = 0
-    try:
-        repo_dir = modelctl.OVMS_MODEL_REPOSITORY / profile.get("repo_id", "")
-        if repo_dir.is_dir():
-            ir_bytes = sum(f.stat().st_size for f in repo_dir.rglob("*") if f.is_file())
-    except Exception:
-        ir_bytes = 0
-
-    for idx, gpu in enumerate(hardware.gpus):
-        if not gpu.enabled:
-            continue
-        target = f"GPU.{idx}"
-        for cache_mult, suffix in ((1.0, ""), (0.5, " low-cache")):
-            base_cache = cfg.get("cache_size")
-            cache = max(1, int(base_cache * cache_mult)) if base_cache else None
-            label = f"{target}{suffix}"
-            claim = ResourceClaim(
-                vram_bytes={gpu.device: int(ir_bytes * 1.2)},
-                ram_bytes=2 << 30,
-                storage_mode="none",
-                expected_context=int(cfg.get("ctx", 8192) or 8192))
-            pid = _plan_id({"backend": "ovms", "model": profile.get("repo_id"),
-                            "target": target, "cache": cache,
-                            "task": cfg.get("task")})
-            plans.append(LaunchPlan(
-                id=pid, profile_name=name, backend="ovms", label=label,
-                argv=(), env={},
-                claim=claim,
-                estimated={"total_vram": int(ir_bytes * 1.2), "ram": 2 << 30,
-                           "context": claim.expected_context},
-                source="ovms-adapter",
-                warnings=(() if ir_bytes else
-                          ("IR size unknown until OVMS downloads the model",)),
-                decision_data={"target_device": target, "cache_size": cache},
-                config={**profile.get("config", {}), "target_device": target,
-                        "cache_size": cache}))
-    return plans
-
-
 def compile_launch_plans(profile, hardware=None, include_experimental=False):
     """Generate a bounded set of launch plans for a profile.
 
@@ -1001,36 +954,6 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
     section sets allow_experimental_plans (the variant
     stays disabled by default unless the user opts in).
     """
-    if profile.get("backend", "llama-cpp") == "ovms":
-        if not hardware:
-            import modelctl_hardware
-            hardware = modelctl_hardware.capture_hardware_snapshot()
-        baseline_claim = {}
-        try:
-            repo_dir = modelctl.OVMS_MODEL_REPOSITORY / profile.get("repo_id", "")
-            if repo_dir.is_dir():
-                ir = sum(f.stat().st_size for f in repo_dir.rglob("*") if f.is_file())
-                tgt = profile["config"].get("target_device", "GPU.0")
-                idx = int(tgt.split(".")[1]) if "." in tgt else 0
-                dev = (hardware.gpus[idx].device if idx < len(hardware.gpus)
-                       else hardware.gpus[0].device)
-                baseline_claim = {dev: int(ir * 1.2)}
-        except Exception:
-            pass
-        baseline = LaunchPlan(
-            id=_plan_id({"backend": "ovms", "model": profile.get("repo_id"),
-                         "target": profile["config"].get("target_device"),
-                         "cache": profile["config"].get("cache_size")}),
-            profile_name=profile["name"], backend="ovms",
-            label="current profile", argv=(), env={},
-            claim=ResourceClaim(baseline_claim, 2 << 30, "none",
-                                profile["config"].get("ctx")),
-            estimated={}, source="current-profile", warnings=(),
-            decision_data={
-                "target_device": profile["config"].get("target_device"),
-                "cache_size": profile["config"].get("cache_size")},
-            config=dict(profile.get("config", {})))
-        return [baseline] + _compile_ovms_plans(profile, hardware)
     if not hardware:
         from modelctl_hardware import capture_hardware_snapshot
         hardware = capture_hardware_snapshot()

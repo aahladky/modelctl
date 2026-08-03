@@ -168,7 +168,7 @@ def submit_smoke_test(runner, name):
         if res.get("tok_per_s"):
             ctx.log(f"{res['tok_per_s']:.1f} tok/s")
         ctx.log("PASS" if res["ok"] else f"not ok ({res['stage']})")
-        if not res["ok"] and res["stage"] not in ("ovms",):
+        if not res["ok"]:
             raise RuntimeError(f"smoke test failed at stage {res['stage']}")
         return res
     return runner.submit("smoke", f"smoke test {name}", fn,

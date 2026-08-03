@@ -36,7 +36,7 @@ class LaunchValidationError(RuntimeError):
 @dataclass(frozen=True)
 class ResolvedBackend:
     """A concrete backend binary with its environment and probed capabilities."""
-    name: str                    # "llama-cpp", "ovms"
+    name: str                    # "llama-cpp"
     binary: str                  # resolved absolute path
     binary_fingerprint: str      # content hash
     environment: dict[str, str]  # full launch env (os.environ + overrides)

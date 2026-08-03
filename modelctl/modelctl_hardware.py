@@ -132,13 +132,6 @@ def _backend_fingerprints():
         fps["llama-cpp"] = f"{version}#{modelctl_vram.file_fingerprint(binary)}"
     else:
         fps["llama-cpp"] = "unavailable"
-    try:
-        result = subprocess.run(
-            ["docker", "images", "--digests", "--format", "{{.Digest}}", "ovms"],
-            capture_output=True, text=True, timeout=10)
-        fps["ovms"] = result.stdout.strip() or "unknown"
-    except Exception:
-        fps["ovms"] = "unavailable"
     return fps
 
 

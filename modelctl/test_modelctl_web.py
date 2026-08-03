@@ -1532,56 +1532,6 @@ class TestSseStream(unittest.TestCase):
         self.assertIn("done", events[0])
 
 
-class TestOvmsAdapter(unittest.TestCase):
-    def _ovms_profile(self):
-        return {"name": "ov7", "repo_id": "OpenVINO/Qwen2.5-7B-Instruct-int4-ov",
-                "backend": "ovms", "model_path": None,
-                "config": {"task": "text_generation", "target_device": "GPU.1",
-                           "cache_size": 3, "tool_parser": "hermes3",
-                           "ctx": 32768}}
-
-    def test_build_command(self):
-        import modelctl_backends, modelctl_plans as mp
-        ad = modelctl_backends.get_backend("ovms")
-        plan = mp.LaunchPlan(
-            id="x", profile_name="ov7", backend="ovms", label="GPU.1",
-            argv=(), env={}, claim=mp.ResourceClaim({}, 0, "none", None),
-            estimated={}, source="t", warnings=(),
-            decision_data={"target_device": "GPU.1", "cache_size": 3})
-        cmd = ad.build_command(self._ovms_profile(), plan, 5999)
-        joined = " ".join(cmd)
-        self.assertIn("ovms-proxy.py", joined)
-        self.assertIn("--listen-port 5999", joined)
-        self.assertIn("--target-device GPU.1", joined)
-        self.assertIn("--cache-size 3", joined)
-
-    def test_readiness_url(self):
-        import modelctl_backends
-        ad = modelctl_backends.get_backend("ovms")
-        self.assertTrue(ad.readiness_url({}, 5000).endswith("/v2/health/ready"))
-
-    def test_ovms_plan_compilation(self):
-        import modelctl_plans as mp, modelctl_hardware
-        hw = modelctl_hardware.HardwareSnapshot(
-            captured_at=0, fingerprint="x",
-            gpus=(modelctl_hardware.GpuSnapshot(
-                      device="SYCL0", name="big", total_bytes=32 << 30,
-                      free_bytes=30 << 30, reserve_bytes=0, enabled=True,
-                      role="primary", bandwidth_gbs=608),
-                  modelctl_hardware.GpuSnapshot(
-                      device="SYCL1", name="small", total_bytes=12 << 30,
-                      free_bytes=12 << 30, reserve_bytes=0, enabled=True,
-                      role="secondary", bandwidth_gbs=456)),
-            ram_total_bytes=32 << 30, ram_available_bytes=25 << 30,
-            ram_reserve_bytes=0, storage=(), backend_fingerprints={})
-        plans = mp.compile_launch_plans(self._ovms_profile(), hw)
-        labels = [p.label for p in plans]
-        self.assertIn("GPU.0", labels)
-        self.assertIn("GPU.1", labels)
-        self.assertIn("current profile", labels)
-        self.assertTrue(all(p.backend == "ovms" for p in plans))
-
-
 class TestSwapClientPlainText(unittest.TestCase):
     def test_plain_text_ok_is_not_an_error(self):
         from modelctl_web.swap import LlamaSwapClient

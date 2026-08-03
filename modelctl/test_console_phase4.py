@@ -393,7 +393,7 @@ class TestRuntimePolicy(Phase4Base):
         import modelctl_backends
         with mock.patch.object(modelctl_backends, "get_backend",
                                side_effect=modelctl_backends.BackendError(
-                                   "no such backend 'ovms'")):
+                                   "no such backend 'nope'")):
             r = self.client.post("/api/v2/models/m1/runtime-policy",
                                  headers=self.auth, json={"mode": "managed"})
         self.assertEqual(r.status_code, 400)

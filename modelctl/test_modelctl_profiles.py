@@ -108,6 +108,13 @@ class TestValidateProfile(unittest.TestCase):
         errors = [m for m in msgs if m.severity == "error"]
         self.assertTrue(any("backend" in m.summary.lower() for m in errors))
 
+    def test_ovms_backend_retired(self):
+        # OVMS was torn out 2026-08-03 (tag ovms-final holds the last
+        # implementation); "ovms" must now fail like any unknown backend.
+        p = {"name": "test", "backend": "ovms", "config": {"ctx": 4096}}
+        msgs = modelctl_profiles.validate_profile(p)
+        self.assertTrue(any(m.code == "invalid_backend" for m in msgs))
+
     def test_invalid_context(self):
         p = {"name": "test", "config": {"ctx": 0}}
         msgs = modelctl_profiles.validate_profile(p)

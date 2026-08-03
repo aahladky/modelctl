@@ -107,37 +107,6 @@ SPEED_PY = Path(os.environ.get("MODELCTL_SPEED_PY", LLAMA_SWAP_DIR / "speed.py")
 # (--confirm_run_unsafe_code + HF_ALLOW_CODE_EVAL=1).
 CODE_EVAL_TASK_PREFIXES = ("humaneval", "mbpp")
 
-# --- OVMS backend (OpenVINO IR models, served via Docker behind the
-# ovms-proxy.py script at OVMS_PROXY_SCRIPT -- its docstring explains why
-# a plain `docker run` isn't enough). Each profile becomes one llama-swap
-# `models:` entry, synced into LLAMA_SWAP_CONFIG_PATH by
-# sync_llama_swap_config() the exact same way llama-cpp-backend profiles
-# are. There is no separate backend process to manage: llama-swap owns
-# on-demand start/stop/eviction for OVMS models the same way it does for
-# GGUF ones, via `docker run`/`docker stop` under the hood.
-OVMS_MODEL_REPOSITORY = Path(os.environ.get("MODELCTL_OVMS_MODELS_DIR", Path.home() / "services" / "ovms" / "models"))
-OVMS_PROXY_SCRIPT = Path(os.environ.get("MODELCTL_OVMS_PROXY_SCRIPT", Path.home() / "services" / "llama-swap" / "ovms-proxy.py"))
-OVMS_DEFAULT_TASK = os.environ.get("MODELCTL_OVMS_TASK", "text_generation")
-OVMS_DEFAULT_DEVICE = os.environ.get("MODELCTL_OVMS_DEVICE", "GPU.0")
-OVMS_DEFAULT_TOOL_PARSER = os.environ.get("MODELCTL_OVMS_TOOL_PARSER", "hermes3")
-# Blank by default: only reasoning/"thinking" models need this (OVMS
-# implements only a "qwen3" reasoning parser as of 2026-07). Rule: never
-# set tool_parser without reasoning_parser on a thinking model -- OVMS's
-# guided tool-call decoding crashes the moment the model closes a
-# <think> block.
-OVMS_DEFAULT_REASONING_PARSER = os.environ.get("MODELCTL_OVMS_REASONING_PARSER", "")
-OVMS_DEFAULT_TTL = int(os.environ.get("MODELCTL_OVMS_TTL", "1800"))
-# optimum-cli (from optimum-intel) does the actual PyTorch -> OpenVINO IR
-# conversion + NNCF quantization. Not a modelctl dependency itself.
-# Resolution order: env var override, then PATH, then the venv where
-# optimum-intel happens to be installed on this machine.
-_resolved_optimum_cli = (os.environ.get("MODELCTL_OPTIMUM_CLI") or shutil.which("optimum-cli")
-                          or str(Path.home() / "OpenArc" / ".venv" / "bin" / "optimum-cli"))
-OPTIMUM_CLI_BIN = _resolved_optimum_cli
-OVMS_DEFAULT_WEIGHT_FORMAT = os.environ.get("MODELCTL_OVMS_WEIGHT_FORMAT", "int4")
-OVMS_DEFAULT_GROUP_SIZE = int(os.environ.get("MODELCTL_OVMS_GROUP_SIZE", "128"))
-OVMS_DEFAULT_RATIO = float(os.environ.get("MODELCTL_OVMS_RATIO", "1.0"))
-
 # Hermes Agent integration: modelctl can keep Hermes' custom_providers list
 # in sync with saved profiles so pulled models show up in `hermes model`.
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
@@ -516,7 +485,7 @@ def check_vram_for_load(profile, evict=False):
 def sync_hermes_custom_providers(dry_run: bool = False):
     """Rebuild Hermes' provider entries from all saved modelctl profiles.
 
-    Both modelctl-backed model types (llama-cpp GGUF and OVMS) fold into
+    Every modelctl-backed profile folds into
     ONE provider, 'local-swap-managed', forced to that exact name
     (bypassing the URL-reuse matching below) so it never collides with
     and overwrites 'local-swap' -- the separate, hand-authored bucket for
@@ -556,13 +525,10 @@ def _sync_hermes_locked(dry_run: bool):
 
     all_profiles = [normalize_profile(p) for p in _read_all_profiles()]
     enabled = [p for p in all_profiles if p.get("name") and p.get("enabled", True)]
-    managed_profiles = [p for p in enabled if p.get("backend", "llama-cpp") in ("llama-cpp", "ovms")]
+    managed_profiles = [p for p in enabled if p.get("backend", "llama-cpp") == "llama-cpp"]
 
     models_map = {}
     for profile in managed_profiles:
-        # llama-cpp profiles know a static context_length up front; OVMS
-        # profiles don't (llama-swap's /v1/models doesn't report one for
-        # them either).
         ctx = profile.get("config", {}).get("ctx")
         models_map[profile["name"]] = {"context_length": int(ctx)} if ctx else {}
 
@@ -1972,261 +1938,6 @@ def prompt_config(repo_id: str = "", label: str = "", mtp_file_chosen: bool = Fa
     }
 
 
-def prompt_ovms_config(repo_id: str, current: dict | None = None):
-    """Prompt for an OVMS profile's runtime config -- what render_ovms_llama_swap_entry()
-    turns into ovms-proxy.py flags. Mirrors prompt_config()'s shape (blank =
-    keep the value shown).
-
-    'name' doubles as the llama-swap model ID clients request by (matches
-    the naming convention already used for the hand-authored entries this
-    backend replaces: big-qwen, big-gemma, big-qwen-moe, fast-7b) -- keep it
-    short and stable, since renaming it later means every client config that
-    references the old name breaks.
-    """
-    print("\n--- OVMS runtime config (blank = keep the value shown / use the default) ---")
-    d = current or {}
-    target_device = input(
-        f"Target device, e.g. GPU.0 / GPU.1 [{d.get('target_device') or OVMS_DEFAULT_DEVICE}]: "
-    ).strip() or d.get("target_device") or OVMS_DEFAULT_DEVICE
-    task = input(f"Task (text_generation/embeddings/rerank) [{d.get('task') or OVMS_DEFAULT_TASK}]: ").strip() \
-        or d.get("task") or OVMS_DEFAULT_TASK
-    cache_size_default = d.get("cache_size")
-    cache_size_raw = input(
-        f"KV cache size hint in GB, blank to omit [{cache_size_default or ''}]: "
-    ).strip()
-    cache_size = int(cache_size_raw) if cache_size_raw else cache_size_default
-    tool_parser_default = d.get("tool_parser", OVMS_DEFAULT_TOOL_PARSER)
-    tool_parser = input(
-        f"Tool-call parser, blank to omit [{tool_parser_default or ''}]: "
-    ).strip() or tool_parser_default
-    reasoning_parser_default = d.get("reasoning_parser", OVMS_DEFAULT_REASONING_PARSER)
-    reasoning_parser = input(
-        "Reasoning/thinking parser -- required alongside tool_parser for "
-        f"thinking models (e.g. 'qwen3' for Qwen3.x), blank to omit "
-        f"[{reasoning_parser_default or ''}]: "
-    ).strip() or reasoning_parser_default
-    ttl = prompt_int("Idle TTL in seconds (0 = never unload)", d.get("ttl", OVMS_DEFAULT_TTL))
-    return {
-        "target_device": target_device,
-        "task": task,
-        "cache_size": cache_size,
-        "tool_parser": tool_parser or None,
-        "reasoning_parser": reasoning_parser or None,
-        "ttl": ttl,
-    }
-
-
-def cmd_ovms_add(args):
-    """Register a pre-converted OpenVINO IR HF repo (e.g.
-    OpenVINO/Qwen3.6-27B-int4-ov) as an OVMS-backed profile. No download step
-    here -- unlike the old OpenArc backend, OVMS pulls its own copy of the
-    repo into OVMS_MODEL_REPOSITORY on first container start (--source_model),
-    so registering a profile is just recording the config ovms-proxy.py needs."""
-    repo_id = args.repo_id
-    name_default = next_unique_profile_name(slugify(repo_id.split("/")[-1]))
-    name = _prompt_profile_name(
-        "Profile name (this becomes the llama-swap model ID)", name_default)
-
-    dest_dir = OVMS_MODEL_REPOSITORY / repo_id
-    if dest_dir.exists() and any(dest_dir.iterdir()):
-        print(f"'{dest_dir}' already has local weights (OVMS will use them as-is).")
-    else:
-        print(f"No local weights at '{dest_dir}' yet -- OVMS will download '{repo_id}' itself "
-              f"the first time this model is requested.")
-
-    config = prompt_ovms_config(repo_id)
-
-    profile = {
-        "name": name,
-        "backend": "ovms",
-        "repo_id": repo_id,
-        "file": name,
-        # Not a GGUF -- estimate_vram_footprint() only understands GGUF headers
-        # and always returns None here. OVMS_MODEL_REPOSITORY / repo_id is
-        # where the weights live (or will be pulled to), but there's no
-        # single "model_path" file the way llama-cpp profiles have one.
-        "model_path": None,
-        "mmproj_path": None,
-        "mtp_path": None,
-        "config": config,
-        "env": [],
-        "enabled": True,
-    }
-    save_profile(profile)
-    generate_artifacts(profile)
-    print(f"-> saved profile '{name}'")
-
-    sync_all_backends(restart_router=not args.no_router_restart, restart_openarc=not args.no_router_restart)
-    if not args.no_hermes:
-        sync_hermes_custom_providers()
-    print(f"\nDone. '{name}' is now in {LLAMA_SWAP_CONFIG_PATH}.")
-    print(f"It doesn't need a separate load step -- request it through llama-swap "
-          f"(model: \"{name}\") and it starts on demand. NOTE: it's not in the "
-          f"`matrix:` section yet -- add it by hand (see ~/services/llama-swap/README.md) "
-          f"so eviction/VRAM policy accounts for it.")
-
-
-def detect_default_task(repo_id: str) -> tuple[str, bool]:
-    """Best-effort guess at --task and whether repo_id is a VLM, from the
-    source repo's config.json (a few KB, cheap to fetch before committing to
-    a conversion that can take many minutes). Returns
-    ('text-generation-with-past', False) if config.json can't be fetched or
-    parsed -- optimum-cli's own auto-detection still works either way, this
-    is just a friendlier default for the interactive prompt.
-
-    The signal is the same one that actually bit this setup: a repo with a
-    'vision_config' key is a VLM checkpoint even when it's used purely for
-    text chat -- Qwen3.6-27B and gemma-4-31B-it both fail with a cryptic
-    port-mismatch error at *inference* time (not conversion time) if
-    registered as 'llm' (see openarc_production_setup memory)."""
-    try:
-        config_path = hf_hub_download(repo_id=repo_id, filename="config.json")
-        config = json.loads(Path(config_path).read_text())
-    except Exception:
-        return "text-generation-with-past", False
-
-    is_vlm = "vision_config" in config or "vision_config" in config.get("text_config", {})
-    if not is_vlm:
-        architectures = config.get("architectures") or []
-        has_conditional_gen = any("ForConditionalGeneration" in a for a in architectures)
-        has_image_token = bool(config.get("image_token_id") or config.get("image_token_index"))
-        is_vlm = has_conditional_gen and has_image_token
-
-    return ("image-text-to-text" if is_vlm else "text-generation-with-past"), is_vlm
-
-
-def prompt_conversion_config(repo_id: str, task_default: str, is_vlm_default: bool) -> dict:
-    """Prompt for optimum-cli export settings. Mirrors prompt_ovms_config()'s
-    shape (blank = use the default shown). Defaults (int4, group-size 128,
-    ratio 1.0, asymmetric) match what every existing OpenVINO/*-int4-ov repo
-    on the machine already uses (read directly from their openvino_config.json)."""
-    print(f"\n--- Conversion settings for '{repo_id}' (blank = use the default shown) ---")
-    weight_format = input(
-        f"Weight format (fp32/fp16/int8/int4/mxfp4/nf4/cb4) [{OVMS_DEFAULT_WEIGHT_FORMAT}]: "
-    ).strip() or OVMS_DEFAULT_WEIGHT_FORMAT
-    group_size = prompt_int("Group size (quantization block size)", OVMS_DEFAULT_GROUP_SIZE)
-    ratio_raw = input(f"Ratio (int4 vs int8 layer mix, 1.0 = all int4) [{OVMS_DEFAULT_RATIO}]: ").strip()
-    ratio = float(ratio_raw) if ratio_raw else OVMS_DEFAULT_RATIO
-    sym = input("Symmetric quantization? y/N: ").strip().lower() in ("y", "yes")
-    task_hint = " (this repo looks like a VLM)" if is_vlm_default else ""
-    task = input(f"Task, blank to let optimum-cli auto-detect [{task_default}]{task_hint}: ").strip() \
-        or task_default
-    trust_remote_code = input(
-        "Trust remote code (needed for some custom architectures)? y/N: "
-    ).strip().lower() in ("y", "yes")
-    return {
-        "weight_format": weight_format,
-        "group_size": group_size,
-        "ratio": ratio,
-        "sym": sym,
-        "task": task,
-        "trust_remote_code": trust_remote_code,
-    }
-
-
-def build_optimum_export_args(repo_id: str, output_dir, conv_cfg: dict) -> list:
-    """Build the `optimum-cli export openvino` argv (excluding the binary
-    itself). Pure and side-effect-free so it's testable without actually
-    running a conversion."""
-    args = ["export", "openvino", "-m", repo_id]
-    if conv_cfg.get("task"):
-        args += ["--task", conv_cfg["task"]]
-    weight_format = conv_cfg.get("weight_format")
-    if weight_format:
-        args += ["--weight-format", weight_format]
-    if weight_format in ("int4", "int8") and conv_cfg.get("group_size") is not None:
-        args += ["--group-size", str(conv_cfg["group_size"])]
-    if weight_format == "int4" and conv_cfg.get("ratio") is not None:
-        args += ["--ratio", str(conv_cfg["ratio"])]
-    if conv_cfg.get("sym"):
-        args.append("--sym")
-    if conv_cfg.get("trust_remote_code"):
-        args.append("--trust-remote-code")
-    args.append(str(output_dir))
-    return args
-
-
-def run_optimum_export(repo_id: str, output_dir, conv_cfg: dict) -> bool:
-    """Run `optimum-cli export openvino` as a foreground subprocess, letting
-    its own tqdm progress bars/output stream straight to the terminal --
-    conversion (especially with calibration-based quantization) can run for
-    many minutes on a large model, so hiding that behind a spinner would be
-    worse, not better. Returns whether it exited 0."""
-    if not (Path(OPTIMUM_CLI_BIN).exists() or shutil.which(OPTIMUM_CLI_BIN)):
-        print(f"ERROR: optimum-cli not found at '{OPTIMUM_CLI_BIN}'. Set MODELCTL_OPTIMUM_CLI "
-              f"to the right path -- it lives in whichever venv has optimum-intel installed "
-              f"(e.g. OpenArc's .venv).", file=sys.stderr)
-        return False
-
-    cmd = [OPTIMUM_CLI_BIN] + build_optimum_export_args(repo_id, output_dir, conv_cfg)
-    print(f"\nRunning: {' '.join(shlex.quote(a) for a in cmd)}\n")
-    result = subprocess.run(cmd)
-    return result.returncode == 0
-
-
-def cmd_ovms_convert(args):
-    """Convert a source HF repo (original PyTorch weights, NOT a pre-exported
-    OpenVINO IR repo) to OpenVINO IR via optimum-cli, then register it as an
-    OVMS-backed profile -- the from-scratch counterpart to cmd_ovms_add,
-    which only handles repos that are already converted upstream (optimum-cli
-    can't pull a not-yet-converted repo the way cmd_ovms_add's OVMS-does-it-
-    itself download does for a pre-converted one).
-
-    Output goes straight into OVMS_MODEL_REPOSITORY / repo_id -- the same
-    directory OVMS's --source_model/--model_repository_path already expect,
-    so a freshly-converted model needs no copying, just a profile pointing
-    at it (compare to the old OpenArc backend, which had this exact same
-    conversion step but wrote into the same shared directory only
-    incidentally, since OPENARC_MODEL_REPOSITORY and OVMS_MODEL_REPOSITORY
-    were always the same path on disk)."""
-    repo_id = args.repo_id
-    name_default = next_unique_profile_name(slugify(repo_id.split("/")[-1]))
-    name = _prompt_profile_name(
-        "Profile name (this becomes the llama-swap model ID)", name_default)
-
-    task_default, is_vlm_default = detect_default_task(repo_id)
-    conv_cfg = prompt_conversion_config(repo_id, task_default, is_vlm_default)
-
-    dest_dir = OVMS_MODEL_REPOSITORY / repo_id
-    if dest_dir.exists() and any(dest_dir.iterdir()):
-        print(f"'{dest_dir}' already has files -- skipping conversion "
-              f"(delete it first to force a re-convert).")
-    else:
-        dest_dir.parent.mkdir(parents=True, exist_ok=True)
-        ok = run_optimum_export(repo_id, dest_dir, conv_cfg)
-        if not ok:
-            print("\nConversion failed -- see optimum-cli's own output above.")
-            sys.exit(1)
-        print(f"\nConverted '{repo_id}' -> {dest_dir}")
-
-    ovms_cfg = prompt_ovms_config(repo_id)
-
-    profile = {
-        "name": name,
-        "backend": "ovms",
-        "repo_id": repo_id,
-        "file": name,
-        "model_path": None,
-        "mmproj_path": None,
-        "mtp_path": None,
-        "config": ovms_cfg,
-        "env": [],
-        "enabled": True,
-    }
-    save_profile(profile)
-    generate_artifacts(profile)
-    print(f"-> saved profile '{name}'")
-
-    sync_all_backends(restart_router=not args.no_router_restart, restart_openarc=not args.no_router_restart)
-    if not args.no_hermes:
-        sync_hermes_custom_providers()
-    print(f"\nDone. '{name}' is now in {LLAMA_SWAP_CONFIG_PATH}.")
-    print(f"It doesn't need a separate load step -- request it through llama-swap "
-          f"(model: \"{name}\") and it starts on demand. NOTE: it's not in the "
-          f"`matrix:` section yet -- add it by hand (see ~/services/llama-swap/README.md) "
-          f"so eviction/VRAM policy accounts for it.")
-
-
 def save_profile(profile):
     validate_profile_name(profile.get("name"))
     with modelctl_fsutil.state_lock():
@@ -2251,7 +1962,7 @@ def _read_all_profiles():
 
 # Canonical profile schema (v2):
 #   name, repo_id, file, model_path, mmproj_path, mtp_path,
-#   backend ("llama-cpp" | "ovms"), binary (optional pinned llama-server),
+#   backend ("llama-cpp"), binary (optional pinned llama-server),
 #   config: {device, split_mode, tensor_split, ctx, cache_type_k,
 #            cache_type_v, flash_attn, ttl, mtp, fit, extra},
 #   env: ["K=V", ...], enabled: bool,
@@ -2646,7 +2357,7 @@ def _entry_to_yaml(entry):
 
 def _worker_entry_body(profile, effective_env):
     """Managed-runtime llama-swap entry body: launch the modelctl worker,
-    which picks the launch plan at start time. Shared by llama-cpp and OVMS."""
+    which picks the launch plan at start time."""
     log_path = PROFILES_DIR / profile["name"] / "llama-swap.log"
     launcher = shutil.which("modelctl") or "modelctl"
     body = {
@@ -2656,10 +2367,6 @@ def _worker_entry_body(profile, effective_env):
     }
     if effective_env:
         body["env"] = [f"{k}={v}" for k, v in effective_env.items()]
-    # OVMS's proxy answers /v2/health/ready, not /health -- llama-swap's
-    # default health check would time out waiting for the wrong endpoint.
-    if profile.get("backend") == "ovms":
-        body["checkEndpoint"] = "/v2/health/ready"
     body["ttl"] = profile["config"]["ttl"]
     ctx = int(profile["config"].get("ctx", 0))
     if ctx > 0:
@@ -2711,109 +2418,10 @@ def render_llama_swap_entry(profile):
     return _entry_to_yaml({profile["name"]: body}), ok, messages
 
 
-def preflight_ovms(profile, auto_fix=True):
-    """OVMS equivalent of preflight(): is this profile actually
-    registerable/loadable right now. Same contract as preflight() -- never
-    launches anything, just reports. `auto_fix` is accepted for symmetry but
-    there's nothing here that's auto-fixable. Unlike preflight_openarc's
-    model_path check, a missing local copy of the weights is NOT an error --
-    OVMS pulls its own copy on first container start."""
-    messages = []
-    ok = True
-    cfg = profile.get("config", {})
-
-    if not OVMS_PROXY_SCRIPT.exists():
-        messages.append(f"ERROR: {OVMS_PROXY_SCRIPT} not found -- every OVMS model's cmd "
-                         f"depends on it (see ~/services/llama-swap/README.md).")
-        ok = False
-
-    if not shutil.which("docker"):
-        messages.append("ERROR: 'docker' isn't on PATH -- required to run OVMS containers.")
-        ok = False
-
-    if not cfg.get("target_device"):
-        messages.append("ERROR: no target_device set (e.g. GPU.0, GPU.1).")
-        ok = False
-
-    dest_dir = OVMS_MODEL_REPOSITORY / profile.get("repo_id", "")
-    if not dest_dir.exists():
-        messages.append(f"NOTE: no local weights at {dest_dir} yet -- OVMS will download "
-                         f"'{profile.get('repo_id')}' itself the first time this model is "
-                         f"requested (can take a while for a large model).")
-
-    return ok, messages
-
-
-def render_ovms_llama_swap_entry(profile):
-    """OVMS equivalent of render_llama_swap_entry(): builds one llama-swap
-    models: entry whose cmd runs ovms-proxy.py instead of a llama-server
-    binary directly. Returns (entry_text, ok, messages), same contract."""
-    ok, messages = preflight_ovms(profile, auto_fix=True)
-    if profile.get("runtime", {}).get("mode") == "managed":
-        return _render_worker_entry(profile, ok, {}, messages)
-    cfg = profile["config"]
-    name = profile["name"]
-
-    args = [
-        "python3", str(OVMS_PROXY_SCRIPT),
-        "--model-id", "${MODEL_ID}",
-        "--listen-port", "${PORT}",
-        "--source-model", profile["repo_id"],
-        "--ovms-model-name", name,
-        "--task", cfg.get("task", OVMS_DEFAULT_TASK),
-        "--target-device", cfg.get("target_device", OVMS_DEFAULT_DEVICE),
-    ]
-    if cfg.get("cache_size"):
-        args += ["--cache-size", str(cfg["cache_size"])]
-    if cfg.get("tool_parser"):
-        args += ["--tool-parser", cfg["tool_parser"]]
-    if cfg.get("reasoning_parser"):
-        args += ["--reasoning-parser", cfg["reasoning_parser"]]
-    args_str = " \\\n      ".join(shlex.quote(str(a)) for a in args)
-    # llama-swap substitutes these placeholders; shell quoting would make
-    # them literals.
-    for placeholder in ("${PORT}", "${MODEL_ID}"):
-        args_str = args_str.replace(f"'{placeholder}'", placeholder)
-
-    log_path = PROFILES_DIR / name / "llama-swap.log"
-    body = {
-        "cmd": args_str,
-        "proxy": "http://127.0.0.1:${PORT}",
-        "checkEndpoint": "/v2/health/ready",
-        "cmdStop": "docker stop ${MODEL_ID}",
-        "logFile": str(log_path),
-        "ttl": cfg.get("ttl", OVMS_DEFAULT_TTL),
-    }
-    return _entry_to_yaml({name: body}), ok, messages
-
-
-def generate_ovms_artifacts(profile, out_dir):
-    """OVMS equivalent of the llama-cpp branch of generate_artifacts(): just
-    the llama-swap-entry.yaml snippet (same shape `sync` merges into the
-    real config.yaml) for inspection. No run.sh/Modelfile -- those describe
-    launching a llama-server binary directly, which doesn't apply to an
-    ovms-proxy.py + docker model."""
-    entry_text, ok, messages = render_ovms_llama_swap_entry(profile)
-    if messages:
-        print(f"Resolving runtime for '{profile['name']}':")
-        for m in messages:
-            print(f"  {m}")
-
-    swap_yaml = out_dir / "llama-swap-entry.yaml"
-    modelctl_fsutil.atomic_write_text(swap_yaml, entry_text)
-
-    profile["artifacts_dir"] = str(out_dir)
-    save_profile(profile)
-    return ok
-
-
 def generate_artifacts(profile):
     name = profile["name"]
     out_dir = PROFILES_DIR / name
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    if profile.get("backend") == "ovms":
-        return generate_ovms_artifacts(profile, out_dir)
 
     # One canonical command for the whole profile: the binary, environment,
     # and argv written into run.sh are byte-for-byte what the llama-swap
@@ -2899,19 +2507,16 @@ def _prune_config_backups(path, keep=10):
 
 def sync_llama_swap_config(restart: bool = True) -> int:
     """Rebuild the REAL llama-swap config.yaml (LLAMA_SWAP_CONFIG_PATH) from
-    every enabled llama-cpp- AND ovms-backend profile, merging by model name
-    so any models or top-level keys llama-swap's config already has that
-    modelctl doesn't manage (hand-added entries, the matrix: section,
-    unrelated settings) survive untouched.
+    every enabled profile, merging by model name so any models or top-level
+    keys llama-swap's config already has that modelctl doesn't manage
+    (hand-added entries, the matrix: section, unrelated settings) survive
+    untouched.
 
-    This is the actual fix for the gap found the night OVMS was benchmarked:
-    sync_all_backends() previously only ever called sync_router_preset() --
-    the per-profile llama-swap-entry.yaml snippets generate_artifacts()
-    writes were never merged into a real config.yaml anywhere in the
-    codebase. That merge is what this function does.
-
-    ovms-backend profiles sync through the same merge -- see
-    render_ovms_llama_swap_entry()/preflight_ovms().
+    This is the actual fix for a real gap: sync_all_backends() previously
+    only ever called sync_router_preset() -- the per-profile
+    llama-swap-entry.yaml snippets generate_artifacts() writes were never
+    merged into a real config.yaml anywhere in the codebase. That merge is
+    what this function does.
     """
     if yaml is None:
         print("WARNING: pyyaml not installed -- cannot sync llama-swap config.yaml. "
@@ -2927,7 +2532,7 @@ def _sync_llama_swap_config_locked(restart: bool) -> int:
     # ttl used to abort the entire sync for every profile with KeyError.
     all_profiles = [normalize_profile(p) for p in _read_all_profiles()]
     profiles = [p for p in all_profiles
-                if p.get("enabled", True) and p.get("backend", "llama-cpp") in ("llama-cpp", "ovms")]
+                if p.get("enabled", True) and p.get("backend", "llama-cpp") == "llama-cpp"]
 
     LLAMA_SWAP_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -2955,10 +2560,7 @@ def _sync_llama_swap_config_locked(restart: bool) -> int:
 
     any_unresolved = False
     for profile in profiles:
-        if profile.get("backend") == "ovms":
-            entry_text, ok, messages = render_ovms_llama_swap_entry(profile)
-        else:
-            entry_text, ok, messages = render_llama_swap_entry(profile)
+        entry_text, ok, messages = render_llama_swap_entry(profile)
         if messages:
             print(f"'{profile['name']}' (llama-swap config):")
             for m in messages:
@@ -3026,20 +2628,6 @@ def restart_llama_swap_service() -> bool:
     return True
 
 
-def _render_group_gid():
-    """GID that owns /dev/dri's render nodes, needed for docker's group_add
-    so the container's user can actually open them (matches the `stat -c
-    "%g" /dev/dri/render*` dance in Intel's own OVMS docs). Returns None if
-    /dev/dri/render* doesn't exist on this host (e.g. generating configs
-    somewhere other than the GPU box) -- callers must treat that as
-    'couldn't determine it', not 'no group needed'."""
-    import glob as _glob
-    nodes = sorted(_glob.glob("/dev/dri/render*"))
-    if not nodes:
-        return None
-    return os.stat(nodes[0]).st_gid
-
-
 def sync_all_backends(restart_router: bool = True, restart_openarc: bool = True) -> int:
     """Regenerate the real llama-swap config.yaml from the current
     llama-cpp-backend profiles and push it live via reload-or-restart.
@@ -3094,13 +2682,10 @@ def cmd_show(args):
 def cmd_edit(args):
     profile = load_profile(args.name)
     print(f"Editing '{args.name}' -- current config shown as default where applicable.\n")
-    if profile.get("backend") == "ovms":
-        profile["config"] = prompt_ovms_config(profile["repo_id"], current=profile.get("config"))
-    else:
-        profile["config"] = prompt_config(profile.get("repo_id", ""), profile.get("file", args.name),
-                                          current=profile.get("config"))
-        profile["env"] = capture_env_passthrough()
-        warn_if_env_empty(profile["env"])
+    profile["config"] = prompt_config(profile.get("repo_id", ""), profile.get("file", args.name),
+                                      current=profile.get("config"))
+    profile["env"] = capture_env_passthrough()
+    warn_if_env_empty(profile["env"])
     save_profile(profile)
     generate_artifacts(profile)
     sync_all_backends(restart_router=not args.no_router_restart, restart_openarc=not args.no_router_restart)
@@ -3538,15 +3123,9 @@ def cmd_remove(args):
     if artifacts_dir.exists():
         shutil.rmtree(artifacts_dir)
     profile_path.unlink()
-    if profile.get("backend") == "ovms":
-        print(f"Removed profile '{args.name}'. Its downloaded model weights, if any, are still "
-              f"at {OVMS_MODEL_REPOSITORY / profile.get('repo_id', '')} -- delete them yourself "
-              f"if no other profile needs them. If a container for it is currently running, "
-              f"`docker stop {args.name}` first (or just wait out its ttl).")
-    else:
-        print(f"Removed profile '{args.name}'. Model file left on disk at "
-              f"{profile.get('model_path')} -- delete it yourself if you don't need it for "
-              f"another profile.")
+    print(f"Removed profile '{args.name}'. Model file left on disk at "
+          f"{profile.get('model_path')} -- delete it yourself if you don't need it for "
+          f"another profile.")
 
     sync_all_backends(restart_router=not args.no_router_restart, restart_openarc=not args.no_router_restart)
     if not args.no_hermes:
@@ -3570,14 +3149,7 @@ def estimate_vram_footprint(profile):
     """Estimate this profile's VRAM footprint at its configured ctx/kv_quant.
     Returns the estimate dict from modelctl_vram.estimate_from_parts, or
     None when the model file is missing. Computed on demand, never stored
-    -- files and ctx change, and recomputing is cheap.
-
-    ovms-backend profiles have no top-level model_path at all (repo_id +
-    OVMS_MODEL_REPOSITORY describe where the weights live/will be pulled to
-    instead) -- this always returns None for those, same as the "file
-    missing" case. GGUF header parsing wouldn't apply to OpenVINO IR anyway;
-    callers that already degrade open for a missing estimate (cmd_place,
-    etc.) need no OVMS-specific code."""
+    -- files and ctx change, and recomputing is cheap."""
     if not profile.get("model_path"):
         return None
     model_path = Path(profile["model_path"])
@@ -3790,10 +3362,9 @@ def run_profile_evals(profile, args):
     """The --evals path of `modelctl test`: run real lm-evaluation-harness
     tasks (and/or the 'speed' pseudo-task) against a profile through the
     live llama-swap service, by shelling out to bench.sh/speed.py -- see the
-    BENCH_SH/SPEED_PY comment for why this isn't reimplemented here. Unlike
-    the default quick smoke test below, this works for OVMS profiles too,
-    since it never needs a local llama-server binary -- it just talks to
-    whatever llama-swap already has registered."""
+    BENCH_SH/SPEED_PY comment for why this isn't reimplemented here. It
+    never needs a local llama-server binary -- it just talks to whatever
+    llama-swap already has registered."""
     model_id = profile["name"]
 
     ids = llama_swap_model_ids()
@@ -3895,13 +3466,8 @@ def smoke_test_profile(name, timeout=600, prompt=None, proc_register=None):
     """Launch-and-generate-once verification (the `test` core, callable from
     the web service). Returns a structured result:
     {ok, stage, messages, tok_per_s, content, finish_reason, log_path} --
-    never sys.exits. OVMS profiles return ok=None with guidance."""
+    never sys.exits."""
     profile = load_profile(name)
-    if profile.get("backend") == "ovms":
-        return {"ok": None, "stage": "ovms", "messages": [
-            f"'{name}' is an OVMS profile -- request it through llama-swap "
-            "instead, which starts it on demand."]}
-
     result = {"ok": False, "stage": "preflight", "messages": [],
               "tok_per_s": None, "content": None, "finish_reason": None,
               "log_path": None}
@@ -3999,16 +3565,6 @@ def cmd_test(args):
 
     if getattr(args, "evals", None):
         run_profile_evals(profile, args)
-        return
-
-    if profile.get("backend") == "ovms":
-        print(f"'{profile['name']}' is an OVMS profile -- there's no local llama-server binary "
-              f"to launch directly. Request it through llama-swap instead, which starts it on "
-              f"demand:\n"
-              f"  curl http://127.0.0.1:9292/v1/chat/completions -d "
-              f"'{{\"model\":\"{profile['name']}\",\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}'\n"
-              f"...or run `modelctl test {profile['name']} --evals gsm8k,ifeval` for a real eval "
-              f"through llama-swap, which works for OVMS profiles too.")
         return
 
     print(f"Checking '{profile['name']}' before launch ...")
@@ -5330,28 +4886,6 @@ def build_arg_parser():
                          help="don't restart llama-swap after regenerating its config")
     p_pull.set_defaults(func=cmd_pull)
 
-    p_ovms_add = sub.add_parser(
-        "ovms-add",
-        help="register a native OpenVINO IR repo (e.g. OpenVINO/Qwen3.6-27B-int4-ov) as an "
-             "OVMS profile (no download -- OVMS pulls its own copy on first start)",
-    )
-    p_ovms_add.add_argument("repo_id", help="HF repo of a pre-exported OpenVINO IR model")
-    p_ovms_add.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
-    p_ovms_add.add_argument("--no-router-restart", action="store_true",
-                             help="don't restart llama-swap after saving this profile")
-    p_ovms_add.set_defaults(func=cmd_ovms_add)
-
-    p_ovms_convert = sub.add_parser(
-        "ovms-convert",
-        help="convert a source HF repo (original weights, not pre-exported OpenVINO IR) "
-             "to OpenVINO IR via optimum-cli, then register it as an OVMS profile",
-    )
-    p_ovms_convert.add_argument("repo_id", help="HF repo of the original (non-OpenVINO) model")
-    p_ovms_convert.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
-    p_ovms_convert.add_argument("--no-router-restart", action="store_true",
-                                 help="don't restart llama-swap after saving this profile")
-    p_ovms_convert.set_defaults(func=cmd_ovms_convert)
-
     p_list = sub.add_parser("list", help="list saved profiles")
     p_list.set_defaults(func=cmd_list)
 
@@ -5467,8 +5001,7 @@ def build_arg_parser():
     p_test.add_argument(
         "--evals", metavar="<task1,task2,...>",
         help="run lm-evaluation-harness tasks against this profile through llama-swap instead of "
-             "the quick launch-and-generate-once smoke test -- works for OVMS profiles too, unlike "
-             "the default check. Comma-separated lm-eval task names (gsm8k, ifeval, mmlu_pro, "
+             "the quick launch-and-generate-once smoke test. Comma-separated lm-eval task names (gsm8k, ifeval, mmlu_pro, "
              "bbh_cot_fewshot_<subtask>, humaneval_instruct, mbpp_instruct, ...), plus the "
              "pseudo-task 'speed' for a raw tokens/sec throughput check. Requires the profile to "
              "already be live in llama-swap (`modelctl sync` first). See ~/services/llama-swap/README.md "
