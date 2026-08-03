@@ -293,6 +293,61 @@ class TestSyncHermesDropsRetiredProviders(unittest.TestCase):
         self.assertNotIn("ovms-qwen3-6-27b-int4-ov", cfg["providers"])
 
 
+class TestSyncReportsRestartTruth(unittest.TestCase):
+    """sync used to return a bare profile count; a failed llama-swap
+    reload was invisible and the web reported 'applied' anyway."""
+
+    def _sync(self, restart_ok, unchanged=False):
+        with TemporaryDirectory() as tmp:
+            profiles = Path(tmp) / "profiles"
+            profiles.mkdir()
+            cfg = Path(tmp) / "config.yaml"
+            if unchanged:
+                # Pre-write exactly what an empty sync produces.
+                with mock.patch.object(modelctl, "PROFILES_DIR", profiles), \
+                     mock.patch.object(modelctl, "LLAMA_SWAP_CONFIG_PATH", cfg), \
+                     mock.patch.object(modelctl, "restart_llama_swap_service",
+                                       return_value=True):
+                    modelctl.sync_llama_swap_config(restart=False)
+            with mock.patch.object(modelctl, "PROFILES_DIR", profiles), \
+                 mock.patch.object(modelctl, "LLAMA_SWAP_CONFIG_PATH", cfg), \
+                 mock.patch.object(modelctl, "restart_llama_swap_service",
+                                   return_value=restart_ok) as restart:
+                out = modelctl.sync_llama_swap_config(restart=True)
+        return out, restart
+
+    def test_restart_failure_is_reported(self):
+        out, _ = self._sync(restart_ok=False)
+        self.assertEqual(out["restarted"], False)
+        self.assertTrue(out["restart_error"])
+
+    def test_restart_success_is_reported(self):
+        out, _ = self._sync(restart_ok=True)
+        self.assertEqual(out["restarted"], True)
+        self.assertEqual(out["restart_error"], "")
+
+    def test_unchanged_config_skips_restart_and_says_so(self):
+        out, restart = self._sync(restart_ok=True, unchanged=True)
+        self.assertIsNone(out["restarted"])
+        restart.assert_not_called()
+
+
+class TestPullQuantFlag(unittest.TestCase):
+    def test_yes_pull_passes_quant_label(self):
+        args = argparse.Namespace(repo_id="r/m", tui=False, yes=True,
+                                  quant="Q4_K_M", no_hermes=True,
+                                  no_router_restart=True)
+        with mock.patch.object(modelctl, "pull_model",
+                               return_value={"name": "m1"}) as pull:
+            modelctl.cmd_pull(args)
+        self.assertEqual(pull.call_args.kwargs.get("quant_label"), "Q4_K_M")
+
+    def test_cli_accepts_quant(self):
+        parser = modelctl.build_arg_parser()
+        ns = parser.parse_args(["pull", "r/m", "--yes", "--quant", "IQ4_NL"])
+        self.assertEqual(ns.quant, "IQ4_NL")
+
+
 class TestOvmsRetired(unittest.TestCase):
     """The removed surface stays removed: these pin the teardown."""
 
@@ -1864,6 +1919,7 @@ class TestCmdPullYes(unittest.TestCase):
     def _args(self):
         m = mock.Mock()
         m.configure_mock(repo_id="r/m", tui=False, yes=True,
+                         quant=None, no_mtp=False,
                          no_hermes=True, no_router_restart=True)
         return m
 

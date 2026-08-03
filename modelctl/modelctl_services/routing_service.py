@@ -45,12 +45,19 @@ def _wait_healthy(log=None):
 def sync_config(restart: bool = True, ctx=None) -> ServiceResult:
     """Regenerate the llama-swap config from all saved profiles."""
     try:
-        count = modelctl.sync_all_backends(restart_router=restart,
-                                           restart_openarc=restart)
+        out = modelctl.sync_all_backends(restart_router=restart,
+                                         restart_openarc=restart)
     except Exception as e:
         return ServiceResult.failure(f"sync failed: {e}")
+    count = out["profiles"] if isinstance(out, dict) else out
     result = ServiceResult(messages=[f"synced {count} profile{'s' if count != 1 else ''}"],
-                           data={"profiles": count})
+                           data={"profiles": count,
+                                 "router_reloaded": (out.get("restarted")
+                                                     if isinstance(out, dict) else None)})
+    if isinstance(out, dict) and out.get("restarted") is False:
+        result.add_warning(out.get("restart_error")
+                           or "llama-swap was not reloaded -- the previous "
+                              "config is still serving")
     return result.changed("llama-swap:config")
 
 

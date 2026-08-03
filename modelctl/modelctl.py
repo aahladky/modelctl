@@ -1734,6 +1734,8 @@ def cmd_pull(args):
 
     if getattr(args, "yes", False):
         profile = pull_model(args.repo_id,
+                             quant_label=getattr(args, "quant", None) or None,
+                             want_mtp=not getattr(args, "no_mtp", False),
                              resync=not args.no_router_restart)
         if profile is None:
             sys.exit(1)
@@ -2521,7 +2523,7 @@ def sync_llama_swap_config(restart: bool = True) -> int:
     if yaml is None:
         print("WARNING: pyyaml not installed -- cannot sync llama-swap config.yaml. "
               "Install it with `pip install pyyaml` and re-run `modelctl sync`.", file=sys.stderr)
-        return 0
+        return {"profiles": 0, "restarted": None, "restart_error": ""}
 
     with modelctl_fsutil.state_lock():
         return _sync_llama_swap_config_locked(restart)
@@ -2543,7 +2545,7 @@ def _sync_llama_swap_config_locked(restart: bool) -> int:
         except yaml.YAMLError as e:
             print(f"ERROR: {LLAMA_SWAP_CONFIG_PATH} has invalid YAML ({e}) -- refusing to "
                   f"overwrite it. Fix or remove the file by hand and re-run sync.", file=sys.stderr)
-            return 0
+            return {"profiles": 0, "restarted": None, "restart_error": ""}
 
     config.setdefault("healthCheckTimeout", 400)
     config.setdefault("models", {})
@@ -2578,7 +2580,8 @@ def _sync_llama_swap_config_locked(restart: bool) -> int:
     new_hash = hashlib.sha256(new_text.encode()).hexdigest()
     if new_hash == old_hash:
         print("llama-swap config unchanged -- skipping write.")
-        return len(profiles)
+        return {"profiles": len(profiles), "restarted": None,
+                "restart_error": ""}
 
     if LLAMA_SWAP_CONFIG_PATH.exists():
         # Dated backups, keeping the last few: a single .bak was
@@ -2596,9 +2599,15 @@ def _sync_llama_swap_config_locked(restart: bool) -> int:
     if any_unresolved:
         print("\nNOTE: at least one profile above couldn't be fully resolved for llama-swap.")
 
+    restarted = None
+    restart_error = ""
     if restart:
-        restart_llama_swap_service()
-    return len(profiles)
+        restarted = restart_llama_swap_service()
+        if not restarted:
+            restart_error = (f"{LLAMA_SWAP_SERVICE_NAME} reload-or-restart "
+                             "failed -- the previous config is still serving")
+    return {"profiles": len(profiles), "restarted": restarted,
+            "restart_error": restart_error}
 
 
 def restart_llama_swap_service() -> bool:
@@ -2628,9 +2637,15 @@ def restart_llama_swap_service() -> bool:
     return True
 
 
-def sync_all_backends(restart_router: bool = True, restart_openarc: bool = True) -> int:
+def sync_all_backends(restart_router: bool = True, restart_openarc: bool = True) -> dict:
     """Regenerate the real llama-swap config.yaml from the current
     llama-cpp-backend profiles and push it live via reload-or-restart.
+
+    Returns {"profiles": n, "restarted": True|False|None, "restart_error"}:
+    restarted is None when no reload was attempted (restart=False, or the
+    config was already up to date), False when the reload FAILED -- callers
+    that report "applied" must check it, or they lie about a config that is
+    written on disk but not being served.
 
     llama-router.service and openarc.service are retired in favor of the
     single llama-swap front door -- sync_router_preset()/
@@ -2656,7 +2671,8 @@ def cmd_defaults(args):
 
 
 def cmd_sync(args):
-    n = sync_all_backends(restart_router=not args.no_router_restart, restart_openarc=not args.no_router_restart)
+    n = sync_all_backends(restart_router=not args.no_router_restart,
+                          restart_openarc=not args.no_router_restart)["profiles"]
     if not args.no_hermes:
         sync_hermes_custom_providers(dry_run=args.hermes_dry_run)
     print(f"Synced {n} enabled profile(s) -> {LLAMA_SWAP_CONFIG_PATH}")
@@ -4881,6 +4897,10 @@ def build_arg_parser():
     p_pull.add_argument("--yes", action="store_true",
                          help="zero-config mode: auto-pick the largest quant that fits the primary GPU, "
                               "accept all defaults, no prompts")
+    p_pull.add_argument("--quant", default=None,
+                         help="with --yes: pull this quant label instead of auto-picking")
+    p_pull.add_argument("--no-mtp", action="store_true",
+                         help="with --yes: skip any MTP companion file")
     p_pull.add_argument("--no-hermes", action="store_true", help="don't update Hermes Agent config")
     p_pull.add_argument("--no-router-restart", action="store_true",
                          help="don't restart llama-swap after regenerating its config")

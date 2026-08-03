@@ -4,9 +4,30 @@ Functions accept a JobContext (ctx) with logging, progress, and cancellation
 support.  The submit_* helpers route jobs to the appropriate lane.
 """
 import json
+import re
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 import modelctl
+from modelctl_services import acquisition_service
+
+
+def _sync_backends(ctx):
+    """Sync configs and tell the truth about the router reload.
+
+    Returns False when the config was written but llama-swap was NOT
+    reloaded -- the caller must surface that, or the job reports a
+    placement as live while the old config is still serving.
+    """
+    out = modelctl.sync_all_backends(restart_router=True, restart_openarc=True)
+    if isinstance(out, dict) and out.get("restarted") is False:
+        ctx.log("WARNING: config written but llama-swap was NOT reloaded "
+                f"({out.get('restart_error') or 'reload failed'}) -- the "
+                "previous config is still serving until the router restarts")
+        return False
+    return True
 
 
 def submit_edit(runner, name, updates):
@@ -68,11 +89,16 @@ def submit_tier_apply(runner, name, accept_tier_change=False):
                 ctx.log("populated env from env script")
         modelctl.save_profile(profile)
         modelctl.generate_artifacts(profile)
-        modelctl.sync_all_backends(restart_router=True, restart_openarc=True)
+        reloaded = _sync_backends(ctx)
         for label, gib, desc in plan["layout"]:
             ctx.log(f"{label}: {gib:.1f} GiB  {desc}")
+        warnings = list(plan["warnings"])
+        if not reloaded:
+            warnings.append("the router was not reloaded -- the previous "
+                            "placement is still serving")
         return {"applied": True, "tier": plan["tier"],
-                "config": plan["config"], "warnings": plan["warnings"],
+                "config": plan["config"], "warnings": warnings,
+                "router_reloaded": reloaded,
                 "admission": plan.get("admission")}
     return runner.submit("tier-apply", f"auto-place {name}", fn,
                          payload={"name": name,
@@ -80,19 +106,85 @@ def submit_tier_apply(runner, name, accept_tier_change=False):
                          lane="mutation")
 
 
-def submit_pull(runner, repo_id, quant_label=None, want_mtp=True):
-    """Zero-config pull as a background job, with download progress."""
-    def fn(ctx):
-        from pathlib import Path
-        current = {"file": None}
+def _run_pull_subprocess(ctx, repo_id, quant_label=None, want_mtp=True,
+                         current=None):
+    """Run `modelctl pull --yes` as a killable child process.
 
-        def progress(event, name):
-            if event == "file_start":
-                current["file"] = name
-                ctx.log(f"downloading {name}")
-                ctx.set_progress(detail=name)
-            elif event == "file_done":
-                ctx.log(f"done {name}")
+    The old in-process hf_hub_download could not be interrupted: cancel
+    marked the job cancelled while the download kept writing to disk and
+    the profile still appeared. A registered process group dies with the
+    cancel, mid-file, for real.
+
+    `current` is the SAME dict submit_pull's byte-progress poller reads;
+    writing the active filename here is what makes the progress bar move.
+    """
+    import os
+    argv = [sys.executable, str(Path(modelctl.__file__).resolve()), "pull",
+            repo_id, "--yes"]
+    if quant_label:
+        argv += ["--quant", quant_label]
+    if not want_mtp:
+        argv += ["--no-mtp"]
+    proc = subprocess.Popen(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        bufsize=1, start_new_session=True,
+        cwd=str(Path(modelctl.__file__).resolve().parent),
+        # hf_hub_download's tqdm bar would arrive as hundreds of \r-lines
+        # of job-log spam; the CLI's own per-file lines carry the progress.
+        env={**os.environ, "HF_HUB_DISABLE_PROGRESS_BARS": "1"})
+    ctx.register_process(proc)
+    profile_name = None
+    if current is None:
+        current = {"file": None}
+    for line in proc.stdout:
+        line = line.rstrip()
+        if not line:
+            continue
+        ctx.log(line)
+        m = re.search(r"downloading (\S+) ->", line)
+        if m:
+            current["file"] = m.group(1)
+            ctx.set_progress(detail=m.group(1))
+        m = re.search(r"Profile '([^']+)' created", line)
+        if m:
+            profile_name = m.group(1)
+    rc = proc.wait(timeout=60)
+    if rc != 0:
+        raise RuntimeError(f"pull of {repo_id} failed (exit {rc}) -- see job log")
+    if not profile_name:
+        # Belt and braces: the CLI's closing line is the contract, but if
+        # output was cut short, the newest profile for this repo is it.
+        newest = None
+        for pf in modelctl.PROFILES_DIR.glob("*.json"):
+            try:
+                data = json.loads(pf.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if data.get("repo_id") == repo_id:
+                stamp = pf.stat().st_mtime
+                if newest is None or stamp > newest[0]:
+                    newest = (stamp, data.get("name"))
+        if newest:
+            profile_name = newest[1]
+    if not profile_name:
+        raise RuntimeError(f"pull of {repo_id} finished but no profile was "
+                           "found for it -- see job log")
+    return {"profile": profile_name}
+
+
+def submit_pull(runner, repo_id, quant_label=None, want_mtp=True,
+                needed_bytes=0):
+    """Pull as a background job: disk preflight, live progress, and a
+    download that cancel can actually stop."""
+    def fn(ctx):
+        space = acquisition_service.check_destination_space(needed_bytes)
+        for m in space.messages:
+            ctx.log(m)
+        if not space.ok:
+            raise RuntimeError(space.messages[0] if space.messages
+                               else "not enough disk space for this download")
+
+        current = {"file": None}
 
         def poller():
             while True:
@@ -122,13 +214,11 @@ def submit_pull(runner, repo_id, quant_label=None, want_mtp=True):
         t = threading.Thread(target=poller, daemon=True)
         t.start()
         ctx.raise_if_cancelled()
-        profile = modelctl.pull_model(repo_id, quant_label=quant_label,
-                                      want_mtp=want_mtp, progress_cb=progress)
+        out = _run_pull_subprocess(ctx, repo_id, quant_label=quant_label,
+                                   want_mtp=want_mtp, current=current)
         current["file"] = None
-        if profile is None:
-            raise RuntimeError(f"pull of {repo_id} failed -- see job log")
-        ctx.log(f"profile '{profile['name']}' saved and synced")
-        return {"profile": profile["name"], "config": profile["config"]}
+        ctx.log(f"profile '{out['profile']}' saved and synced")
+        return {"profile": out["profile"]}
     return runner.submit("pull", f"pull {repo_id}", fn,
                          payload={"repo_id": repo_id, "quant": quant_label},
                          lane="download")
@@ -450,9 +540,10 @@ def submit_moe_cache(runner, name, moe_cache):
             raise RuntimeError("moe_cache validation failed: " + "; ".join(errors))
         modelctl.save_profile(profile)
         modelctl.generate_artifacts(profile)
-        modelctl.sync_all_backends(restart_router=True, restart_openarc=True)
+        reloaded = _sync_backends(ctx)
         ctx.log("saved, artifacts regenerated, synced")
-        return {"name": name, "moe_cache": moe_cache}
+        return {"name": name, "moe_cache": moe_cache,
+                "router_reloaded": reloaded}
     return runner.submit("moe-cache", f"moe cache {name}", fn,
                          payload={"name": name, "moe_cache": moe_cache},
                          lane="mutation")

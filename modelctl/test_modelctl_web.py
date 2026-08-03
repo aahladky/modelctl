@@ -133,6 +133,123 @@ class TestOpenAccess(WebTestBase):
         self.assertEqual(self.client.get("/healthz").status_code, 200)
 
 
+class TestDownloadHonesty(WebTestBase):
+    """The console must not lie about downloads: cancel kills the puller,
+    deleting a wizard cancels its jobs, and a pull that cannot fit on disk
+    is refused before it starts (2026-08-03 review findings)."""
+
+    def test_wizard_delete_cancels_its_live_jobs(self):
+        import threading
+        from modelctl_web.wizard import WizardState, WizardStore
+        release = threading.Event()
+
+        def blocked(ctx):
+            release.wait(timeout=10)
+            return {}
+
+        job_id = self.store and None
+        runner = self.client.app.state.runner
+        job_id = runner.submit("pull", "stub download", blocked,
+                               lane="download")
+        state = WizardState()
+        state.download_job_id = job_id
+        WizardStore().save(state)
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if self.store.get(job_id)["status"] == "running":
+                break
+            time.sleep(0.05)
+        resp = self.client.post(f"/api/v2/wizard/{state.wizard_id}/delete")
+        self.assertEqual(resp.status_code, 200)
+        release.set()
+        self.assertEqual(self.store.get(job_id)["status"], "cancelled")
+
+    def test_pull_refused_when_disk_space_short(self):
+        from modelctl_web import mutate
+        from modelctl_services.result import ServiceResult
+        with mock.patch.object(
+                mutate.acquisition_service, "check_destination_space",
+                return_value=ServiceResult.failure("only 1 GiB free but this needs 50 GiB")):
+            job_id = mutate.submit_pull(
+                self.client.app.state.runner, "some/repo",
+                needed_bytes=50 << 30)
+            j = self.wait_job(job_id)
+        self.assertEqual(j["status"], "failed")
+        self.assertIn("free", j["error"])
+
+    def test_pull_downloads_in_a_killable_subprocess(self):
+        from modelctl_web import mutate
+        registered = []
+
+        class FakeProc:
+            returncode = 0
+            pid = 4242
+
+            def __init__(self):
+                import io as _io
+                self.stdout = _io.StringIO(
+                    "  downloading m.gguf -> /x ...\n"
+                    "Done. Profile 'm1' created.\n")
+
+            def wait(self, timeout=None):
+                return 0
+
+            def poll(self):
+                return 0
+
+        class Ctx:
+            job_id = "j1"
+            store = self.store
+
+            def log(self, m):
+                pass
+
+            def set_progress(self, *a, **k):
+                pass
+
+            def raise_if_cancelled(self):
+                pass
+
+            def register_process(self, proc):
+                registered.append(proc)
+
+        shared = {"file": None}
+        with mock.patch.object(mutate.subprocess, "Popen",
+                               return_value=FakeProc()) as popen:
+            result = mutate._run_pull_subprocess(
+                Ctx(), "r/m", quant_label="Q4_K_M", want_mtp=True,
+                current=shared)
+        argv = popen.call_args.args[0]
+        self.assertIn("pull", argv)
+        self.assertIn("r/m", argv)
+        self.assertIn("--quant", argv)
+        self.assertEqual(registered, [popen.return_value])
+        self.assertEqual(result["profile"], "m1")
+        # The poller reads THIS dict; the reader must write into it, or
+        # the progress bar sits at 0% for the whole download.
+        self.assertEqual(shared["file"], "m.gguf")
+        self.assertEqual(
+            popen.call_args.kwargs["env"]["HF_HUB_DISABLE_PROGRESS_BARS"], "1")
+
+    def test_sync_warning_reaches_the_job(self):
+        from modelctl_web import mutate
+
+        class Ctx:
+            logged = []
+
+            def log(self, m):
+                self.logged.append(m)
+
+        with mock.patch.object(
+                mutate.modelctl, "sync_all_backends",
+                return_value={"profiles": 1, "restarted": False,
+                              "restart_error": "unit not found"}):
+            reloaded = mutate._sync_backends(Ctx())
+        self.assertFalse(reloaded)
+        self.assertTrue(any("NOT reloaded" in m for m in Ctx.logged),
+                        Ctx.logged)
+
+
 class TestProfilesApi(WebTestBase):
     # Phase-3 cutover: profile *deletion* left the console with the old
     # server-rendered pages. POST /profiles/{name}/delete was the only

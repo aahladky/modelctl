@@ -9,6 +9,7 @@ mutating API.
 """
 import json
 import os
+import threading
 import time
 import urllib.request
 from dataclasses import asdict
@@ -224,23 +225,45 @@ def create_app(store=None, runner=None, collector=None,
                 if plan is not None else None)
         return p, plan, inputs, source, gate
 
+    _download_submit_lock = threading.Lock()
+
+    def _selected_quant_bytes(state):
+        """Size of the chosen quant from repo metadata, 0 when unknown.
+
+        Feeds the disk preflight; unknown sizes fail open (the pull is
+        allowed) rather than blocking on a metadata hiccup.
+        """
+        if not (state.repo_id and state.selected_quant):
+            return 0
+        try:
+            contents = modelctl.get_repo_contents(state.repo_id)
+        except Exception:
+            return 0
+        for g in contents.get("quant_groups", []):
+            if g.get("label") == state.selected_quant:
+                return g.get("total_size") or 0
+        return 0
+
     def _submit_download(state):
         """Submit the wizard's acquisition job exactly once.
 
         Submission lives in POST handlers; the download GET used to submit
         as a side effect, so two tabs (or a browser prefetch) raced the
         job-id guard into two concurrent pulls of the same repo and a
-        duplicate `name-2` profile.
+        duplicate `name-2` profile. The lock closes the remaining
+        check-then-set race between two simultaneous POSTs.
         """
-        if state.download_job_id:
-            return
-        if state.source_type == "local_file" and state.local_path:
-            state.download_job_id = mutate.submit_import_local(
-                runner, state.local_path)
-        elif state.repo_id:
-            state.download_job_id = mutate.submit_pull(
-                runner, state.repo_id,
-                quant_label=state.selected_quant or None)
+        with _download_submit_lock:
+            if state.download_job_id:
+                return
+            if state.source_type == "local_file" and state.local_path:
+                state.download_job_id = mutate.submit_import_local(
+                    runner, state.local_path)
+            elif state.repo_id:
+                state.download_job_id = mutate.submit_pull(
+                    runner, state.repo_id,
+                    quant_label=state.selected_quant or None,
+                    needed_bytes=_selected_quant_bytes(state))
 
     def _refresh_download_outcome(state):
         """Fold the acquisition job's structured result into wizard state.
@@ -1770,8 +1793,22 @@ def create_app(store=None, runner=None, collector=None,
     @app.post("/api/v2/wizard/{wizard_id}/delete")
     def api_v2_wizard_delete(wizard_id: str):
         from .wizard import WizardStore
-        WizardStore().delete(wizard_id)
-        return {"deleted": wizard_id}
+        store_wiz = WizardStore()
+        state = store_wiz.load(wizard_id)
+        cancelled = []
+        if state:
+            # Abandoning the wizard abandons its work: a live download or
+            # test job left running would keep pulling gigabytes for a
+            # profile nobody is waiting for.
+            for jid in (state.download_job_id, state.test_job_id):
+                if not jid:
+                    continue
+                job = store.get(jid)
+                if job and job.get("status") in ("queued", "running"):
+                    runner.cancel(jid)
+                    cancelled.append(jid)
+        store_wiz.delete(wizard_id)
+        return {"deleted": wizard_id, "cancelled_jobs": cancelled}
 
     @app.get("/v2")
     def v2_root_redirect():
