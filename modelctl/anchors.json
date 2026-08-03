@@ -621,7 +621,7 @@
         "driver": ""
       },
       "recorded": "2026-08-03",
-      "source": "~/workspace/.lanes/fleet-laguna-baseline/runs/r2-anchor.json",
+      "source": "modelctl/docs/evidence/2026-08-03-laguna-r2-promotion.md",
       "note": "supersedes laguna-s2.1-canary (old fork binary, void with the binary change); router idle during runs, console-only load"
     }
   ]

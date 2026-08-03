@@ -250,7 +250,7 @@ class TestShippedRegistry(unittest.TestCase):
                          ["c1-static-122b", "c1-static-35b",
                           "c2-cache-122b", "c2-cache-35b",
                           "c3-cache-hybrid-122b", "c3-cache-hybrid-35b",
-                          "laguna-s2.1-canary"])
+                          "laguna-s2.1-canary", "laguna-s2.1-r2-maiden"])
 
     def test_the_35b_battery_did_not_overwrite_the_122b_anchors(self):
         # A number taken on a different model is not a re-measurement of
