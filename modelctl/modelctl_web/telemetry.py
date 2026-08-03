@@ -296,7 +296,46 @@ class TelemetryCollector:
         except Exception:
             return None
 
-    def _model_rows(self, runtime):
+    def _placement_summary(self, profile, gpus):
+        """The resulting allocation as chips: per-device split share plus
+        flags, or None when there is nothing structured to say. Shares
+        are percentages of the split weights -- the weights are
+        proportions, not GiB, and a summary that claimed bytes it never
+        measured would be lying (same rule as the em dash)."""
+        cfg = profile.get("config", {})
+        devices = []
+        flags = []
+        split = (cfg.get("tensor_split") or "").strip()
+        if split:
+            try:
+                weights = [float(x) for x in split.split(",") if x.strip()]
+            except ValueError:
+                weights = []
+            total = sum(weights)
+            if weights and total > 0:
+                names = [g["device"] for g in gpus]
+                for i, w in enumerate(weights):
+                    name = names[i] if i < len(names) else f"device {i}"
+                    devices.append({"name": name,
+                                    "text": f"{round(100 * w / total)}%"})
+                mode = cfg.get("split_mode") or "layer"
+                if mode in ("layer", "row"):
+                    flags.append(f"{mode} split")
+        elif cfg.get("device"):
+            devices.append({"name": cfg["device"], "text": ""})
+        extra = cfg.get("extra") or ""
+        if "exps=CPU" in extra:
+            flags.append("CPU experts")
+        if "-ot " in extra or "--override-tensor" in extra:
+            flags.append("tensor overrides")
+        mc = profile.get("moe_cache") or {}
+        if mc.get("mode", "off") != "off":
+            flags.append(f"MoE cache {mc['mode']}")
+        if not devices and not flags:
+            return None
+        return {"devices": devices, "flags": flags}
+
+    def _model_rows(self, runtime, gpus=None):
         rows = []
         now = time.monotonic()
         seen = set()
@@ -328,6 +367,7 @@ class TelemetryCollector:
                 "file": p.get("file") or "",
                 "backend": p.get("backend") or "llama-cpp",
                 "placement": self._placement(p),
+                "placement_summary": self._placement_summary(p, gpus or []),
                 "state": rt.get("state") or (
                     "stopped" if rt.get("registered") else
                     ("stopped" if rt else "unregistered")),
@@ -350,6 +390,7 @@ class TelemetryCollector:
             rows.append({
                 "name": name, "file": "", "backend": "unmanaged",
                 "placement": "(no modelctl profile)",
+                "placement_summary": None,
                 "state": rt.get("state") or "unknown",
                 "state_class": rt.get("state_class") or "",
                 "registered": bool(rt.get("registered")),
@@ -400,7 +441,7 @@ class TelemetryCollector:
             runtime = {}
             errors["runtime"] = str(e) or "runtime probe failed"
         try:
-            models = self._model_rows(runtime)
+            models = self._model_rows(runtime, gpus)
         except Exception as e:
             models = []
             errors["models"] = str(e) or "profile read failed"

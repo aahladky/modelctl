@@ -1,17 +1,23 @@
-/* operate: live meters, sparklines, in-place row updates. Everything on
-   this page renders from the tick stream; when the stream drops, every
-   live region flips to the stale treatment (dashed border, last-known
-   value + timestamp + retry countdown) instead of blanking. */
-import { useEffect, useRef, useState } from "preact/hooks";
+/* overview: organized around "is anything running, and is it healthy."
+   Active workloads first (running models as cards, in-flight loads as a
+   persistent pipeline wired to the real job), hardware second, the
+   library of stopped profiles last, behind search. Everything renders
+   from the tick stream; when the stream drops, every live region flips
+   to the stale treatment instead of blanking. */
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { ComponentChildren } from "preact";
 import { useStream } from "../lib/stream";
 import { Spark, push } from "../lib/spark";
 import { Info } from "../lib/info";
 import { Meter } from "../lib/meter";
 import { ConfirmButton, submitAction } from "../lib/actions";
-import { fmtClock, fmtGiB, fmtUp, loadModel, probeFleet, unloadAll,
-  unloadModel } from "../lib/api";
-import type { ModelRow, NodeStatRow, NodeStats, Tick } from "../lib/types";
+import { cancelJob, fmtAgo, fmtClock, fmtGiB, fmtUp, loadModel, probeFleet,
+  unloadAll, unloadModel } from "../lib/api";
+import { EmptyState, Pipeline, PlacementChips, SectionHead, StatBlock }
+  from "../lib/ui";
+import { toast } from "../lib/toasts";
+import type { JobRow, ModelRow, NodeStatRow, NodeStats, Tick }
+  from "../lib/types";
 
 type Series = Record<string, number[]>;
 
@@ -38,7 +44,7 @@ function useSeries(tick: Tick | null): Series {
 
 /* A region marks itself only when its data is not trustworthy. The
    header's global badge already says the stream is live; a healthy
-   region repeating it nineteen times is noise, so it renders nothing. */
+   region repeating it is noise, so it renders nothing. */
 function LiveMark({ stale }: { stale: boolean }) {
   return stale
     ? <span class="live stale"><span class="dot"></span>stale</span>
@@ -56,16 +62,8 @@ function StaleSub({ lastAt, retryIn }: { lastAt: number | null; retryIn: number 
 
 const DASH = "—";
 
-/* One remote node inside the fleet card. Separated from its neighbour by
-   a hairline rather than by its own widget: a node's health is the same
-   class of fact as a GPU's VRAM, so it belongs in one more cell of the
-   existing grid, not in a row of its own.
-
-   Every number here can be absent, and absent renders as an em dash --
-   never 0. fmtGiB already does that for byte counts; the util/temp/load
-   fields are checked against null explicitly for the same reason. A card
-   that prints "gpu 0%" when it means "we could not ask the GPU" is
-   lying at exactly the glance this card exists to serve. */
+/* One remote node inside the fleet card. Every number here can be
+   absent, and absent renders as an em dash — never 0. */
 function NodeBlock({ n, first }: { n: NodeStatRow; first: boolean }) {
   const sep = first
     ? undefined
@@ -75,9 +73,6 @@ function NodeBlock({ n, first }: { n: NodeStatRow; first: boolean }) {
     <span>{n.name} <span class="sub">{gpu ? n.device : "cpu"}</span></span>
   );
 
-  /* No ssh host in the registry: there is nothing to poll and nothing to
-     meter. The row still renders, because presence and the budget are
-     registry facts and are knowable without touching the machine. */
   if (!n.polled) {
     return (
       <div style={sep}>
@@ -129,10 +124,6 @@ function NodeBlock({ n, first }: { n: NodeStatRow; first: boolean }) {
 
 function RemoteFleet({ ns, stale, note }:
                      { ns: NodeStats; stale: boolean; note: ComponentChildren }) {
-  /* No registered remote node is no card. An empty "remote fleet" widget
-     on a single-machine install is noise, and it is not the same thing
-     as a fleet that exists and could not be read -- that case arrives as
-     nodes with em dashes plus the stale treatment. */
   if (ns.nodes.length === 0) return null;
   const hosts = [...new Set(ns.nodes.map((n) => n.host).filter(Boolean))];
   return (
@@ -141,9 +132,6 @@ function RemoteFleet({ ns, stale, note }:
         <span>remote fleet <span class="sub">{hosts.join(" · ") || DASH}</span></span>
         <LiveMark stale={stale} />
       </div>
-      {/* Pin disagreement gets the error treatment, not a footnote: a
-          mismatched node answers a handshake in milliseconds and reports
-          a healthy protocol version, and it is unusable. */}
       <div class={ns.pins_agree ? "sub" : "msg error"} style="margin-top:.3rem">
         {ns.present} present · {ns.pins_agree
           ? "versions match"
@@ -156,13 +144,6 @@ function RemoteFleet({ ns, stale, note }:
     </div>
   );
 }
-
-/* Mutations go through the typed /api/v2 lane and answer with the job id;
-   the job itself shows up in the stream, so the SPA toasts and lets the
-   jobs badge/page track it. (Phase 3: these used to POST to the old
-   console's /models/{name}/{verb} routes, which the cutover removed.
-   Phase 4: submitAction moved to lib/actions, shared with the model hub,
-   the model page and settings.) */
 
 function UnloadAll({ running, stale }: { running: number; stale: boolean }) {
   const [busy, setBusy] = useState(false);
@@ -184,57 +165,222 @@ function UnloadAll({ running, stale }: { running: number; stale: boolean }) {
   );
 }
 
-function ModelRowView({ m, spark, stale }:
-                      { m: ModelRow; spark: number[]; stale: boolean }) {
+/* ---- active workloads ------------------------------------------------ */
+
+/* The newest load/restart job for a model, by title match: the tick's
+   job rows don't carry a payload, but every runtime-lane title is
+   "<verb> <name>" by construction (modelctl_web/mutate.py). */
+function loadJobFor(jobs: JobRow[], name: string): JobRow | null {
+  const mine = jobs.filter((j) =>
+    (j.type === "load" || j.type === "restart")
+    && j.title === `${j.type} ${name}`);
+  if (mine.length === 0) return null;
+  return mine.reduce((a, b) => (b.created > a.created ? b : a));
+}
+
+function fmtElapsed(started: number | null): string {
+  if (!started) return DASH;
+  const s = Math.max(0, Math.round(Date.now() / 1000 - started));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function RunningCard({ m, spark, stale }:
+                     { m: ModelRow; spark: number[]; stale: boolean }) {
   const [busy, setBusy] = useState(false);
-  const chipClass = m.state_class ? `chip ${m.state_class}` : "chip";
-  const act = (verb: "load" | "unload") => {
+  const hit = m.cache?.hit_ratio;
+  return (
+    <div class={stale ? "widget stale" : "widget"}
+         style="border-left:3px solid var(--ok)">
+      <div style="display:flex;gap:1.2rem;align-items:center;flex-wrap:wrap">
+        <div style="flex:1;min-width:220px">
+          <h3 style="font-size:1.02rem;margin:0">
+            <a href={`/v2/models/${encodeURIComponent(m.name)}`}>{m.name}</a>
+            <span style={`color:var(--${m.state_class === "ok" || m.running ? "ok" : "muted"});font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;margin-left:.6em`}>
+              {m.state}
+            </span>
+          </h3>
+          <div class="sub num" style="margin:.15rem 0 .4rem">
+            {[m.port ? `:${m.port}` : "",
+              m.size_bytes != null ? `${fmtGiB(m.size_bytes)} GiB` : "",
+              m.backend !== "llama-cpp" ? m.backend : ""]
+              .filter(Boolean).join(" · ") || m.file}
+          </div>
+          <PlacementChips summary={m.placement_summary} fallback={m.placement} />
+        </div>
+        <div class="stats">
+          <StatBlock value={m.tok_s != null ? m.tok_s.toFixed(1) : DASH}
+                     unit="tok/s" />
+          {hit != null && (
+            <StatBlock value={(hit * 100).toFixed(1)} unit="% cache hit" />
+          )}
+          {spark.length > 1 && (
+            <div style="width:120px;align-self:center">
+              <Spark data={spark} height={30} label={`${m.name} tok/s`} />
+            </div>
+          )}
+        </div>
+        <div class="actions">
+          <button type="button" class={busy ? "btn-danger busy" : "btn-danger"}
+                  disabled={busy || stale}
+                  aria-label={`unload ${m.name}`}
+                  onClick={() => {
+                    setBusy(true);
+                    submitAction(() => unloadModel(m.name), `unload ${m.name}`)
+                      .finally(() => setBusy(false));
+                  }}>unload</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* An in-flight load as a persistent operation, not a button and a toast.
+   The stages are only the ones the backend truly has: llama-swap's warm
+   load is one opaque call, so the pipe is queued → loading → ready and
+   the card leans on elapsed time, the job link, and its log — not on
+   invented percentages. */
+function LoadingCard({ m, job, stale }:
+                     { m: ModelRow; job: JobRow; stale: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const at = job.status === "queued" ? 0 : 1;
+  const cancel = async () => {
     setBusy(true);
-    submitAction(() => (verb === "load" ? loadModel : unloadModel)(m.name),
-                 `${verb} ${m.name}`).finally(() => setBusy(false));
+    try {
+      const res = await cancelJob(job.id);
+      if (!res.cancelled) {
+        toast("err", `✗ cancel failed — ${job.title}`,
+              res.reason || `job is ${res.status}`, 9000);
+      } else {
+        toast("ok", `${job.title} cancelled`, "");
+      }
+    } catch (e) {
+      toast("err", `✗ cancel failed — ${job.title}`, String(e), 9000);
+    } finally {
+      setBusy(false);
+    }
   };
   return (
-    /* The row keeps its hover treatment, but the navigation is a real
-       <a> in the name cell rather than an onClick on the <tr>. A div
-       pretending to be a link cannot be tabbed to, middle-clicked,
-       opened in a new tab or read out as a link; this restores all
-       four, and costs the row nothing but the cursor. */
+    <div class={stale ? "widget stale" : "widget"}
+         style="border-left:3px solid var(--accent)">
+      <div style="display:flex;gap:1.2rem;align-items:center;flex-wrap:wrap">
+        <div style="flex:1;min-width:240px">
+          <h3 style="font-size:1.02rem;margin:0">
+            <a href={`/v2/models/${encodeURIComponent(m.name)}`}>{m.name}</a>
+            <span style="color:var(--accent);font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;margin-left:.6em">
+              {job.type === "restart" ? "restarting" : "loading"}
+            </span>
+          </h3>
+          <div class="sub num" style="margin:.15rem 0 0">
+            {[m.size_bytes != null ? `${fmtGiB(m.size_bytes)} GiB` : "", m.file]
+              .filter(Boolean).join(" · ")}
+            {" · job "}
+            <a href={`/v2/jobs/${encodeURIComponent(job.id)}`}>
+              {job.id.slice(0, 8)}
+            </a>
+          </div>
+          <Pipeline stages={["queued", "loading", "ready"]} at={at}
+                    label={`${m.name} ${job.status === "queued"
+                      ? "queued to load" : "loading"}`} />
+          {job.detail && <div class="sub">{job.detail}</div>}
+        </div>
+        <div class="stats">
+          <StatBlock value={fmtElapsed(job.started)} unit="elapsed" />
+        </div>
+        <div class="actions" style="flex-direction:column;align-items:stretch">
+          <a class="btn" style="text-align:center"
+             href={`/v2/jobs/${encodeURIComponent(job.id)}`}>logs</a>
+          {job.cancellable && (
+            <button type="button" class={busy ? "btn-danger busy" : "btn-danger"}
+                    disabled={busy || stale} onClick={cancel}>cancel</button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* A failed load stays on the page in the error treatment with a retry —
+   a toast that evaporated was the whole complaint. It clears when a
+   newer load job replaces it or the model comes up. */
+function FailedLoadCard({ m, job, stale }:
+                        { m: ModelRow; job: JobRow; stale: boolean }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <div class="widget" style="border-left:3px solid var(--err)">
+      <div style="display:flex;gap:1.2rem;align-items:center;flex-wrap:wrap">
+        <div style="flex:1;min-width:240px">
+          <h3 style="font-size:1.02rem;margin:0">
+            <a href={`/v2/models/${encodeURIComponent(m.name)}`}>{m.name}</a>
+            <span style="color:var(--err);font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;margin-left:.6em">
+              load failed
+            </span>
+          </h3>
+          <div class="msg error" style="margin:.25rem 0 0">
+            {(job.error || "load failed").split("\n")[0]}
+          </div>
+          <div class="sub num">
+            {job.finished ? `${fmtAgo(job.finished)} · ` : ""}
+            job <a href={`/v2/jobs/${encodeURIComponent(job.id)}`}>
+              {job.id.slice(0, 8)}</a> has the full log
+          </div>
+        </div>
+        <div class="actions">
+          <button type="button" class={busy ? "busy" : undefined}
+                  disabled={busy || stale}
+                  onClick={() => {
+                    setBusy(true);
+                    submitAction(() => loadModel(m.name), `load ${m.name}`)
+                      .finally(() => setBusy(false));
+                  }}>retry load</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---- library --------------------------------------------------------- */
+
+function LibraryRow({ m, spark, stale, loadBlocked }: {
+  m: ModelRow; spark: number[]; stale: boolean; loadBlocked: boolean;
+}) {
+  const [busy, setBusy] = useState(false);
+  const chipClass = m.state_class ? `chip ${m.state_class}` : "chip";
+  return (
     <tr class="rowhover">
       <td>
         <a href={`/v2/models/${encodeURIComponent(m.name)}`}>{m.name}</a>
         <div class="sub">
-          {[m.size_bytes != null ? `${fmtGiB(m.size_bytes)} GiB` : "",
-            m.file,
-            m.backend !== "llama-cpp" ? m.backend : ""]
+          {[m.file, m.backend !== "llama-cpp" ? m.backend : ""]
             .filter(Boolean).join(" · ")}
         </div>
       </td>
-      <td class="sub">{m.placement}</td>
-      <td><span class={chipClass}><span class="dot"></span>{m.state}</span></td>
-      <td class={m.tok_s != null ? "num" : "num sub"}>
-        {m.tok_s != null ? m.tok_s.toFixed(1) : "—"}
+      <td class="opt">
+        <PlacementChips summary={m.placement_summary} fallback={m.placement} />
       </td>
-      <td>
+      <td class={m.size_bytes != null ? "num" : "num sub"}>
+        {m.size_bytes != null ? `${fmtGiB(m.size_bytes)} GiB` : DASH}
+      </td>
+      <td class="opt">
+        {m.state !== "stopped" || !m.enabled
+          ? <span class={chipClass}><span class="dot"></span>
+              {m.enabled ? m.state : "disabled"}</span>
+          : null}
         {spark.length > 1
-          ? <Spark data={spark} height={26} label={`${m.name} tok/s`} />
+          ? <Spark data={spark} height={22} label={`${m.name} tok/s`} />
           : null}
       </td>
-      {/* the cell stays a cell: `.actions` sets display:flex, which on a
-          <td> drops it out of the row's height equalization, so its
-          border-bottom draws at content height instead of row height and
-          the divider steps mid-row. The flex goes on an inner div and
-          the width moves to the cell. */}
-      <td style="width:120px">
+      <td style="width:90px">
         <div class="actions">
-          {m.running
-            ? <button class={busy ? "busy" : undefined} disabled={busy || stale}
-                      aria-label={`unload ${m.name}`}
-                      onClick={() => act("unload")}>unload</button>
-            : m.registered && m.enabled
-              ? <button class={busy ? "busy" : undefined} disabled={busy || stale}
-                        aria-label={`load ${m.name}`}
-                        onClick={() => act("load")}>load</button>
-              : null}
+          {m.registered && m.enabled && !m.running
+            ? <button type="button" class={busy ? "busy" : undefined}
+                      disabled={busy || stale || loadBlocked}
+                      aria-label={`load ${m.name}`}
+                      onClick={() => {
+                        setBusy(true);
+                        submitAction(() => loadModel(m.name), `load ${m.name}`)
+                          .finally(() => setBusy(false));
+                      }}>load</button>
+            : null}
         </div>
       </td>
     </tr>
@@ -244,16 +390,32 @@ function ModelRowView({ m, spark, stale }:
 export function Operate() {
   const { tick, stale, lastAt, retryIn } = useStream();
   const series = useSeries(stale ? null : tick);
+  const [q, setQ] = useState("");
+  const [backend, setBackend] = useState("all");
+  const [sort, setSort] = useState<"name" | "size">("name");
 
-  /* Presence on the remote-fleet card is the last recorded RPC probe,
-     and a probe expires after the 900s presence TTL. Only the fleet
-     page re-probed on open, so within fifteen minutes of a fleet visit
-     this page showed the decayed record beside ten-second-fresh ssh
-     telemetry: "0 present" over a live VRAM meter. Same rule as the
-     fleet page now -- a person opening the page is the probe trigger.
-     Fire and forget: the refreshed record arrives with the next tick,
-     and a probe that fails leaves whatever honest state it found. */
+  /* A person opening the page is the probe trigger — same rule as the
+     fleet page, so presence doesn't decay mid-glance. */
   useEffect(() => { probeFleet().catch(() => undefined); }, []);
+
+  const active = useMemo(() => {
+    if (!tick) return { running: [] as ModelRow[], loading: [] as
+      { m: ModelRow; job: JobRow }[], failed: [] as { m: ModelRow; job: JobRow }[] };
+    const running: ModelRow[] = [];
+    const loading: { m: ModelRow; job: JobRow }[] = [];
+    const failed: { m: ModelRow; job: JobRow }[] = [];
+    for (const m of tick.models) {
+      const job = loadJobFor(tick.jobs, m.name);
+      if (m.running) {
+        running.push(m);
+      } else if (job && (job.status === "running" || job.status === "queued")) {
+        loading.push({ m, job });
+      } else if (job && job.status === "failed") {
+        failed.push({ m, job });
+      }
+    }
+    return { running, loading, failed };
+  }, [tick]);
 
   if (!tick) {
     return (
@@ -273,18 +435,6 @@ export function Operate() {
   const nodeStats = tick.node_stats
     ?? { nodes: [], age_seconds: null, ok: false, present: 0,
          pins_agree: true, protocol: "" };
-  /* Running first, then by name. The heading below says "registered",
-     not "resident", because that is what the list is -- every profile,
-     running or not. Sorting the running ones to the top is what makes
-     the honest name harmless to read at a glance. (The server already
-     sorts this way; re-sorting here keeps the two from drifting.) */
-  const sortedModels = [...models].sort((a, b) =>
-    Number(b.running) - Number(a.running) || a.name.localeCompare(b.name));
-  /* Per-region degradation. The stream can be perfectly healthy while one
-     server-side probe throws: `gpus` then arrives empty and `ram` arrives
-     zeroed, both indistinguishable from fact. tick.errors names the
-     section that failed, so the region marks itself instead of quietly
-     lying. */
   const err = tick.errors ?? {};
   const bad = (section: string) => stale || section in err;
   const cls = (section: string) => (bad(section) ? "widget stale" : "widget");
@@ -295,6 +445,27 @@ export function Operate() {
       : stale
         ? <StaleSub lastAt={lastAt} retryIn={retryIn} />
         : null;
+
+  /* the library is everything not currently active on the page above */
+  const activeNames = new Set([
+    ...active.running.map((m) => m.name),
+    ...active.loading.map((x) => x.m.name),
+  ]);
+  const library = models
+    .filter((m) => !activeNames.has(m.name))
+    .filter((m) => backend === "all" || m.backend === backend)
+    .filter((m) => {
+      const needle = q.trim().toLowerCase();
+      if (!needle) return true;
+      return m.name.toLowerCase().includes(needle)
+        || m.file.toLowerCase().includes(needle);
+    })
+    .sort((a, b) => sort === "size"
+      ? (b.size_bytes ?? -1) - (a.size_bytes ?? -1)
+      : a.name.localeCompare(b.name));
+  const backends = [...new Set(models.map((m) => m.backend))].sort();
+  const libraryTotal = models.length - activeNames.size;
+  const nActive = active.running.length + active.loading.length;
 
   return (
     <>
@@ -324,7 +495,31 @@ export function Operate() {
         </a>
       </div>
 
-      <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
+      <SectionHead title="active workloads">
+        {nActive} of {models.length} profiles
+        {active.running.length > 1 && <>
+          {" · "}
+          <UnloadAll running={active.running.length} stale={stale} />
+        </>}
+      </SectionHead>
+      {active.running.map((m) => (
+        <RunningCard key={m.name} m={m}
+                     spark={series[`tok:${m.name}`] ?? []} stale={stale} />
+      ))}
+      {active.loading.map(({ m, job }) => (
+        <LoadingCard key={m.name} m={m} job={job} stale={stale} />
+      ))}
+      {active.failed.map(({ m, job }) => (
+        <FailedLoadCard key={m.name} m={m} job={job} stale={stale} />
+      ))}
+      {nActive === 0 && active.failed.length === 0 && (
+        <EmptyState>
+          nothing is running — load a model from the library below
+        </EmptyState>
+      )}
+
+      <SectionHead title="hardware" />
+      <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(210px,1fr))">
         {gpus.length === 0 && (
           <div class={cls("gpus")}>
             <div class="label"><span>GPUs</span><LiveMark stale={bad("gpus")} /></div>
@@ -342,7 +537,7 @@ export function Operate() {
           return (
             <div class={cls("gpus")} key={g.device}>
               <div class="label">
-                <span>{g.device} · {g.name}</span>
+                <span>{g.name} <span class="sub num">{g.device}</span></span>
                 <LiveMark stale={bad("gpus")} />
               </div>
               <Meter value={used} max={total} label={`${g.device} VRAM`}
@@ -361,8 +556,6 @@ export function Operate() {
             <span>system RAM</span>
             <LiveMark stale={bad("ram")} />
           </div>
-          {/* a failed meminfo read is 0/0, which must draw empty and
-              announce nothing -- not a full bar next to an em dash */}
           <Meter value={err["ram"] ? null : ram.used_bytes}
                  max={err["ram"] ? null : ram.total_bytes}
                  label="system RAM"
@@ -371,8 +564,6 @@ export function Operate() {
                    : `${fmtGiB(ram.used_bytes)} of `
                      + `${fmtGiB(ram.total_bytes, 0)} GiB system RAM used`} />
           <div class="big">
-            {/* a failed meminfo read yields 0/0; print an em dash rather
-                than a number that reads as a measurement */}
             {err["ram"] ? "—" : fmtGiB(ram.used_bytes)}
             <span class="sub"> / {err["ram"] ? "—" : fmtGiB(ram.total_bytes, 0)} GiB</span>
           </div>
@@ -381,9 +572,6 @@ export function Operate() {
           {sectionNote("ram")}
         </div>
 
-        {/* One more cell in the same grid, same footprint as system RAM.
-            No spark: two 30px sparks in one cell is cramped, and
-            per-node history stays on the fleet page. */}
         <RemoteFleet ns={nodeStats}
                      stale={bad("node_stats") || !nodeStats.ok}
                      note={sectionNote("node_stats")} />
@@ -422,26 +610,40 @@ export function Operate() {
             </div>
           );
         })}
-        {cacheModels.length === 0 && (
-          <div class="widget">
-            <div class="label"><span>MoE cache</span></div>
-            <div class="sub" style="margin-top:.4rem">
-              no resident model is running with an MoE cache
-            </div>
-          </div>
-        )}
       </div>
+      {cacheModels.length === 0 && (
+        <EmptyState>
+          no MoE cache active — cache meters appear here when a
+          cache-enabled model runs
+        </EmptyState>
+      )}
 
+      <SectionHead title="model library">
+        {libraryTotal} profile{libraryTotal === 1 ? "" : "s"}
+      </SectionHead>
       <div class={cls("models")}>
-        <div class="label">
-          {/* "registered", not "resident": the list is every profile,
-              and on a machine with nothing loaded a heading that says
-              "resident" sits over a list of stopped models. */}
-          <h2 style="margin:0">registered models</h2>
-          {/* the one fleet-wide action, next to the fleet it acts on */}
-          <span class="actions">
-            <UnloadAll running={models.filter((m) => m.running).length}
-                       stale={stale} />
+        <div class="frow" style="align-items:center;margin-bottom:.5rem">
+          <input type="search" placeholder="search name or file…"
+                 aria-label="search models" value={q}
+                 style="flex:1 1 200px;max-width:320px"
+                 onInput={(e) => setQ((e.target as HTMLInputElement).value)} />
+          {backends.length > 1 && (
+            <select aria-label="backend filter" style="width:auto"
+                    value={backend}
+                    onChange={(e) => setBackend((e.target as HTMLSelectElement).value)}>
+              <option value="all">all backends</option>
+              {backends.map((b) => <option key={b} value={b}>{b}</option>)}
+            </select>
+          )}
+          <select aria-label="sort" style="width:auto" value={sort}
+                  onChange={(e) => setSort((e.target as HTMLSelectElement).value as "name" | "size")}>
+            <option value="name">by name</option>
+            <option value="size">by size</option>
+          </select>
+          <span class="sub" style="margin-left:auto">
+            {library.length === libraryTotal
+              ? `${libraryTotal}`
+              : `${library.length} of ${libraryTotal}`}
           </span>
         </div>
         {models.length === 0
@@ -449,29 +651,33 @@ export function Operate() {
               ? <p class="sub stale-note">could not read the profile store —
                   {" "}{err["models"]}. This is not an empty install.</p>
               : <p class="sub">no profiles registered yet — <a href="/v2/add">add a model</a></p>)
-          : (
-            <div class="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>model</th><th>placement</th><th>state</th>
-                    <th class="num">tok/s</th><th style="width:130px">last 60 s</th>
-                    {/* an empty <th> is a column with no name; the label
-                        is hidden from the eye, not from a reader */}
-                    <th><span class="sr-only">actions</span></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sortedModels.map((m) => (
-                    <ModelRowView key={m.name} m={m}
-                                  spark={series[`tok:${m.name}`] ?? []} stale={stale} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          : library.length === 0
+            ? <EmptyState>nothing matches</EmptyState>
+            : (
+              <div class="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>model</th><th class="opt">placement</th>
+                      <th class="num">size</th><th class="opt"></th>
+                      <th><span class="sr-only">actions</span></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {library.map((m) => (
+                      <LibraryRow key={m.name} m={m}
+                                  spark={series[`tok:${m.name}`] ?? []}
+                                  stale={stale}
+                                  loadBlocked={active.loading.some((x) =>
+                                    x.m.name === m.name)} />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
         <p class="sub" style="margin:.5rem 0 0">
-          each model name links to its detail page
+          each model name links to its detail page ·{" "}
+          <a href="/v2/models">measurement tools live on models →</a>
         </p>
         {sectionNote("models")}
       </div>
