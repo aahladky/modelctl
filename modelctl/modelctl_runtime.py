@@ -269,16 +269,27 @@ class RuntimeDB:
 
         When `budgets` ({resource: bytes}, with per-device VRAM keys and
         "RAM") is given, admission is BYTE-BASED: the claim plus every other
-        live pending/starting claim must fit the budget for each resource.
+        live claim must fit the budget for each resource.
         Without budgets it falls back to the legacy conservative rule (any
-        device overlap conflicts).
+        device overlap conflicts) over pending/starting rows only.
+
+        "Every other live claim" is asymmetric by device, because the
+        budgets are: a LOCAL card contributes driver-reported free bytes,
+        so a model that finished loading has already subtracted itself
+        and only pending/starting claims may be charged on top -- but a
+        REMOTE device contributes the operator's declared ceiling, which
+        no reading ever reduces. An `RPC:`-namespaced key is therefore
+        charged from ACTIVE reservations too, or two managed models both
+        pass the gate against one laptop's ceiling and overshoot there is
+        an OOM kill rather than a swap-out (2026-08-04).
 
         Returns (reservation, None) on success, (None, denial) on refusal.
         The denial dict distinguishes a claim that does not fit the budget
         (code insufficient_vram / insufficient_ram -- possible with ZERO
         other workers) from a genuine collision (code reservation_conflict):
         {"code", "resource", "need_bytes", "budget_bytes", "pending_bytes",
-         "holders": [profile names of live pending/starting claimants]}.
+         "holders": [profile names of live pending/starting claimants,
+         plus active ones charging a remote (`RPC:`) key]}.
         """
         claim_json = json.dumps(claim_dict)
         now = time.time()
@@ -289,19 +300,11 @@ class RuntimeDB:
             try:
                 self._cleanup_stale(c)
                 existing = c.execute(
-                    "SELECT * FROM reservations WHERE state IN ('pending', 'starting')"
+                    "SELECT * FROM reservations "
+                    "WHERE state IN ('pending', 'starting', 'active')"
                 ).fetchall()
                 if budgets is not None:
-                    pending = {}
-                    holders = []
-                    for row in existing:
-                        if row["owner_pid"] == owner_pid or not _pid_alive(row["owner_pid"]):
-                            continue
-                        ex_claim = json.loads(row["claim_json"])
-                        holders.append(row["profile_name"])
-                        for dev, b in ex_claim.get("vram_bytes", {}).items():
-                            pending[dev] = pending.get(dev, 0) + b
-                        pending["RAM"] = pending.get("RAM", 0) + ex_claim.get("ram_bytes", 0)
+                    pending, holders = _fold_live_claims(existing, owner_pid)
                     for dev, need in claim_dict.get("vram_bytes", {}).items():
                         if need + pending.get(dev, 0) > budgets.get(dev, 0):
                             c.execute("ROLLBACK")
@@ -322,6 +325,15 @@ class RuntimeDB:
                             "holders": holders}
                 else:
                     for row in existing:
+                        if row["state"] == "active":
+                            # The legacy rule is "any device overlap
+                            # conflicts", which is what lets llama-swap
+                            # hand a local card from one model to the
+                            # next. Counting active rows here would
+                            # deadlock that handover, and without a
+                            # budget map there is no remote ceiling to
+                            # protect anyway.
+                            continue
                         if row["owner_pid"] == owner_pid:
                             continue
                         if not _pid_alive(row["owner_pid"]):
@@ -385,8 +397,34 @@ class RuntimeDB:
             rows = c.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
+    def charged_bytes(self, exclude_pid=None):
+        """{resource: bytes} already charged against the budget map.
+
+        What `acquire_reservation_verdict` would count if it ran right
+        now -- the same fold, so a caller that pre-filters plans by
+        feasibility reaches the same verdict the gate will. Includes
+        remote (`RPC:`) bytes held by ACTIVE reservations, which no
+        driver reading reports and which `pending_claims` therefore
+        cannot see.
+
+        Advisory only: this reads outside a transaction, so the gate
+        remains the authority.
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM reservations "
+                "WHERE state IN ('pending', 'starting', 'active')"
+            ).fetchall()
+        return _fold_live_claims(rows, exclude_pid)[0]
+
     def pending_claims(self, exclude_pid=None):
-        """Get all pending/starting claims from live processes, excluding one PID."""
+        """Pending/starting claims from live processes, excluding one PID.
+
+        Deliberately NOT the admission view: a model that finished
+        loading has left this list while still holding its remote
+        ceiling. Callers weighing whether a plan can be admitted want
+        `charged_bytes`.
+        """
         with self._conn() as c:
             rows = c.execute(
                 "SELECT * FROM reservations WHERE state IN ('pending', 'starting')"
@@ -617,4 +655,73 @@ def _pid_alive(pid):
         return True
     except (ProcessLookupError, PermissionError, OSError):
         return False
+
+
+def _fold_live_claims(rows, exclude_pid=None):
+    """Fold live reservation rows into ({resource: bytes}, [holders]).
+
+    The ONE charging rule, shared by the atomic gate
+    (`acquire_reservation_verdict`) and by the worker's soft feasibility
+    pre-filter, because two copies of it drift: the gate learned to
+    charge ACTIVE remote claims on 2026-08-04, and a hand-rolled second
+    fold went on calling plans feasible that the gate then denied -- a
+    wasted launch, or a hard failure when fallback is off.
+
+    A pending or starting row is charged in full. An ACTIVE row is
+    charged for its `RPC:`-namespaced devices only: a remote budget is a
+    declared ceiling that a running model never reduces, while local
+    budgets are driver-reported free bytes and available RAM, which
+    already have that model subtracted. Charging an active row's local
+    bytes would refuse a launch that fits.
+
+    A row owned by `exclude_pid` or by a dead process contributes
+    nothing. So does one whose claim does not decode to the expected
+    shape: it cannot be priced, and raising instead would raise on EVERY
+    admission for as long as that row lives -- an active row lives for
+    the life of a served model, so one bad row would wedge every launch
+    on the box. Same degrade direction as `modelctl_fleet.load_fleet`.
+    """
+    # Imported inside the call, as every other caller of the fleet
+    # module does: this file is the runtime DB and must not grow a
+    # module-level dependency on cluster state. Only the pure namespace
+    # predicate is used -- nothing here reads a fleet file.
+    import modelctl_fleet
+    charged = {}
+    holders = []
+    for row in rows:
+        if row["owner_pid"] == exclude_pid or not _pid_alive(row["owner_pid"]):
+            continue
+        try:
+            claim = json.loads(row["claim_json"])
+        except (TypeError, ValueError):
+            # Deliberately not reported through record_event: that method
+            # opens its own `with self._conn()`, and the connection is
+            # thread-local, so leaving that block would COMMIT the gate's
+            # still-open BEGIN IMMEDIATE early. A skipped row stays
+            # visible in the table for anyone who looks.
+            continue
+        if not isinstance(claim, dict):
+            continue
+        vram = claim.get("vram_bytes")
+        vram = vram if isinstance(vram, dict) else {}
+        # Drop unpriceable entries before anything reads the dict, so a
+        # row holding nothing chargeable is never named as a holder. A
+        # negative count would be worse than a non-numeric one -- it
+        # would subtract from another row's occupancy, the one direction
+        # an admission gate must never fail in.
+        vram = {dev: b for dev, b in vram.items()
+                if isinstance(b, (int, float)) and b >= 0}
+        if row["state"] == "active":
+            vram = {dev: b for dev, b in vram.items()
+                    if modelctl_fleet.is_remote_key(dev)}
+            if not vram:
+                continue
+        else:
+            ram = claim.get("ram_bytes", 0)
+            if isinstance(ram, (int, float)) and ram >= 0:
+                charged["RAM"] = charged.get("RAM", 0) + ram
+        holders.append(row["profile_name"])
+        for dev, b in vram.items():
+            charged[dev] = charged.get(dev, 0) + b
+    return charged, holders
 

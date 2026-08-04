@@ -27,6 +27,7 @@ import modelctl_plans
 
 PIN = "85b7e6556b6b83026d1a17df2635bc1173db1f97"
 OTHER_PIN = "0000000000000000000000000000000000000000"
+UNSET = object()  # "argument not supplied", where None means something
 
 
 def a_node(name="ph16-71", host="192.168.0.76", port=50052, pin=PIN,
@@ -789,6 +790,239 @@ class TestRpcPlansAppearWhenTheNodeIs(FleetStateBase):
     def test_the_plan_warns_that_the_local_plans_remain(self):
         (plan,) = self._rpc_plans(3 << 30)
         self.assertTrue(any("local-only" in w for w in plan.warnings))
+
+
+class TestActiveRemoteClaimsStillCharge(unittest.TestCase):
+    """A remote ceiling is not freed by the model already using it.
+
+    The gap this pins (2026-08-04): admission counted only pending and
+    starting claims. That is sound for a LOCAL card -- its budget is
+    driver-reported free bytes, so a model that finished loading has
+    already subtracted itself -- but a remote device contributes a fixed
+    declared ceiling that no reading ever reduces. Two managed models
+    could therefore both be admitted against one laptop's 10.5 GiB, and
+    overshoot on another machine is an OOM kill, not a swap-out.
+
+    So an ACTIVE reservation charges its `RPC:` keys and nothing else.
+    Charging its local keys too would double-count against free bytes
+    and deny launches that genuinely fit.
+    """
+
+    NODE = "RPC:ph16-71:CUDA0"
+    NODE_CPU = "RPC:ph16-71:CPU"
+
+    def setUp(self):
+        import modelctl_runtime
+        self.runtime = modelctl_runtime
+        self.tmp = tempfile.mkdtemp(prefix="reservation-active-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(
+            self.tmp, ignore_errors=True))
+        self.rdb = modelctl_runtime.RuntimeDB(Path(self.tmp) / "rt.db")
+        self.pid = os.getpid()
+        self.budgets = {"SYCL0": 8 << 30, "RAM": 16 << 30,
+                        self.NODE: 10 << 30, self.NODE_CPU: 24 << 30}
+
+    def _hold(self, vram, ram=0, state="active", pid=None, name="holder",
+              rdb=None):
+        """Another worker's reservation, advanced to `state`."""
+        rdb = self.rdb if rdb is None else rdb
+        with mock.patch.object(self.runtime, "_pid_alive", return_value=True):
+            res = rdb.acquire_reservation(
+                name, "hp", {"vram_bytes": vram, "ram_bytes": ram},
+                self.pid + 1 if pid is None else pid, budgets=self.budgets)
+        self.assertIsNotNone(res)
+        rdb.update_reservation(res["id"], state=state)
+        return res
+
+    def _verdict(self, vram, ram=0, budgets=UNSET, alive=True, pid=None,
+                 rdb=None):
+        # `None` is a meaningful budgets value -- it selects the legacy
+        # overlap rule -- so "not supplied" needs a sentinel of its own.
+        rdb = self.rdb if rdb is None else rdb
+        with mock.patch.object(self.runtime, "_pid_alive", return_value=alive):
+            return rdb.acquire_reservation_verdict(
+                "second", "sp", {"vram_bytes": vram, "ram_bytes": ram},
+                self.pid if pid is None else pid,
+                budgets=self.budgets if budgets is UNSET else budgets)
+
+    def test_an_active_remote_claim_denies_a_second_model(self):
+        self._hold({self.NODE: 7 << 30})
+        res, denial = self._verdict({self.NODE: 5 << 30})
+        self.assertIsNone(res)
+        self.assertEqual(denial["code"], "insufficient_vram")
+        self.assertEqual(denial["resource"], self.NODE)
+
+    def test_the_denial_carries_the_active_bytes_and_holder(self):
+        self._hold({self.NODE: 7 << 30})
+        _res, denial = self._verdict({self.NODE: 5 << 30})
+        self.assertEqual(denial["pending_bytes"], 7 << 30)
+        self.assertEqual(denial["budget_bytes"], 10 << 30)
+        self.assertEqual(denial["holders"], ["holder"])
+
+    def test_a_remote_claim_that_still_fits_beside_it_is_admitted(self):
+        self._hold({self.NODE: 7 << 30})
+        res, denial = self._verdict({self.NODE: 3 << 30})
+        self.assertIsNone(denial)
+        self.assertIsNotNone(res)
+
+    def test_remote_cpu_bytes_are_charged_the_same_way(self):
+        self._hold({self.NODE_CPU: 20 << 30})
+        res, denial = self._verdict({self.NODE_CPU: 8 << 30})
+        self.assertIsNone(res)
+        self.assertEqual(denial["resource"], self.NODE_CPU)
+
+    def test_an_active_local_claim_is_not_charged_twice(self):
+        # The local card's budget is already free-bytes, so charging an
+        # active local claim on top of it would refuse a launch that fits.
+        self._hold({"SYCL0": 6 << 30})
+        res, denial = self._verdict({"SYCL0": 6 << 30})
+        self.assertIsNone(denial)
+        self.assertIsNotNone(res)
+
+    def test_active_local_ram_is_not_charged_twice(self):
+        # Same argument: ram_available_bytes already reflects a running
+        # process. Remote RAM rides an `RPC:<node>:CPU` vram key instead.
+        self._hold({}, ram=12 << 30)
+        res, denial = self._verdict({}, ram=12 << 30)
+        self.assertIsNone(denial)
+        self.assertIsNotNone(res)
+
+    def test_a_purely_local_active_claim_is_not_listed_as_a_holder(self):
+        self._hold({"SYCL0": 6 << 30})
+        _res, denial = self._verdict({"SYCL0": 9 << 30})
+        self.assertEqual(denial["holders"], [])
+
+    def test_a_mixed_active_claim_charges_only_its_remote_half(self):
+        self._hold({"SYCL0": 6 << 30, self.NODE: 7 << 30})
+        # Local half ignored: 6 GiB against an 8 GiB free-bytes budget.
+        res, denial = self._verdict({"SYCL0": 6 << 30})
+        self.assertIsNone(denial, denial)
+        self.assertIsNotNone(res)
+        # Remote half still charged.
+        _res, denial = self._verdict({self.NODE: 5 << 30})
+        self.assertEqual(denial["resource"], self.NODE)
+
+    def test_a_dead_owner_frees_the_remote_ceiling(self):
+        self._hold({self.NODE: 7 << 30})
+        res, denial = self._verdict({self.NODE: 9 << 30}, alive=False)
+        self.assertIsNone(denial)
+        self.assertIsNotNone(res)
+
+    def test_our_own_active_reservation_does_not_deny_us(self):
+        self._hold({self.NODE: 7 << 30}, pid=self.pid)
+        res, denial = self._verdict({self.NODE: 9 << 30})
+        self.assertIsNone(denial)
+        self.assertIsNotNone(res)
+
+    def test_an_active_row_charges_remote_bytes_beside_local_ram(self):
+        # The realistic shape: a rung plan holds laptop VRAM and local
+        # resident RAM at once. The remote half charges, the RAM does not.
+        self._hold({self.NODE: 7 << 30}, ram=12 << 30)
+        res, denial = self._verdict({}, ram=12 << 30)
+        self.assertIsNone(denial, denial)
+        self.assertIsNotNone(res)
+        _res, denial = self._verdict({self.NODE: 5 << 30})
+        self.assertEqual(denial["resource"], self.NODE)
+
+    def test_two_active_holders_on_one_device_add_up(self):
+        self._hold({self.NODE: 4 << 30}, name="first")
+        self._hold({self.NODE: 4 << 30}, name="second-holder",
+                   pid=self.pid + 2)
+        _res, denial = self._verdict({self.NODE: 3 << 30})
+        self.assertEqual(denial["pending_bytes"], 8 << 30)
+        self.assertEqual(sorted(denial["holders"]),
+                         ["first", "second-holder"])
+
+    def test_a_pending_local_and_an_active_remote_charge_together(self):
+        self._hold({"SYCL0": 5 << 30}, state="pending", name="pend")
+        self._hold({self.NODE: 7 << 30}, name="act", pid=self.pid + 2)
+        _res, denial = self._verdict({"SYCL0": 4 << 30})
+        self.assertEqual(denial["resource"], "SYCL0")
+        _res, denial = self._verdict({self.NODE: 5 << 30})
+        self.assertEqual(denial["resource"], self.NODE)
+
+    def _charge_pending_state(self, state):
+        rdb = self.runtime.RuntimeDB(Path(self.tmp) / f"{state}.db")
+        self._hold({"SYCL0": 6 << 30}, ram=12 << 30, state=state, rdb=rdb)
+        _res, denial = self._verdict({"SYCL0": 6 << 30}, rdb=rdb)
+        self.assertEqual(denial["resource"], "SYCL0")
+        _res, denial = self._verdict({}, ram=12 << 30, rdb=rdb)
+        self.assertEqual(denial["resource"], "RAM")
+
+    def test_a_pending_row_still_charges_everything(self):
+        self._charge_pending_state("pending")
+
+    def test_a_starting_row_still_charges_everything(self):
+        self._charge_pending_state("starting")
+
+    def test_an_unreadable_row_does_not_wedge_the_gate(self):
+        # An active row lives as long as the model it serves, so a claim
+        # nobody can price must not raise on every admission for hours.
+        # It contributes nothing, the way a malformed fleet file does.
+        held = self._hold({self.NODE: 7 << 30})
+        for junk in ('[]', 'null', '42', 'not json',
+                     '{"vram_bytes": null}',
+                     '{"vram_bytes": {"RPC:ph16-71:CUDA0": "lots"}}'):
+            with self.subTest(claim=junk):
+                with self.rdb._conn() as c:
+                    c.execute("UPDATE reservations SET claim_json=? "
+                              "WHERE id=?", (junk, held["id"]))
+                res, denial = self._verdict({self.NODE: 9 << 30})
+                self.assertIsNone(denial, denial)
+                self.assertIsNotNone(res)
+                self.rdb.release_reservation(res["id"])
+
+    def test_an_unpriceable_row_is_not_named_as_a_holder(self):
+        # It charges nothing, so a denial caused by someone else must not
+        # accuse it of holding the device.
+        junk = self._hold({self.NODE: 7 << 30}, name="junk-row")
+        with self.rdb._conn() as c:
+            c.execute("UPDATE reservations SET claim_json=? WHERE id=?",
+                      ('{"vram_bytes": {"RPC:ph16-71:CUDA0": "lots"}}',
+                       junk["id"]))
+        self._hold({self.NODE: 7 << 30}, name="real-holder", pid=self.pid + 2)
+        _res, denial = self._verdict({self.NODE: 5 << 30})
+        self.assertEqual(denial["pending_bytes"], 7 << 30)
+        self.assertEqual(denial["holders"], ["real-holder"])
+
+    def test_a_negative_count_cannot_subtract_from_occupancy(self):
+        # The one malformed direction that would ADMIT too much rather
+        # than deny too much.
+        junk = self._hold({self.NODE: 7 << 30}, name="junk-row")
+        with self.rdb._conn() as c:
+            c.execute("UPDATE reservations SET claim_json=? WHERE id=?",
+                      ('{"vram_bytes": {"RPC:ph16-71:CUDA0": -9663676416}}',
+                       junk["id"]))
+        self._hold({self.NODE: 7 << 30}, name="real-holder", pid=self.pid + 2)
+        _res, denial = self._verdict({self.NODE: 5 << 30})
+        self.assertEqual(denial["pending_bytes"], 7 << 30)
+
+    def test_charged_bytes_is_the_gate_view_not_the_pending_view(self):
+        # What the worker's pre-filter must ask. `pending_claims` cannot
+        # see an active row, so a filter built on it called remote plans
+        # feasible that the gate then denied.
+        self._hold({"SYCL0": 6 << 30, self.NODE: 7 << 30}, ram=12 << 30)
+        with mock.patch.object(self.runtime, "_pid_alive", return_value=True):
+            charged = self.rdb.charged_bytes(exclude_pid=self.pid)
+            invisible = self.rdb.pending_claims(exclude_pid=self.pid)
+        self.assertEqual(charged.get(self.NODE), 7 << 30)
+        self.assertNotIn("SYCL0", charged)
+        self.assertNotIn("RAM", charged)
+        self.assertEqual(invisible, [])
+
+    def test_charged_bytes_excludes_our_own_pid(self):
+        self._hold({self.NODE: 7 << 30}, pid=self.pid)
+        with mock.patch.object(self.runtime, "_pid_alive", return_value=True):
+            self.assertEqual(self.rdb.charged_bytes(exclude_pid=self.pid), {})
+
+    def test_the_legacy_no_budget_path_still_ignores_active_rows(self):
+        # Without a budget map the rule is "any device overlap conflicts",
+        # which is what lets llama-swap hand a local card between models.
+        # Broadening it to active rows would deadlock that handover.
+        self._hold({"SYCL0": 6 << 30})
+        res, denial = self._verdict({"SYCL0": 6 << 30}, budgets=None)
+        self.assertIsNone(denial)
+        self.assertIsNotNone(res)
 
 
 if __name__ == "__main__":

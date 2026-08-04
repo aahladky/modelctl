@@ -148,15 +148,14 @@ def worker_main(profile_name, port):
         ranked = [(p, s) for p, s in ranked if p.id not in disabled]
 
     # Live feasibility: drop plans whose claim doesn't fit current free
-    # resources (minus configured reserves and other workers' pending
-    # claims). Admission itself is re-checked atomically at reservation time.
+    # resources (minus configured reserves and what other workers already
+    # hold). Admission itself is re-checked atomically at reservation time,
+    # and this asks the gate's own fold rather than rebuilding it -- a
+    # second copy of that rule drifts, and did: it went on calling remote
+    # plans feasible after the gate learned to charge active RPC claims.
     rdb = modelctl_runtime.RuntimeDB()
     budgets = modelctl_hardware.reservation_budgets(snap)
-    pending_by_res = {}
-    for cl in rdb.pending_claims(exclude_pid=os.getpid()):
-        for dev, b in cl.get("vram_bytes", {}).items():
-            pending_by_res[dev] = pending_by_res.get(dev, 0) + b
-        pending_by_res["RAM"] = pending_by_res.get("RAM", 0) + cl.get("ram_bytes", 0)
+    pending_by_res = rdb.charged_bytes(exclude_pid=os.getpid())
 
     def _effective(res):
         return budgets.get(res, 0) - pending_by_res.get(res, 0)
@@ -217,9 +216,12 @@ def worker_main(profile_name, port):
                           "source": plan.source, "score": score})
 
         # Re-probe free memory immediately before admission: another worker
-        # may have gone ACTIVE since our startup snapshot, and active
-        # allocations don't show up in pending claims (they're visible only
-        # in the driver's free-memory report).
+        # may have gone ACTIVE since our startup snapshot, and a local
+        # active allocation is visible only in the driver's free-memory
+        # report. This reaches LOCAL devices only -- there is no such
+        # report for another machine, which is why a remote ceiling is
+        # defended in the reservation table instead (_fold_live_claims
+        # charges RPC: keys held by active rows).
         try:
             fresh = {d["device"]: d["free_bytes"]
                      for d in modelctl.get_gpu_inventory()}

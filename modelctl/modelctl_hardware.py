@@ -330,13 +330,16 @@ def reservation_budgets(snapshot) -> dict:
     namespaced `RPC:<node>:<device>` by `modelctl_fleet.admission_key`,
     so the merge below can only add keys, never shadow a local one.
 
-    KNOWN LIMIT (2026-08-04): a remote ceiling is not reduced by another
-    worker's ACTIVE reservation. A local card is protected implicitly --
-    its budget is driver-reported free bytes, so an active allocation is
-    already subtracted -- but no such reading exists for another machine,
-    and `acquire_reservation_verdict` counts only pending/starting
-    claims. Two managed models can therefore both be admitted against one
-    laptop's ceiling. Tracked in moe-review/open-items.md.
+    That asymmetry is also why the GATE, not this map, subtracts a
+    running model from a remote ceiling: a local card is protected
+    implicitly -- its budget is driver-reported free bytes, so an active
+    allocation is already gone from the number -- while a declared
+    ceiling stays put no matter what that machine has loaded.
+    `acquire_reservation_verdict` closes it by charging `RPC:`-namespaced
+    keys from ACTIVE reservations as well as pending/starting ones
+    (2026-08-04); before that, two managed models both passed the gate
+    against one laptop's ceiling, and overshoot on a remote unit is an
+    OOM kill rather than a swap-out.
 
     Returns a fresh dict on every call: `modelctl_worker` mutates the
     returned map in place during its pre-admission re-probe, so this must
