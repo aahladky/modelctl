@@ -527,6 +527,29 @@ def _effective_cache_state(warmed_up: bool, plan_cache_bytes: int,
     return "cold"
 
 
+def _denial_message(denial):
+    """Plain words for a reservation denial: a plan that does not fit the
+    machine must not read as a collision with a worker that does not
+    exist (the 2026-08-03 baseline shipped exactly that confusion)."""
+    if not denial:
+        return "reservation conflict -- another worker holds the resources"
+
+    def gib(n):
+        return f"{n / (1 << 30):.1f} GiB"
+
+    if denial.get("code") in ("insufficient_vram", "insufficient_ram"):
+        msg = (f"this plan needs {gib(denial['need_bytes'])} on "
+               f"{denial['resource']} but only "
+               f"{gib(denial['budget_bytes'])} is free")
+        if denial.get("pending_bytes"):
+            who = ", ".join(denial.get("holders") or []) or "another worker"
+            msg += (f" ({gib(denial['pending_bytes'])} already claimed "
+                    f"by {who})")
+        return msg
+    holders = ", ".join(denial.get("holders") or []) or "another worker"
+    return f"reservation conflict -- {holders} holds the resources"
+
+
 def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
                      max_tokens=128, runs=2, binary=None,
                      proc_register=None, cancel_check=None,
@@ -580,13 +603,14 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
     budgets = {g.device: max(0, g.free_bytes - g.reserve_bytes)
                for g in modelctl_hardware.enabled_gpus(snap)}
     budgets["RAM"] = max(0, snap.ram_available_bytes - snap.ram_reserve_bytes)
-    reservation = rdb.acquire_reservation(profile_name, plan_id, claim, os.getpid(),
-                                          budgets=budgets)
+    reservation, denial = rdb.acquire_reservation_verdict(
+        profile_name, plan_id, claim, os.getpid(), budgets=budgets)
     if reservation is None:
-        run["failure_class"] = "reservation_conflict"
+        run["failure_class"] = (denial or {}).get("code",
+                                                  "reservation_conflict")
         run["finished_at"] = time.time()
         rdb.record_plan_run(run)
-        raise RuntimeError("reservation conflict -- another worker holds the resources")
+        raise RuntimeError(_denial_message(denial))
 
     port = _free_port()
     proc = None

@@ -245,7 +245,16 @@ class RuntimeDB:
 
     def acquire_reservation(self, profile_name, plan_id, claim_dict, owner_pid,
                             budgets=None):
-        """Atomically acquire a reservation.
+        """Back-compat wrapper: the reservation dict on success, None on
+        denial. Callers who need to know WHY use
+        acquire_reservation_verdict()."""
+        reservation, _denial = self.acquire_reservation_verdict(
+            profile_name, plan_id, claim_dict, owner_pid, budgets=budgets)
+        return reservation
+
+    def acquire_reservation_verdict(self, profile_name, plan_id, claim_dict,
+                                    owner_pid, budgets=None):
+        """Atomically acquire a reservation; on denial, say why.
 
         Uses BEGIN IMMEDIATE to serialize concurrent acquisitions.
         Cleans up stale reservations from dead PIDs first.
@@ -264,8 +273,12 @@ class RuntimeDB:
         Without budgets it falls back to the legacy conservative rule (any
         device overlap conflicts).
 
-        Returns the reservation dict on success, None if resources
-        are already claimed by another live process.
+        Returns (reservation, None) on success, (None, denial) on refusal.
+        The denial dict distinguishes a claim that does not fit the budget
+        (code insufficient_vram / insufficient_ram -- possible with ZERO
+        other workers) from a genuine collision (code reservation_conflict):
+        {"code", "resource", "need_bytes", "budget_bytes", "pending_bytes",
+         "holders": [profile names of live pending/starting claimants]}.
         """
         claim_json = json.dumps(claim_dict)
         now = time.time()
@@ -280,21 +293,33 @@ class RuntimeDB:
                 ).fetchall()
                 if budgets is not None:
                     pending = {}
+                    holders = []
                     for row in existing:
                         if row["owner_pid"] == owner_pid or not _pid_alive(row["owner_pid"]):
                             continue
                         ex_claim = json.loads(row["claim_json"])
+                        holders.append(row["profile_name"])
                         for dev, b in ex_claim.get("vram_bytes", {}).items():
                             pending[dev] = pending.get(dev, 0) + b
                         pending["RAM"] = pending.get("RAM", 0) + ex_claim.get("ram_bytes", 0)
                     for dev, need in claim_dict.get("vram_bytes", {}).items():
                         if need + pending.get(dev, 0) > budgets.get(dev, 0):
                             c.execute("ROLLBACK")
-                            return None
+                            return None, {
+                                "code": "insufficient_vram", "resource": dev,
+                                "need_bytes": int(need),
+                                "budget_bytes": int(budgets.get(dev, 0)),
+                                "pending_bytes": int(pending.get(dev, 0)),
+                                "holders": holders}
                     ram_need = claim_dict.get("ram_bytes", 0)
                     if ram_need + pending.get("RAM", 0) > budgets.get("RAM", 0):
                         c.execute("ROLLBACK")
-                        return None
+                        return None, {
+                            "code": "insufficient_ram", "resource": "RAM",
+                            "need_bytes": int(ram_need),
+                            "budget_bytes": int(budgets.get("RAM", 0)),
+                            "pending_bytes": int(pending.get("RAM", 0)),
+                            "holders": holders}
                 else:
                     for row in existing:
                         if row["owner_pid"] == owner_pid:
@@ -305,7 +330,13 @@ class RuntimeDB:
                         for dev in claim_dict.get("vram_bytes", {}):
                             if dev in existing_claim.get("vram_bytes", {}):
                                 c.execute("ROLLBACK")
-                                return None
+                                return None, {
+                                    "code": "reservation_conflict",
+                                    "resource": dev,
+                                    "need_bytes": int(
+                                        claim_dict["vram_bytes"][dev]),
+                                    "budget_bytes": 0, "pending_bytes": 0,
+                                    "holders": [row["profile_name"]]}
 
                 c.execute(
                     "INSERT INTO reservations "
@@ -317,7 +348,7 @@ class RuntimeDB:
                 return {"id": res_id, "profile_name": profile_name,
                         "plan_id": plan_id, "owner_pid": owner_pid,
                         "state": "pending", "claim": claim_dict,
-                        "created_at": now, "updated_at": now}
+                        "created_at": now, "updated_at": now}, None
             except Exception:
                 c.execute("ROLLBACK")
                 raise
