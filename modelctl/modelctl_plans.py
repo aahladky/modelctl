@@ -959,6 +959,74 @@ def _make_plan(profile, config, source, hardware, extra_warnings=(), decision=No
     )
 
 
+def _remote_rungs() -> list:
+    """Fleet devices the expert ladder may place experts on.
+
+    Recorded-present nodes with a declared budget. usable_nodes() opens
+    no socket -- presence was refreshed by whoever last probed -- so an
+    unreachable or expired node contributes nothing and the plan set
+    degrades to local-only rather than promising memory that is not
+    there.
+
+    Extracted so the selection preview and compile_launch_plans build
+    rungs identically: a preview that offered a different set of remote
+    devices than the compiler would answer for a machine the operator
+    does not have.
+    """
+    try:
+        import modelctl_fleet
+        rungs = []
+        for node in modelctl_fleet.usable_nodes():
+            for dev_index, device in enumerate(node.devices):
+                if device.budget_bytes <= 0:
+                    continue
+                rungs.append({
+                    "name": modelctl_fleet.admission_key(node.name,
+                                                         device.name),
+                    "endpoint": node.endpoint,
+                    "local_device_index": dev_index,
+                    "kind": device.kind,
+                    "budget_bytes": int(device.budget_bytes)})
+        return rungs
+    except Exception:
+        return []
+
+
+def plan_for_selection(profile, selection, inputs=None, remote_rungs=None,
+                       layout=None):
+    """Where the planner puts this model's weights, for a chosen set of
+    devices.
+
+    This is the one entry point the placement UI needs. The operator's
+    choices -- which devices may be used, and how much of each -- are
+    expressed as filtered planner inputs (see
+    modelctl_tiers.select_inputs), so the answer comes from the planner
+    that actually launches rather than from a second implementation
+    beside it. A screen that works out the split itself is a screen that
+    can disagree with what runs.
+
+    An empty selection returns the automatic placement: what the machine
+    would do on its own, which is what the operator sees before touching
+    anything.
+
+    inputs/remote_rungs/layout are injectable for tests; production
+    resolves them from the profile and the fleet.
+    """
+    import modelctl_tiers
+    if inputs is None:
+        inputs, _source = modelctl.resolve_planning_inputs(profile)
+    rungs = _remote_rungs() if remote_rungs is None else remote_rungs
+    inventory, ram, rungs = modelctl_tiers.select_inputs(
+        inputs["inventory"], inputs.get("ram_available_bytes", 0), rungs,
+        selection, inputs["vram_limit_pct"])
+    return modelctl_tiers.plan_tiers(
+        profile, inventory, inputs["vram_limit_pct"], inputs["primary"],
+        ram_available=ram, layout=layout,
+        cache_request=profile.get("moe_cache"),
+        capabilities=inputs.get("capabilities"),
+        hw_settings=inputs.get("hw_settings"), remote_rungs=rungs)
+
+
 def current_profile_plan(profile, hardware=None, capabilities=None):
     """The single LaunchPlan meaning "this profile exactly as saved".
 
@@ -1027,22 +1095,7 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
         # with declared budgets. usable_nodes() opens no socket (presence
         # was refreshed by the plans view); an empty fleet yields no
         # rungs and a byte-identical local plan set.
-        remote_rungs = []
-        try:
-            import modelctl_fleet
-            for node in modelctl_fleet.usable_nodes():
-                for dev_index, device in enumerate(node.devices):
-                    if device.budget_bytes <= 0:
-                        continue
-                    remote_rungs.append({
-                        "name": modelctl_fleet.admission_key(node.name,
-                                                             device.name),
-                        "endpoint": node.endpoint,
-                        "local_device_index": dev_index,
-                        "kind": device.kind,
-                        "budget_bytes": int(device.budget_bytes)})
-        except Exception:
-            remote_rungs = []
+        remote_rungs = _remote_rungs()
         tier = modelctl_tiers.plan_tiers(
             profile, inputs["inventory"], inputs["vram_limit_pct"],
             inputs["primary"],

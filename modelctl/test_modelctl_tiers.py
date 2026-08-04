@@ -592,6 +592,59 @@ class TestSelectInputs(unittest.TestCase):
         self.assertIn(RUNG_CPU["endpoint"], extra)
 
 
+class TestPlanForSelection(unittest.TestCase):
+    """The one entry point the placement UI needs: a device selection in,
+    the planner's own placement out. Injected inputs keep it hermetic --
+    nothing here reads the machine or a GGUF."""
+
+    def _inputs(self, ram_gib=40):
+        return {"inventory": INVENTORY, "vram_limit_pct": 90,
+                "primary": "SYCL0", "ram_available_bytes": ram_gib * GIB}
+
+    def _plan(self, selection, rungs=None, ram_gib=40):
+        import modelctl_plans
+        return modelctl_plans.plan_for_selection(
+            profile(), selection, inputs=self._inputs(ram_gib),
+            remote_rungs=rungs if rungs is not None else [RUNG_GPU, RUNG_CPU],
+            layout=moe_layout(60, 1.1, has_shexp=True))
+
+    def test_no_selection_is_the_automatic_placement(self):
+        """What the machine would do on its own -- what the operator sees
+        before touching anything."""
+        plan = self._plan({})
+        extra = plan["config"]["extra"]
+        self.assertIn(RUNG_GPU["endpoint"], extra)
+        self.assertIn(RUNG_CPU["endpoint"], extra)
+
+    def test_turning_a_machine_off_moves_its_work(self):
+        both = self._plan({})
+        without = self._plan({RUNG_GPU["name"]: {"on": False},
+                              RUNG_CPU["name"]: {"on": False}})
+        self.assertIn(RUNG_CPU["endpoint"], both["config"]["extra"])
+        self.assertNotIn(RUNG_CPU["endpoint"], without["config"]["extra"])
+        # the weights did not evaporate: with the laptop gone they fall
+        # back to the host, which is what makes the tier no better
+        self.assertGreaterEqual(without["tier"], both["tier"])
+
+    def test_a_ceiling_shrinks_what_that_device_takes(self):
+        rungs = [RUNG_CPU]
+        full = self._plan({}, rungs=rungs)
+        capped = self._plan({RUNG_CPU["name"]: {"ceiling_bytes": 4 * GIB}},
+                            rungs=rungs)
+
+        def remote_gib(plan):
+            rows = [r for r in plan["layout"] if RUNG_CPU["name"] in r[0]]
+            return rows[0][1] if rows else 0.0
+
+        self.assertGreater(remote_gib(full), remote_gib(capped))
+        self.assertLessEqual(remote_gib(capped), 4.0)
+
+    def test_an_unticked_card_is_absent_from_the_plan(self):
+        plan = self._plan({"SYCL1": {"on": False}})
+        placement = plan["config"].get("device", "") + plan["config"]["extra"]
+        self.assertNotIn("SYCL1", placement)
+
+
 class TestRemoteRungs(unittest.TestCase):
     """RPC devices join the expert-placement ladder. Ranks and the wire
     floor come from the 2026-08-03 122B calibration
