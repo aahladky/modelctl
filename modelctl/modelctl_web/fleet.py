@@ -146,6 +146,34 @@ def _local_node(errors):
                               f"{g.reserve_bytes / (1 << 30):.1f} GiB reserve "
                               f"— both on the settings page"),
             })
+        # Memory is a budget device too. reservation_budgets() has always
+        # charged a "RAM" key, and the tier planner spills routed experts
+        # onto it -- but this surface only ever walked enabled_gpus(), so
+        # the rig read as GPUs and nothing else while the laptop's CPU
+        # node showed up in full. A console where placement means ticking
+        # devices has to be able to tick memory.
+        reserve = int(getattr(snapshot, "ram_reserve_bytes", 0) or 0)
+        total = int(getattr(snapshot, "ram_total_bytes", 0) or 0)
+        available = int(getattr(snapshot, "ram_available_bytes", 0) or 0)
+        devices.append({
+            "name": "RAM",
+            "kind": "ram",
+            "label": "system memory",
+            # Free-minus-reserve, not total-minus-reserve: this is the
+            # number the reservation gate charges, and a row showing
+            # installed capacity would promise room the desktop is
+            # already using.
+            "budget_bytes": max(0, available - reserve),
+            "total_bytes": total,
+            "cap_bytes": 0,
+            "ceiling_bytes": total,
+            "ceiling_basis": "installed memory",
+            "admission_key": "RAM",
+            "editable": False,
+            "edit_note": (f"free memory minus a "
+                          f"{reserve / (1 << 30):.1f} GiB reserve "
+                          f"— the reserve is on the settings page"),
+        })
     except Exception as e:
         errors["local_devices"] = str(e) or "local device inventory failed"
     return {

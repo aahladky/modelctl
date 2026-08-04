@@ -226,19 +226,54 @@ class TestReadModel(FleetConsoleBase):
         card = mock.Mock(device="SYCL0", name="Arc Pro B70",
                          total_bytes=32 * GIB, reserve_bytes=2 * GIB)
         with mock.patch.object(modelctl_hardware, "capture_hardware_snapshot",
-                               return_value=mock.Mock()), \
+                               return_value=mock.Mock(
+                                   ram_total_bytes=32 * GIB,
+                                   ram_available_bytes=24 * GIB,
+                                   ram_reserve_bytes=1 * GIB)), \
              mock.patch.object(modelctl_hardware, "enabled_gpus",
                                return_value=[card]), \
              mock.patch.object(modelctl, "load_defaults",
                                return_value={"vram_limit_pct": 90}):
             local = self._real_local_node({})
-        (device,) = local["devices"]
+        device = local["devices"][0]
         self.assertFalse(device["editable"])
         self.assertIn("settings page", device["edit_note"])
         # the number it shows is the one admission actually charges
         self.assertEqual(device["budget_bytes"],
                          int(32 * GIB * 0.90) - 2 * GIB)
         self.assertEqual(local["presence"]["state"], fleetview.PRESENT)
+
+    def test_the_rig_lists_its_memory_as_a_device(self):
+        """RAM is a budget device the planner already charges against --
+        reservation_budgets() has carried a "RAM" key all along -- but the
+        fleet surface only ever iterated enabled_gpus(), so the rig read
+        as GPUs and nothing else. A console that places a model by ticking
+        devices has to be able to tick memory, and the laptop's CPU node
+        already appears while the rig's memory did not.
+        """
+        import modelctl_hardware
+        card = mock.Mock(device="SYCL0", name="Arc Pro B70",
+                         total_bytes=32 * GIB, reserve_bytes=2 * GIB)
+        with mock.patch.object(modelctl_hardware, "capture_hardware_snapshot",
+                               return_value=mock.Mock(
+                                   ram_total_bytes=32 * GIB,
+                                   ram_available_bytes=24 * GIB,
+                                   ram_reserve_bytes=1 * GIB)), \
+             mock.patch.object(modelctl_hardware, "enabled_gpus",
+                               return_value=[card]), \
+             mock.patch.object(modelctl, "load_defaults",
+                               return_value={"vram_limit_pct": 90}):
+            local = self._real_local_node({})
+        ram = [d for d in local["devices"] if d["kind"] == "ram"]
+        self.assertEqual(len(ram), 1, local["devices"])
+        (ram,) = ram
+        # the key admission charges, so the row and the gate agree
+        self.assertEqual(ram["admission_key"], "RAM")
+        self.assertEqual(ram["budget_bytes"], 24 * GIB - 1 * GIB)
+        self.assertEqual(ram["total_bytes"], 32 * GIB)
+        self.assertFalse(ram["editable"])
+        # one renderer for every device row, local or remote
+        self.assertEqual(set(ram), set(local["devices"][0]))
 
     def test_pin_agreement_is_a_field_not_a_footnote(self):
         fleet.save_fleet([cpu_node(pin=OTHER_PIN)])
