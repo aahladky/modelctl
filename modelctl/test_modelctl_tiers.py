@@ -515,6 +515,83 @@ RUNG_CPU = {"name": "RPC:ph16-71-cpu0:CPU",
             "budget_bytes": 24 * GIB}
 
 
+class TestSelectInputs(unittest.TestCase):
+    """A device selection is nothing more than filtered planner inputs.
+
+    This is what lets the console ask the PLANNER where weights land
+    instead of re-deriving placement in the browser: ticking a device off
+    removes it from the inventory (or zeroes the RAM), and dragging a
+    ceiling lowers that device's budget. One placement implementation,
+    one answer, so the screen cannot disagree with what launches.
+    """
+
+    def test_an_unticked_gpu_leaves_the_inventory(self):
+        inv, ram, rungs = modelctl_tiers.select_inputs(
+            INVENTORY, 30 * GIB, [RUNG_GPU, RUNG_CPU],
+            {"SYCL1": {"on": False}}, 90)
+        self.assertEqual([d["device"] for d in inv], ["SYCL0"])
+        self.assertEqual(ram, 30 * GIB)
+        self.assertEqual(len(rungs), 2)
+
+    def test_unticked_memory_is_zero_not_absent(self):
+        """RAM is not a list entry that can be dropped -- it is a scalar
+        the planner always reads, so "off" has to be nothing available."""
+        _inv, ram, _rungs = modelctl_tiers.select_inputs(
+            INVENTORY, 30 * GIB, [], {"RAM": {"on": False}}, 90)
+        self.assertEqual(ram, 0)
+
+    def test_an_unticked_rung_is_not_offered(self):
+        _inv, _ram, rungs = modelctl_tiers.select_inputs(
+            INVENTORY, 30 * GIB, [RUNG_GPU, RUNG_CPU],
+            {RUNG_CPU["name"]: {"on": False}}, 90)
+        self.assertEqual([r["name"] for r in rungs], [RUNG_GPU["name"]])
+
+    def test_a_ceiling_lowers_what_the_planner_may_spend(self):
+        """A GPU ceiling is expressed in the planner's own units: it reads
+        limit_pct of total_bytes, so the ceiling scales the total it is
+        given rather than being carried as a separate concept it would
+        have to learn."""
+        inv, _ram, _rungs = modelctl_tiers.select_inputs(
+            INVENTORY, 30 * GIB, [], {"SYCL0": {"ceiling_bytes": 9 * GIB}}, 90)
+        sycl0 = [d for d in inv if d["device"] == "SYCL0"][0]
+        self.assertAlmostEqual(sycl0["total_bytes"] * 0.90 / GIB, 9.0, places=2)
+
+    def test_a_ceiling_can_only_take_room_away(self):
+        """Never grant more than the device physically has: a ceiling
+        above capacity is the same as no ceiling at all."""
+        inv, ram, rungs = modelctl_tiers.select_inputs(
+            INVENTORY, 30 * GIB, [RUNG_CPU],
+            {"SYCL0": {"ceiling_bytes": 999 * GIB},
+             "RAM": {"ceiling_bytes": 999 * GIB},
+             RUNG_CPU["name"]: {"ceiling_bytes": 999 * GIB}}, 90)
+        self.assertEqual([d for d in inv if d["device"] == "SYCL0"][0]["total_bytes"],
+                         [d for d in INVENTORY if d["device"] == "SYCL0"][0]["total_bytes"])
+        self.assertEqual(ram, 30 * GIB)
+        self.assertEqual(rungs[0]["budget_bytes"], RUNG_CPU["budget_bytes"])
+
+    def test_an_empty_selection_changes_nothing(self):
+        """No selection means the machine as it is -- the automatic
+        placement, which is what the operator sees before touching it."""
+        inv, ram, rungs = modelctl_tiers.select_inputs(
+            INVENTORY, 30 * GIB, [RUNG_GPU], {}, 90)
+        self.assertEqual(inv, INVENTORY)
+        self.assertEqual(ram, 30 * GIB)
+        self.assertEqual(rungs, [RUNG_GPU])
+
+    def test_the_filtered_inputs_actually_plan(self):
+        """End to end: the filter feeds plan_tiers unchanged, so a
+        selection produces a real placement and not a shape error."""
+        inv, ram, rungs = modelctl_tiers.select_inputs(
+            INVENTORY, 40 * GIB, [RUNG_GPU, RUNG_CPU],
+            {RUNG_GPU["name"]: {"on": False}}, 90)
+        plan = modelctl_tiers.plan_tiers(
+            profile(), inv, 90, "SYCL0", ram_available=ram,
+            layout=moe_layout(60, 1.1, has_shexp=True), remote_rungs=rungs)
+        extra = plan["config"]["extra"]
+        self.assertNotIn(RUNG_GPU["endpoint"], extra)
+        self.assertIn(RUNG_CPU["endpoint"], extra)
+
+
 class TestRemoteRungs(unittest.TestCase):
     """RPC devices join the expert-placement ladder. Ranks and the wire
     floor come from the 2026-08-03 122B calibration

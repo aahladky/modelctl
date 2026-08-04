@@ -593,6 +593,75 @@ def tier_change_gate(profile, plan):
             "requires_accept": requires}
 
 
+def select_inputs(inventory, ram_available, remote_rungs, selection,
+                  limit_pct):
+    """Filter the planner's inputs down to a chosen set of devices.
+
+    A device selection is not a separate concept the planner has to
+    learn -- it is the inputs it already takes, minus what the operator
+    turned off and capped. That matters more than the brevity: it means
+    the console can ask THIS planner where weights land instead of
+    re-deriving placement in the browser, and a screen that re-derives
+    placement is a screen that can disagree with what actually launches.
+
+    `selection` maps an admission key ("SYCL0", "RAM",
+    "RPC:<node>:<device>") to {"on": bool, "ceiling_bytes": int|None}.
+    A key that is absent is untouched, so an empty selection is the
+    machine as it stands -- the automatic placement, which is what the
+    operator sees before touching anything.
+
+    A ceiling only ever takes room away; one above what the device
+    physically has is the same as no ceiling. GPU ceilings are applied by
+    scaling total_bytes, because limit_pct of total_bytes is the number
+    plan_tiers actually spends -- carrying a ceiling as its own concept
+    would mean teaching every downstream reader about it.
+    """
+    frac = (limit_pct or 100) / 100.0
+
+    def want(key):
+        return (selection or {}).get(key) or {}
+
+    def ceiling(key, current):
+        c = want(key).get("ceiling_bytes")
+        if c is None:
+            return current
+        return min(current, max(0, int(c)))
+
+    kept = []
+    for dev in inventory or []:
+        sel = want(dev["device"])
+        if sel.get("on") is False:
+            continue
+        cap = sel.get("ceiling_bytes")
+        if cap is None:
+            kept.append(dev)
+            continue
+        usable = min(dev["total_bytes"] * frac, max(0, int(cap)))
+        scaled = dict(dev)
+        scaled["total_bytes"] = int(usable / frac) if frac else 0
+        scaled["free_bytes"] = min(dev.get("free_bytes", 0),
+                                   scaled["total_bytes"])
+        kept.append(scaled)
+
+    # RAM is a scalar the planner always reads, not a list entry that can
+    # be dropped, so "off" has to mean nothing available.
+    ram = 0 if want("RAM").get("on") is False else ceiling(
+        "RAM", int(ram_available or 0))
+
+    rungs = []
+    for rung in remote_rungs or []:
+        sel = want(rung["name"])
+        if sel.get("on") is False:
+            continue
+        capped = ceiling(rung["name"], int(rung["budget_bytes"]))
+        if capped == rung["budget_bytes"]:
+            rungs.append(rung)
+        else:
+            rungs.append({**rung, "budget_bytes": capped})
+
+    return kept, ram, rungs
+
+
 def plan_tiers(profile, inventory, limit_pct, primary, ram_available=None,
                layout=None, cache_request=None, capabilities=None,
                hw_settings=None, remote_rungs=None):
