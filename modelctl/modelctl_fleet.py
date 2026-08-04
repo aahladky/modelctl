@@ -42,6 +42,7 @@ import json
 import os
 import socket
 import struct
+import threading
 import time
 from dataclasses import dataclass, field, replace
 
@@ -63,6 +64,12 @@ _HELLO_RSP_SIZE = 4 + RPC_CONN_CAPS_SIZE   # major/minor/patch/padding + caps
 # generous -- the cost of a stale "present" is one refused launch that
 # falls back, and the cost of a stale "absent" is a lost optimization.
 PRESENCE_TTL_SECONDS = 900
+
+# Re-probe well inside the TTL rather than at it: a node refreshed only
+# once it had already expired would spend part of every cycle invisible
+# to the planner, and "invisible" means its memory is not offered and the
+# weights that would have lived there go to the SSD instead.
+PRESENCE_REFRESH_SECONDS = PRESENCE_TTL_SECONDS // 3
 
 
 @dataclass(frozen=True)
@@ -423,6 +430,120 @@ def ensure_fresh_presence(nodes=None, now=None, ttl=PRESENCE_TTL_SECONDS,
         save_presence(list(recorded.values()))
         presence = recorded
     return usable_nodes(enabled, presence=presence, now=now, ttl=ttl)
+
+
+def probe_and_record(nodes, probe_fn=None) -> list:
+    """Probe `nodes` and merge the results into the presence record.
+
+    Merge, not replace: save_presence writes the whole file, so a partial
+    refresh that forgot this would erase what is known about every node
+    it did not probe -- deleting their capacity from planning, which is
+    the exact failure a refresh exists to prevent.
+    """
+    fn = probe_fn or probe_node
+    probes = []
+    for n in nodes:
+        try:
+            probes.append(fn(n))
+        except Exception:
+            # An unreachable node is the normal case here. It costs that
+            # node its freshness -- usable_nodes ages it out and planning
+            # proceeds without it -- not the whole sweep.
+            continue
+    if not probes:
+        return []
+    with modelctl_fsutil.state_lock():
+        recorded = load_presence()
+        for pr in probes:
+            recorded[pr.node] = pr
+        save_presence(list(recorded.values()))
+    return probes
+
+
+class PresencePoller:
+    """Keeps recorded presence fresh, so a reachable machine's capacity
+    never silently disappears from planning.
+
+    Presence is a stored planning input with a TTL, and nothing ever
+    re-probed it on a timer -- only an operator clicking probe. Fifteen
+    minutes after the last click every remote node aged out and the
+    planner quietly planned without machines sitting right there,
+    reachable. On a profile whose policy forbids the storage tier that is
+    not "the model got slower", it is "nothing can launch": observed
+    three times on 2026-08-04.
+
+    Structured like modelctl_nodestats.NodeStatsPoller -- an Event.wait
+    pause a stop can interrupt, and a poll_once seam so the due-check is
+    testable without a thread or a network.
+    """
+
+    def __init__(self, interval=None, probe_fn=None, nodes_fn=None,
+                 presence_fn=None, clock=time.time):
+        # Resolved here rather than as a default argument so the module
+        # constant can be lowered for tests.
+        self._interval = (PRESENCE_REFRESH_SECONDS if interval is None
+                          else interval)
+        self._probe_fn = probe_fn
+        self._nodes_fn = nodes_fn or enabled_nodes
+        self._presence_fn = presence_fn or load_presence
+        self._clock = clock
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        """Start the timer thread once. Safe to call repeatedly."""
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop,
+                                        name="fleet-presence-poller",
+                                        daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def join(self, timeout=None):
+        if self._thread is not None:
+            self._thread.join(timeout)
+
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def _loop(self):
+        while not self._stop.is_set():
+            try:
+                self.poll_once()
+            except Exception:
+                # A sweep that failed will be retried next interval; the
+                # refresher must outlive a bad registry read.
+                pass
+            if self._stop.wait(self._interval):
+                return
+
+    def due(self, nodes=None, presence=None) -> list:
+        """Enabled nodes whose presence is older than the refresh window.
+
+        Refreshing well inside the TTL is the point: a node re-probed
+        only once it had already expired would spend part of every cycle
+        invisible to the planner.
+        """
+        nodes = self._nodes_fn() if nodes is None else nodes
+        presence = self._presence_fn() if presence is None else presence
+        now = self._clock()
+        out = []
+        for n in nodes:
+            pr = presence.get(n.name)
+            if pr is None or now - pr.probed_at >= self._interval:
+                out.append(n)
+        return out
+
+    def poll_once(self) -> list:
+        """One sweep. Used by the thread and by tests."""
+        due = self.due()
+        if not due:
+            return []
+        return probe_and_record(due, probe_fn=self._probe_fn)
 
 
 def usable_nodes(nodes=None, presence=None, now=None,

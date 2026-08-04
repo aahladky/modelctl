@@ -191,6 +191,85 @@ class TestPresenceTriState(FleetConsoleBase):
                                  usable == ["ph16-71-cpu0"])
 
 
+class TestPresenceRefresh(FleetConsoleBase):
+    """Presence is a stored planning input with a 900s TTL, and nothing
+    ever re-probed it on a timer -- only an operator clicking probe. So
+    fifteen minutes after the last click every remote node aged out and
+    the planner quietly planned without machines that were sitting right
+    there, reachable. On a profile whose policy forbids the storage tier
+    that is not "the model got slower", it is "nothing can launch":
+    observed three times on 2026-08-04.
+    """
+
+    def test_a_node_whose_presence_aged_out_is_reprobed(self):
+        fleet.save_fleet([cpu_node()])
+        fleet.save_presence(
+            [probe("ph16-71-cpu0", age=fleet.PRESENCE_TTL_SECONDS - 1)])
+        seen = []
+        poller = fleet.PresencePoller(
+            probe_fn=lambda n: seen.append(n.name) or probe(n.name))
+        poller.poll_once()
+        self.assertEqual(seen, ["ph16-71-cpu0"])
+
+    def test_a_freshly_probed_node_is_left_alone(self):
+        """The refresh must not become a network hammer: a node probed a
+        moment ago is not due."""
+        fleet.save_fleet([cpu_node()])
+        fleet.save_presence([probe("ph16-71-cpu0", age=0)])
+        seen = []
+        poller = fleet.PresencePoller(
+            probe_fn=lambda n: seen.append(n.name) or probe(n.name))
+        poller.poll_once()
+        self.assertEqual(seen, [])
+
+    def test_a_node_never_probed_is_due(self):
+        fleet.save_fleet([cpu_node()])
+        seen = []
+        poller = fleet.PresencePoller(
+            probe_fn=lambda n: seen.append(n.name) or probe(n.name))
+        poller.poll_once()
+        self.assertEqual(seen, ["ph16-71-cpu0"])
+
+    def test_a_disabled_node_is_never_probed(self):
+        fleet.save_fleet([cpu_node(enabled=False)])
+        seen = []
+        poller = fleet.PresencePoller(
+            probe_fn=lambda n: seen.append(n.name) or probe(n.name))
+        poller.poll_once()
+        self.assertEqual(seen, [])
+
+    def test_recording_one_probe_keeps_what_is_known_about_the_others(self):
+        """save_presence writes the whole file, so a partial refresh that
+        forgot to merge would erase the node it did not probe -- removing
+        its capacity from planning, which is the very failure this
+        exists to stop."""
+        fleet.save_fleet([cpu_node(), gpu_node()])
+        fleet.save_presence([probe("ph16-71-cpu0", age=0),
+                             probe("ph16-71-cuda0", age=0)])
+        fleet.probe_and_record([cpu_node()],
+                               probe_fn=lambda n: probe(n.name))
+        self.assertEqual(sorted(fleet.load_presence()),
+                         ["ph16-71-cpu0", "ph16-71-cuda0"])
+
+    def test_a_probe_that_raises_does_not_kill_the_refresh(self):
+        """An unreachable node is the normal case this runs into. It must
+        cost that node's freshness, not the whole poller."""
+        fleet.save_fleet([cpu_node()])
+        poller = fleet.PresencePoller(
+            probe_fn=lambda n: (_ for _ in ()).throw(OSError("no route")))
+        poller.poll_once()          # must not raise
+        self.assertFalse(poller.is_alive())
+
+    def test_the_thread_stops_when_asked(self):
+        fleet.save_fleet([cpu_node()])
+        poller = fleet.PresencePoller(
+            interval=0.01, probe_fn=lambda n: probe(n.name))
+        poller.start()
+        poller.stop()
+        poller.join(timeout=2)
+        self.assertFalse(poller.is_alive())
+
+
 class TestReadModel(FleetConsoleBase):
     def test_the_rig_is_the_first_node_in_the_same_shape(self):
         fleet.save_fleet([cpu_node()])

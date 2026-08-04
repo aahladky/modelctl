@@ -108,6 +108,27 @@ def create_app(store=None, runner=None, collector=None,
     app.state.store = store
     app.state.runner = runner
 
+    # Keep fleet presence fresh for as long as this service runs. Not on
+    # the telemetry tick, which only fires while a browser is watching:
+    # launches happen through llama-swap with nobody looking, and a node
+    # that aged out is a node whose memory is not offered -- the weights
+    # that would have lived there go to the SSD instead.
+    #
+    # Only when a registry exists, mirroring the node-stats poller: an
+    # install with no fleet gets no thread, which is also what keeps the
+    # test suite (whose redirected MODELCTL_HOME has no registry) from
+    # opening a connection from here.
+    app.state.presence_poller = None
+    try:
+        import modelctl_fleet
+        if modelctl_fleet.load_fleet():
+            app.state.presence_poller = modelctl_fleet.PresencePoller()
+            app.state.presence_poller.start()
+    except Exception:
+        # A refresher that cannot start must not take the console with
+        # it; presence then ages exactly as it did before.
+        app.state.presence_poller = None
+
     @app.exception_handler(modelctl_errors.ProfileNotFoundError)
     async def profile_not_found(request: Request, exc):
         # A stale bookmark or a profile deleted in another tab is a 404,
@@ -1080,18 +1101,12 @@ def create_app(store=None, runner=None, collector=None,
     def _probe_and_record(nodes):
         """Probe `nodes` and merge the results into the presence record.
 
-        Merge, not replace: probing one node must not erase what is known
-        about the others, and save_presence writes the whole file.
+        The merge lives in modelctl_fleet so this route and the
+        background refresher cannot drift: two implementations of
+        "record what we just learned" is two ways to erase a node.
         """
         import modelctl_fleet
-        import modelctl_fsutil
-        probes = [modelctl_fleet.probe_node(n) for n in nodes]
-        with modelctl_fsutil.state_lock():
-            recorded = modelctl_fleet.load_presence()
-            for pr in probes:
-                recorded[pr.node] = pr
-            modelctl_fleet.save_presence(list(recorded.values()))
-        return probes
+        return modelctl_fleet.probe_and_record(nodes)
 
     @app.post("/api/v2/fleet/probe")
     def api_v2_fleet_probe():
