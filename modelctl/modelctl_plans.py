@@ -990,13 +990,34 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
     # memory while the profile is unchanged.
     try:
         inputs, _source = modelctl.resolve_planning_inputs(profile)
+        # RPC rungs for the expert ladder: recorded-present fleet devices
+        # with declared budgets. usable_nodes() opens no socket (presence
+        # was refreshed by the plans view); an empty fleet yields no
+        # rungs and a byte-identical local plan set.
+        remote_rungs = []
+        try:
+            import modelctl_fleet
+            for node in modelctl_fleet.usable_nodes():
+                for dev_index, device in enumerate(node.devices):
+                    if device.budget_bytes <= 0:
+                        continue
+                    remote_rungs.append({
+                        "name": modelctl_fleet.admission_key(node.name,
+                                                             device.name),
+                        "endpoint": node.endpoint,
+                        "local_device_index": dev_index,
+                        "kind": device.kind,
+                        "budget_bytes": int(device.budget_bytes)})
+        except Exception:
+            remote_rungs = []
         tier = modelctl_tiers.plan_tiers(
             profile, inputs["inventory"], inputs["vram_limit_pct"],
             inputs["primary"],
             ram_available=inputs["ram_available_bytes"],
             cache_request=profile.get("moe_cache"),
             capabilities=inputs.get("capabilities") or caps_for_args,
-            hw_settings=inputs.get("hw_settings"))
+            hw_settings=inputs.get("hw_settings"),
+            remote_rungs=remote_rungs)
         if tier and tier.get("config"):
             tc = dict(tier["config"])
             tc["_tier"] = tier.get("tier", "?")

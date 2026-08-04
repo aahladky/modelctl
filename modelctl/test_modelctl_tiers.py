@@ -503,3 +503,108 @@ class TestCacheRequest(unittest.TestCase):
             # docstring contract: the key is always present, value or None
             self.assertIn("cache_budgets_gib", plan["analysis"])
             self.assertIsNone(plan["analysis"]["cache_budgets_gib"], req)
+
+
+RUNG_GPU = {"name": "RPC:ph16-71-cuda0:CUDA0",
+            "endpoint": "192.168.0.76:50052",
+            "local_device_index": 0, "kind": "gpu",
+            "budget_bytes": 10 * GIB}
+RUNG_CPU = {"name": "RPC:ph16-71-cpu0:CPU",
+            "endpoint": "192.168.0.76:50053",
+            "local_device_index": 0, "kind": "cpu",
+            "budget_bytes": 24 * GIB}
+
+
+class TestRemoteRungs(unittest.TestCase):
+    """RPC devices join the expert-placement ladder. Ranks and the wire
+    floor come from the 2026-08-03 122B calibration
+    (docs/evidence/2026-08-03-qwen122b-fleet-calibration.md): remote GPU
+    above local RAM, remote CPU above SSD but below local RAM."""
+
+    def _plan(self, ram_gib, rungs, n_layers=60):
+        return modelctl_tiers.plan_tiers(
+            profile(), INVENTORY, 90, "SYCL0",
+            ram_available=ram_gib * GIB,
+            layout=moe_layout(n_layers, 1.1, has_shexp=True),
+            remote_rungs=rungs)
+
+    def _remote_layer_count(self, extra, endpoint, layout):
+        n = 0
+        for layer in layout["expert_bytes_per_layer"]:
+            tgt = ot_first_match(extra, f"blk.{layer}.ffn_gate_exps.weight")
+            if tgt and endpoint in tgt:
+                n += 1
+        return n
+
+    def test_tier4_offers_every_rung_before_ssd(self):
+        layout = moe_layout(60, 1.1, has_shexp=True)
+        plan = self._plan(8, [RUNG_GPU, RUNG_CPU])
+        self.assertEqual(plan["tier"], 4)
+        extra = plan["config"]["extra"]
+        self.assertIn("--rpc", extra)
+        self.assertLess(extra.index("--rpc"), extra.index("--device"))
+        n_gpu = self._remote_layer_count(extra, "50052", layout)
+        n_cpu = self._remote_layer_count(extra, "50053", layout)
+        self.assertGreater(n_gpu, 0)
+        self.assertGreater(n_cpu, 0)
+        self.assertLessEqual(n_gpu * 1.1 * GIB, RUNG_GPU["budget_bytes"])
+        self.assertLessEqual(n_cpu * 1.1 * GIB, RUNG_CPU["budget_bytes"])
+        # a CPU tail remains and stays last (first-match catch-all)
+        self.assertIn("ffn_.*_exps=CPU", extra)
+        # tensor split carries a zero share per remote client device
+        self.assertTrue(plan["config"]["tensor_split"].endswith(",0,0"),
+                        plan["config"]["tensor_split"])
+        toks = shlex.split(extra)
+        devlist = toks[toks.index("--device") + 1]
+        self.assertIn("RPC0", devlist.split(","))
+        self.assertIn("RPC1", devlist.split(","))
+
+    def test_shexp_never_goes_remote(self):
+        layout = moe_layout(60, 1.1, has_shexp=True)
+        plan = self._plan(8, [RUNG_GPU, RUNG_CPU])
+        extra = plan["config"]["extra"]
+        for layer in layout["expert_bytes_per_layer"]:
+            tgt = ot_first_match(extra, f"blk.{layer}.ffn_gate_exps_shexp.weight")
+            if tgt is not None:
+                self.assertNotIn("RPC", tgt, f"layer {layer} shexp remote")
+
+    def test_tier3_offers_gpu_rungs_only(self):
+        plan = self._plan(60, [RUNG_GPU, RUNG_CPU])
+        self.assertEqual(plan["tier"], 3)
+        extra = plan["config"]["extra"]
+        self.assertIn("50052", extra)
+        self.assertNotIn("50053", extra)
+
+    def test_admission_charges_the_rung_not_a_local_card(self):
+        layout = moe_layout(60, 1.1, has_shexp=True)
+        plan = self._plan(8, [RUNG_GPU, RUNG_CPU])
+        adm = plan["config"]["rpc"]["admission"]
+        n_gpu = self._remote_layer_count(plan["config"]["extra"], "50052",
+                                         layout)
+        self.assertEqual(adm["RPC:ph16-71-cuda0:CUDA0"],
+                         n_gpu * int(1.1 * GIB))
+        self.assertIn("RPC:ph16-71-cpu0:CPU", adm)
+        self.assertTrue(plan["admission"]["fits"])
+
+    def test_network_load_warning_present(self):
+        plan = self._plan(8, [RUNG_GPU, RUNG_CPU])
+        self.assertTrue(any("network" in w for w in plan["warnings"]))
+        self.assertTrue(any("RPC-enabled build" in w
+                            for w in plan["warnings"]))
+
+    def test_wire_floor_skips_tiny_placements(self):
+        # local GPUs absorb 26 layers; the single leftover layer
+        # (~1.1 GiB) is under the 2 GiB wire floor, so no rung is used
+        plan = self._plan(8, [RUNG_GPU, RUNG_CPU], n_layers=27)
+        self.assertNotIn("--rpc", plan["config"]["extra"])
+
+    def test_no_rungs_is_byte_identical_to_the_old_planner(self):
+        import json as _json
+        a = modelctl_tiers.plan_tiers(
+            profile(), INVENTORY, 90, "SYCL0", ram_available=8 * GIB,
+            layout=moe_layout(60, 1.1))
+        b = modelctl_tiers.plan_tiers(
+            profile(), INVENTORY, 90, "SYCL0", ram_available=8 * GIB,
+            layout=moe_layout(60, 1.1), remote_rungs=[])
+        self.assertEqual(_json.dumps(a, sort_keys=True, default=str),
+                         _json.dumps(b, sort_keys=True, default=str))

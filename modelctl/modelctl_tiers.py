@@ -56,6 +56,18 @@ DEFAULT_GPU_BANDWIDTH_GBS = 400.0
 # Tiers below the GPUs; only their relative order vs GPU bandwidth matters.
 CPU_BANDWIDTH_GBS = 75.0
 
+# Remote (RPC) rungs, calibrated on the 2026-08-03 122B fleet A/B
+# (docs/evidence/2026-08-03-qwen122b-fleet-calibration.md): experts on the
+# remote GPU rank above local RAM, experts in remote RAM above SSD but
+# below local RAM. The absolute numbers only encode that order -- the
+# greedy assigner consumes rank, not throughput.
+RPC_GPU_BANDWIDTH_GBS = 200.0
+RPC_CPU_BANDWIDTH_GBS = 60.0
+# Never ship less than this to a node: the fixed per-token wire cost
+# (~2 ms/MB measured in the calibration) swamps the bandwidth win on
+# tiny placements.
+MIN_RPC_PLACEMENT_BYTES = 2 * (1 << 30)
+
 # Per-GPU runtime reserve: compute buffers, graph workspace, allocator
 # slack. llama.cpp's own needs scale with the model, and MoE expert matmuls
 # are hungry -- too small a reserve is a load-time Level Zero OOM (learned
@@ -583,7 +595,7 @@ def tier_change_gate(profile, plan):
 
 def plan_tiers(profile, inventory, limit_pct, primary, ram_available=None,
                layout=None, cache_request=None, capabilities=None,
-               hw_settings=None):
+               hw_settings=None, remote_rungs=None):
     """Compute a tiered placement for one profile.
 
     profile     -- modelctl profile dict (config carries ctx/cache types/extra)
@@ -601,6 +613,14 @@ def plan_tiers(profile, inventory, limit_pct, primary, ram_available=None,
                     reserve_bytes}}}); None reads the live settings file.
                     Passed explicitly so a stored planning-inputs record
                     fully determines the plan.
+    remote_rungs -- optional RPC devices for the MoE expert ladder, each
+                    {"name": admission key, "endpoint": host:port,
+                     "local_device_index": int, "kind": "gpu"|"cpu",
+                     "budget_bytes": int}. The caller (compile_launch_plans)
+                    builds them from the fleet registry; this module stays
+                    pure and never opens a socket. Dense spill ignores
+                    them -- whole-layer remote ranges are the fleet plan
+                    family's job.
 
     Returns None when the model can't be analyzed; otherwise:
       {tier, config: {device, split_mode, tensor_split, extra},
@@ -772,7 +792,8 @@ def plan_tiers(profile, inventory, limit_pct, primary, ram_available=None,
         if layout["is_moe"]:
             return _plan_moe_spill(
                 tier, layout, devs, usable, primary, kv, ram_budget, other,
-                warnings, analysis, result, cache_now)
+                warnings, analysis, result, cache_now,
+                remote_rungs=remote_rungs)
         return _plan_dense_spill(
             tier, layout, devs, usable, primary, kv, ram_budget, other,
             warnings, analysis, result)
@@ -1013,7 +1034,11 @@ def _admission_report(plan, layout, devs, usable, kv, cache_budgets):
 
     devices = {}
     fits = True
-    for dev in order:
+    # Local inventory devices only: remote client names ("RPC0") in the
+    # --device list have zero usable bytes here and would each read as a
+    # spurious compute-reserve oversubscription; their budgets are
+    # charged via config["rpc"]["admission"] at reservation time.
+    for dev in [d for d in order if d in by_dev]:
         share = shares.get(dev, 0.0)
         w = int(gpu_weights * share)
         k = int(kv * share)
@@ -1088,7 +1113,8 @@ def _expert_assignment(layers_bytes, ordered_devs, budgets):
 
 
 def _plan_moe_spill(tier, layout, devs, usable, primary, kv, ram_budget,
-                    other, warnings, analysis, result, cache_budgets=None):
+                    other, warnings, analysis, result, cache_budgets=None,
+                    remote_rungs=None):
     layers_bytes = layout["expert_bytes_per_layer"]
     expert_total = sum(layers_bytes.values())
     non_expert = layout["non_expert_bytes"]
@@ -1137,6 +1163,34 @@ def _plan_moe_spill(tier, layout, devs, usable, primary, kv, ram_budget,
         warnings.append("no expert layers fit any GPU budget -- all routed "
                         "experts land on CPU; this will be slow.")
 
+    # Remote rungs take what the local GPUs could not, before the CPU
+    # tail. Eligibility follows the calibrated ladder order: in tier 3
+    # the tail is resident RAM (75 GB/s), which only the remote-GPU rung
+    # outranks; in tier 4 the tail streams from SSD, which every rung
+    # outranks. A placement under the wire floor is skipped -- the fixed
+    # per-token network cost would eat the win.
+    rpc_used = []
+    if remote_rungs and cpu_layers:
+        def rung_gbs(r):
+            return (RPC_GPU_BANDWIDTH_GBS if r.get("kind") == "gpu"
+                    else RPC_CPU_BANDWIDTH_GBS)
+        tail_gbs = CPU_BANDWIDTH_GBS if tier == 3 else 0.0
+        eligible = sorted([r for r in remote_rungs if rung_gbs(r) > tail_gbs],
+                          key=lambda r: -rung_gbs(r))
+        for rung in eligible:
+            budget = rung.get("budget_bytes", 0)
+            chosen = []
+            for layer in list(cpu_layers):
+                if layers_bytes[layer] <= budget:
+                    chosen.append(layer)
+                    budget -= layers_bytes[layer]
+                    cpu_layers.remove(layer)
+            if sum(layers_bytes[l] for l in chosen) < MIN_RPC_PLACEMENT_BYTES:
+                cpu_layers.extend(chosen)
+                cpu_layers.sort()
+                continue
+            rpc_used.append((rung, sorted(chosen)))
+
     # -ot parts: specific layer ranges FIRST (first-match-wins), CPU last.
     # Backslashes are doubled so shlex.split in build_server_args passes a
     # literal '\.' through to llama-server.
@@ -1169,17 +1223,36 @@ def _plan_moe_spill(tier, layout, devs, usable, primary, kv, ram_budget,
         ls = sorted(assignment.get(dev, []))
         if ls:
             ot_parts.append(f"blk\\\\.{layers_regex(ls)}\\\\.ffn_.*_exps={dev}")
+    for rung, ls in rpc_used:
+        # -ot names the buffer type: the endpoint qualifier with the
+        # node-local device index, NOT the --device list position (see
+        # bench_qwen122b_fleet.py arm D: two single-device nodes are both
+        # RPC0[endpoint] in -ot while --device says RPC0,RPC1).
+        target = (f"RPC{rung.get('local_device_index', 0)}"
+                  f"[{rung['endpoint']}]")
+        ot_parts.append(f"blk\\\\.{layers_regex(ls)}\\\\.ffn_.*_exps={target}")
     if cpu_layers:
         ot_parts.append("ffn_.*_exps=CPU")
 
     extra = ["--fit off"]
-    if len(used_devs) > 1:
+    if rpc_used:
+        # --rpc must precede --device in the argv: the RPC backend
+        # registers its devices when --rpc is parsed (laguna R2 gotcha).
+        extra.insert(0, "--rpc "
+                     + ",".join(rung["endpoint"] for rung, _ in rpc_used))
+    if len(used_devs) > 1 or rpc_used:
         split_mode = "layer"
         split_devs = [d for d in devs if d["device"] in used_devs]
-        tensor_split = modelctl_vram.tensor_split_ratio(
-            [d["total_bytes"] for d in split_devs])
+        if len(split_devs) > 1:
+            tensor_split = modelctl_vram.tensor_split_ratio(
+                [d["total_bytes"] for d in split_devs])
+        else:
+            tensor_split = "1"
+        rpc_clients = [f"RPC{i}" for i in range(len(rpc_used))]
+        if rpc_used:
+            tensor_split += ",0" * len(rpc_used)
         device = ""
-        extra.append(f"--device {','.join(used_devs)}")
+        extra.append("--device " + ",".join(used_devs + rpc_clients))
     else:
         split_mode = tensor_split = ""
         device = used_devs[0]
@@ -1221,6 +1294,26 @@ def _plan_moe_spill(tier, layout, devs, usable, primary, kv, ram_budget,
 
     config = {"device": device, "split_mode": split_mode,
               "tensor_split": tensor_split, "extra": " ".join(extra)}
+    if rpc_used:
+        remote_gib = sum(layers_bytes[l] for _, ls in rpc_used
+                         for l in ls) / (1 << 30)
+        names = ", ".join(rung["name"] for rung, _ in rpc_used)
+        warnings.append(
+            f"{remote_gib:.1f} GiB of experts load onto {names} over the "
+            "network -- loads measured 10-90 s slower (2026-08-03 "
+            "calibration), and serving this plan requires the "
+            "RPC-enabled build")
+        for rung, ls in rpc_used:
+            gib = sum(layers_bytes[l] for l in ls) / (1 << 30)
+            layout_rows.append((rung["name"], gib,
+                                f"experts layers {ls[0]}-{ls[-1]} "
+                                f"({len(ls)}), over RPC"))
+        config["rpc"] = {
+            "endpoints": [rung["endpoint"] for rung, _ in rpc_used],
+            "placements": [],
+            "admission": {rung["name"]: int(sum(layers_bytes[l] for l in ls))
+                          for rung, ls in rpc_used},
+        }
     return result(tier, config, layout_rows)
 
 
