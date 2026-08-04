@@ -536,6 +536,31 @@ class TestRemoteRungs(unittest.TestCase):
                 n += 1
         return n
 
+    def test_cpu_share_that_fits_ram_is_held_resident(self):
+        """Weights do not go to the SSD while RAM is free.
+
+        Rungs absorb the bulk, so what is left for the host is small --
+        4.4 GiB against 40 GiB of RAM. It streamed off the NVMe anyway,
+        because --no-mmap was gated on the tier LABEL (tier 4 = 'needs
+        SSD streaming') rather than on whether this plan's own CPU share
+        actually fits. Measured on the live 122B: 72 GB read from disk
+        and 25312 major faults for a share that fits in memory.
+        """
+        plan = self._plan(40, [RUNG_GPU, RUNG_CPU])
+        self.assertEqual(plan["tier"], 4)
+        cpu_share = [r for r in plan["layout"] if r[0] == "CPU"][0][1]
+        self.assertLess(cpu_share, 40)
+        self.assertIn("--no-mmap", plan["config"]["extra"])
+
+    def test_cpu_share_bigger_than_ram_stays_mmapped(self):
+        """The other direction, and the reason this is a fit check and
+        not 'always --no-mmap': mmap degrades to slow paging, while a
+        --no-mmap run that does not fit is an OOM kill."""
+        plan = self._plan(2, [RUNG_GPU, RUNG_CPU])
+        cpu_share = [r for r in plan["layout"] if r[0] == "CPU"][0][1]
+        self.assertGreater(cpu_share, 2)
+        self.assertNotIn("--no-mmap", plan["config"]["extra"])
+
     def test_tier4_offers_every_rung_before_ssd(self):
         layout = moe_layout(60, 1.1, has_shexp=True)
         plan = self._plan(8, [RUNG_GPU, RUNG_CPU])

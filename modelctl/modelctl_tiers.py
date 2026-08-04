@@ -1258,14 +1258,30 @@ def _plan_moe_spill(tier, layout, devs, usable, primary, kv, ram_budget,
         device = used_devs[0]
     if ot_parts:
         extra.append("-ot " + ",".join(ot_parts))
-    if tier == 3:
-        # Whole model fits GPU+RAM: load CPU-resident tensors into anonymous
-        # RAM instead of page-faulting them off the SSD on every cold token.
+    cpu_gib = sum(layers_bytes[l] for l in cpu_layers) / (1 << 30)
+    # Hold the CPU share in RAM whenever it fits -- whatever the tier says.
+    #
+    # tier == 3 alone was the old rule, and it reads the LABEL rather than
+    # the plan: "tier 4" describes the whole model needing SSD, but what
+    # actually has to be paged is only what is left after the GPUs and any
+    # remote rungs have taken theirs. With a laptop absorbing 24 GiB of
+    # experts that remainder can be a few GiB sitting against tens of free
+    # GiB, and it page-faulted off the NVMe anyway -- 72 GB read and 25312
+    # major faults on the live 122B (2026-08-04) for a share that fits in
+    # memory.
+    #
+    # A fit check and not an unconditional flag, because the two failure
+    # modes are not symmetric: mmap that does not fit degrades to slow
+    # paging, while --no-mmap that does not fit is an OOM kill. Additive
+    # to the tier-3 rule so no plan that holds its weights resident today
+    # can lose that by this change.
+    hold_in_ram = bool(
+        tier == 3 or (cpu_layers and cpu_gib <= analysis["ram_budget_gib"]))
+    if hold_in_ram:
         extra.append("--no-mmap")
     if other:
         extra.append(other)
 
-    cpu_gib = sum(layers_bytes[l] for l in cpu_layers) / (1 << 30)
     if tier == 3 and cpu_gib > analysis["ram_budget_gib"]:
         # Fixed+GPU consumed the model but the CPU share still exceeds RAM:
         # effective streaming anyway -- downgrade the label, keep the plan.
@@ -1283,7 +1299,9 @@ def _plan_moe_spill(tier, layout, devs, usable, primary, kv, ram_budget,
             layout_rows.append((dev, gib,
                                 f"experts layers {ls[0]}-{ls[-1]} ({len(ls)})"))
     if cpu_layers:
-        backing = "RAM" if tier == 3 else "SSD via mmap"
+        # Says what this plan does, not what its tier is called: a tier-4
+        # plan whose remainder fits now holds it resident.
+        backing = "RAM" if hold_in_ram else "SSD via mmap"
         layout_rows.append(("CPU", cpu_gib,
                             f"experts layers {cpu_layers[0]}-{cpu_layers[-1]} "
                             f"({len(cpu_layers)}), {backing}"))
