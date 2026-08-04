@@ -7,11 +7,12 @@ import json
 import re
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import modelctl
 from modelctl_services import acquisition_service
+
+from . import pull_progress
 
 
 def _sync_backends(ctx):
@@ -199,7 +200,15 @@ def _run_pull_subprocess(ctx, repo_id, quant_label=None, want_mtp=True,
         cwd=str(Path(modelctl.__file__).resolve().parent),
         # hf_hub_download's tqdm bar would arrive as hundreds of \r-lines
         # of job-log spam; the CLI's own per-file lines carry the progress.
-        env={**os.environ, "HF_HUB_DISABLE_PROGRESS_BARS": "1"})
+        #
+        # PYTHONUNBUFFERED because those per-file lines are the operator's
+        # only live view of a running pull, and a plain CPython child
+        # writing to a pipe block-buffers them: every line arrived at once
+        # when the process exited, describing downloads that had already
+        # finished. It also makes current["file"] land at file start
+        # instead of at the end, which is what labels the progress bar.
+        env={**os.environ, "HF_HUB_DISABLE_PROGRESS_BARS": "1",
+             "PYTHONUNBUFFERED": "1"})
     ctx.register_process(proc)
     profile_name = None
     attempted = []
@@ -250,9 +259,14 @@ def _run_pull_subprocess(ctx, repo_id, quant_label=None, want_mtp=True,
 
 
 def submit_pull(runner, repo_id, quant_label=None, want_mtp=True,
-                needed_bytes=0):
-    """Pull as a background job: disk preflight, live progress, and a
-    download that cancel can actually stop."""
+                needed_bytes=0, needed_files=None):
+    """Pull as a background job: disk preflight, live byte progress, and
+    a download that cancel can actually stop.
+
+    needed_bytes/needed_files describe the chosen quant and come from
+    repo metadata at submit time. Both are absent when that lookup failed
+    -- the pull still runs, it just cannot draw a bar, and says so.
+    """
     def fn(ctx):
         space = acquisition_service.check_destination_space(needed_bytes)
         for m in space.messages:
@@ -261,38 +275,38 @@ def submit_pull(runner, repo_id, quant_label=None, want_mtp=True,
             raise RuntimeError(space.messages[0] if space.messages
                                else "not enough disk space for this download")
 
+        # The subprocess reader writes the active filename here; the
+        # poller reads it for the detail line only. The fraction comes
+        # from bytes on disk, so a filename that has not arrived yet no
+        # longer freezes the bar at 0 for the whole download.
         current = {"file": None}
 
-        def poller():
-            while True:
-                time.sleep(3)
-                if not current["file"]:
-                    job = ctx.store.get(ctx.job_id)
-                    if not job or job["status"] != "running":
-                        return
-                    continue
-                target = Path(modelctl.DEFAULT_MODELS_DIR) / repo_id / current["file"]
-                total = modelctl._remote_file_size(repo_id, current["file"])
-                try:
-                    have = target.stat().st_size if target.exists() else 0
-                except OSError:
-                    have = 0
-                if total:
-                    ctx.set_progress(
-                        min(0.99, have / total),
-                        f"{current['file']}: "
-                        f"{modelctl._format_size(have)} / "
-                        f"{modelctl._format_size(total)}")
-                job = ctx.store.get(ctx.job_id)
-                if not job or job["status"] != "running":
-                    return
+        def job_still_running():
+            job = ctx.store.get(ctx.job_id)
+            return bool(job) and job["status"] == "running"
 
-        import threading
-        t = threading.Thread(target=poller, daemon=True)
-        t.start()
-        ctx.raise_if_cancelled()
-        out = _run_pull_subprocess(ctx, repo_id, quant_label=quant_label,
-                                   want_mtp=want_mtp, current=current)
+        poller = pull_progress.PullProgressPoller(
+            repo_id, needed_files, needed_bytes,
+            on_progress=ctx.set_progress,
+            should_continue=job_still_running,
+            label_fn=lambda: current["file"],
+            on_error=lambda msg: ctx.log(
+                f"progress reporting stopped ({msg}); the download itself "
+                "is unaffected"))
+        if not poller.can_measure:
+            ctx.log("this download's size is unknown, so the progress bar "
+                    "will not move -- the per-file lines below are the "
+                    "progress")
+        poller.start()
+        try:
+            ctx.raise_if_cancelled()
+            out = _run_pull_subprocess(ctx, repo_id, quant_label=quant_label,
+                                       want_mtp=want_mtp, current=current)
+        finally:
+            # Stop on the way out of every path, and wait: a cancelled or
+            # failed pull otherwise leaves a thread still writing
+            # progress onto a job that has already finished.
+            poller.shutdown()
         current["file"] = None
         ctx.log(f"profile '{out['profile']}' saved and synced")
         return {"profile": out["profile"]}

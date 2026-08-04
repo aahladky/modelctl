@@ -336,6 +336,261 @@ class TestDownloadHonesty(WebTestBase):
         self.assertTrue((repo_dir / "b.gguf").exists())
 
 
+class TestPullProgress(WebTestBase):
+    """A pull that is moving has to say it is moving.
+
+    The bar sat at 0 for entire multi-hour downloads. Two causes, both
+    in the old poller: it waited on a "downloading X ->" line from a
+    child whose stdout block-buffers for the whole transfer, and even
+    once it had a filename it stat()'d the destination path -- which
+    hf_hub_download does not create until the file is complete. Progress
+    is now read from the bytes actually on disk.
+    """
+
+    def _repo_dirs(self, subfolder=""):
+        models_dir = Path(self.tmp.name) / "models"
+        repo_dir = models_dir / "r" / "m"
+        spool = repo_dir / ".cache" / "huggingface" / "download" / subfolder
+        spool.mkdir(parents=True)
+        return models_dir, repo_dir, spool
+
+    def test_bytes_on_disk_counts_finished_files_and_the_live_spool(self):
+        """In-flight bytes live in a .incomplete spool whose name is a
+        hash of the filename, not the filename -- so counting only the
+        destination path reads 0 until the very last moment."""
+        from modelctl_web import pull_progress
+        models_dir, repo_dir, spool = self._repo_dirs()
+        (repo_dir / "a.gguf").write_bytes(b"x" * 300)
+        (spool / "9RmZbQ.etag123.ab12cd34.incomplete").write_bytes(b"x" * 200)
+        with mock.patch.object(modelctl, "DEFAULT_MODELS_DIR", models_dir):
+            have = pull_progress.bytes_on_disk("r/m", ["a.gguf", "b.gguf"])
+        self.assertEqual(have, 500)
+
+    def test_bytes_on_disk_ignores_files_this_pull_is_not_fetching(self):
+        """One repo dir can hold an earlier quant. Counting it would pin
+        the bar near 100% from the first tick of an untouched download."""
+        from modelctl_web import pull_progress
+        models_dir, repo_dir, _spool = self._repo_dirs()
+        (repo_dir / "wanted.gguf").write_bytes(b"x" * 100)
+        (repo_dir / "other-quant.gguf").write_bytes(b"x" * 9000)
+        with mock.patch.object(modelctl, "DEFAULT_MODELS_DIR", models_dir):
+            have = pull_progress.bytes_on_disk("r/m", ["wanted.gguf"])
+        self.assertEqual(have, 100)
+
+    def test_bytes_on_disk_finds_a_subfolder_quants_spool(self):
+        """Repos that ship a quant inside a subfolder (BF16/model.gguf)
+        spool into the matching subfolder; a flat glob misses it."""
+        from modelctl_web import pull_progress
+        models_dir, _repo_dir, spool = self._repo_dirs(subfolder="BF16")
+        (spool / "hash.etag.incomplete").write_bytes(b"x" * 700)
+        with mock.patch.object(modelctl, "DEFAULT_MODELS_DIR", models_dir):
+            have = pull_progress.bytes_on_disk("r/m", ["BF16/model.gguf"])
+        self.assertEqual(have, 700)
+
+    def test_bytes_on_disk_survives_a_missing_repo_dir(self):
+        """The first tick fires before the child has created anything."""
+        from modelctl_web import pull_progress
+        with mock.patch.object(modelctl, "DEFAULT_MODELS_DIR",
+                               Path(self.tmp.name) / "models"):
+            self.assertEqual(pull_progress.bytes_on_disk("r/m", ["a.gguf"]), 0)
+
+    def test_poll_once_reports_the_fraction_landed_so_far(self):
+        from modelctl_web import pull_progress
+        models_dir, _repo_dir, spool = self._repo_dirs()
+        (spool / "hash.etag.incomplete").write_bytes(b"x" * 250)
+        seen = []
+        poller = pull_progress.PullProgressPoller(
+            "r/m", ["a.gguf"], 1000,
+            on_progress=lambda v, d: seen.append((v, d)))
+        with mock.patch.object(modelctl, "DEFAULT_MODELS_DIR", models_dir):
+            poller.poll_once()
+        value, detail = seen[-1]
+        self.assertAlmostEqual(value, 0.25)
+        self.assertIn("/", detail)
+
+    def test_poll_once_never_claims_done_before_the_child_exits(self):
+        """Only the subprocess's exit code says the pull finished. A bar
+        that reads 100% while the child is still running is the same lie
+        in a different place."""
+        from modelctl_web import pull_progress
+        models_dir, repo_dir, _spool = self._repo_dirs()
+        (repo_dir / "a.gguf").write_bytes(b"x" * 5000)
+        seen = []
+        poller = pull_progress.PullProgressPoller(
+            "r/m", ["a.gguf"], 1000,
+            on_progress=lambda v, d: seen.append((v, d)))
+        with mock.patch.object(modelctl, "DEFAULT_MODELS_DIR", models_dir):
+            poller.poll_once()
+        self.assertAlmostEqual(seen[-1][0], 0.99)
+
+    def test_progress_detail_names_the_file_being_fetched(self):
+        from modelctl_web import pull_progress
+        models_dir, repo_dir, _spool = self._repo_dirs()
+        (repo_dir / "a.gguf").write_bytes(b"x" * 100)
+        seen = []
+        poller = pull_progress.PullProgressPoller(
+            "r/m", ["a.gguf"], 1000,
+            on_progress=lambda v, d: seen.append((v, d)),
+            label_fn=lambda: "a.gguf")
+        with mock.patch.object(modelctl, "DEFAULT_MODELS_DIR", models_dir):
+            poller.poll_once()
+        self.assertTrue(seen[-1][1].startswith("a.gguf"), seen)
+
+    def test_poller_cannot_measure_without_a_size_or_a_file_list(self):
+        """No repo metadata means no denominator. Report nothing rather
+        than invent a fraction -- and let the caller say so in the log."""
+        from modelctl_web import pull_progress
+        seen = []
+        blind = pull_progress.PullProgressPoller(
+            "r/m", ["a.gguf"], 0, on_progress=lambda v, d: seen.append(v))
+        self.assertFalse(blind.can_measure)
+        blind.poll_once()
+        self.assertEqual(seen, [])
+
+    def test_poller_thread_stops_when_the_job_leaves_running(self):
+        """A daemon thread polling a finished job keeps writing progress
+        onto a completed row."""
+        from modelctl_web import pull_progress
+        seen = []
+        poller = pull_progress.PullProgressPoller(
+            "r/m", ["a.gguf"], 1000, on_progress=lambda v, d: seen.append(v),
+            should_continue=lambda: False, interval=0.01)
+        poller.start()
+        poller.join(timeout=2)
+        self.assertFalse(poller.is_alive())
+        self.assertEqual(seen, [])
+
+    def test_shutdown_waits_for_a_tick_that_is_already_in_flight(self):
+        """Setting the stop flag does not recall a tick that is already
+        mid-write. That write lands after the runner marks the job done
+        and rewinds a finished pull to 99%."""
+        import threading as _threading
+        from modelctl_web import pull_progress
+        models_dir, repo_dir, _spool = self._repo_dirs()
+        (repo_dir / "a.gguf").write_bytes(b"x" * 100)
+        entered, release, writes = _threading.Event(), _threading.Event(), []
+
+        def slow_progress(value, detail):
+            entered.set()
+            release.wait(3)
+            writes.append(value)
+
+        poller = pull_progress.PullProgressPoller(
+            "r/m", ["a.gguf"], 1000, on_progress=slow_progress, interval=0.01)
+        with mock.patch.object(modelctl, "DEFAULT_MODELS_DIR", models_dir):
+            poller.start()
+            self.assertTrue(entered.wait(3), "poller never ticked")
+            release.set()
+            poller.shutdown()
+            self.assertFalse(poller.is_alive())
+        self.assertEqual(writes, [0.1])
+
+    def test_pull_shuts_the_poller_down_before_the_job_finishes(self):
+        """Ordering contract: the poller is fully stopped inside the job
+        function, so the runner's progress=1.0 is the last word."""
+        from modelctl_services.result import ServiceResult
+        from modelctl_web import mutate, pull_progress
+        events = []
+
+        class Recorder:
+            can_measure = True
+
+            def __init__(self, *a, **kw):
+                pass
+
+            def start(self):
+                events.append("start")
+
+            def shutdown(self):
+                events.append("shutdown")
+
+        def fake_pull(ctx, repo_id, **kw):
+            events.append("download")
+            return {"profile": "m1"}
+
+        with mock.patch.object(pull_progress, "PullProgressPoller", Recorder), \
+             mock.patch.object(mutate, "_run_pull_subprocess", fake_pull), \
+             mock.patch.object(mutate.acquisition_service,
+                               "check_destination_space",
+                               return_value=ServiceResult()):
+            job_id = mutate.submit_pull(
+                self.client.app.state.runner, "r/m", needed_bytes=1000,
+                needed_files=["a.gguf"])
+            j = self.wait_job(job_id)
+        self.assertEqual(j["status"], "done")
+        self.assertEqual(events, ["start", "download", "shutdown"])
+
+    def test_pull_job_progress_moves_while_bytes_are_landing(self):
+        """The headline defect: bytes were landing on disk and the job's
+        progress stayed at 0 for the whole transfer."""
+        from modelctl_services.result import ServiceResult
+        from modelctl_web import mutate, pull_progress
+        models_dir, _repo_dir, spool = self._repo_dirs()
+        observed = {}
+
+        def fake_pull(ctx, repo_id, quant_label=None, want_mtp=True,
+                      current=None):
+            (spool / "hash.etag.ab12cd34.incomplete").write_bytes(b"x" * 400)
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                job = self.store.get(ctx.job_id)
+                if job and job["progress"]:
+                    observed["progress"] = job["progress"]
+                    observed["detail"] = job["detail"]
+                    break
+                time.sleep(0.02)
+            return {"profile": "m1"}
+
+        with mock.patch.object(modelctl, "DEFAULT_MODELS_DIR", models_dir), \
+             mock.patch.object(pull_progress, "POLL_INTERVAL_SECONDS", 0.02), \
+             mock.patch.object(mutate, "_run_pull_subprocess", fake_pull), \
+             mock.patch.object(mutate.acquisition_service,
+                               "check_destination_space",
+                               return_value=ServiceResult()):
+            job_id = mutate.submit_pull(
+                self.client.app.state.runner, "r/m", needed_bytes=1000,
+                needed_files=["a.gguf"])
+            j = self.wait_job(job_id)
+        self.assertEqual(j["status"], "done")
+        self.assertAlmostEqual(observed.get("progress", 0), 0.4)
+
+    def test_pull_without_a_measurable_size_says_so_in_the_log(self):
+        from modelctl_services.result import ServiceResult
+        from modelctl_web import mutate
+        with mock.patch.object(mutate, "_run_pull_subprocess",
+                               return_value={"profile": "m1"}), \
+             mock.patch.object(mutate.acquisition_service,
+                               "check_destination_space",
+                               return_value=ServiceResult()):
+            job_id = mutate.submit_pull(self.client.app.state.runner, "r/m")
+            j = self.wait_job(job_id)
+        self.assertEqual(j["status"], "done")
+        self.assertIn("progress bar", j["result"])
+
+    def test_pull_child_runs_unbuffered(self):
+        """The child's per-file lines are the operator's ground truth. A
+        block-buffered child delivers them after the download they were
+        describing, and leaves the poller's filename label empty too."""
+        from modelctl_web import mutate
+        import io as _io
+
+        class FakeProc:
+            returncode = 0
+            pid = 4242
+            stdout = _io.StringIO("Done. Profile 'm1' created.\n")
+
+            def wait(self, timeout=None):
+                return 0
+
+            def poll(self):
+                return 0
+
+        with mock.patch.object(mutate.subprocess, "Popen",
+                               return_value=FakeProc()) as popen:
+            mutate._run_pull_subprocess(TestDownloadHonesty._PullCtx(), "r/m")
+        self.assertEqual(popen.call_args.kwargs["env"]["PYTHONUNBUFFERED"], "1")
+
+
 class TestSyncRetry(WebTestBase):
     """A job that saved config but couldn't reload the router leaves the
     old config serving; the console offers a one-click retry. The retry

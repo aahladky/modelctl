@@ -227,22 +227,25 @@ def create_app(store=None, runner=None, collector=None,
 
     _download_submit_lock = threading.Lock()
 
-    def _selected_quant_bytes(state):
-        """Size of the chosen quant from repo metadata, 0 when unknown.
+    def _quant_download(repo_id, quant_label):
+        """(bytes, repo-relative files) for a quant; (0, []) when unknown.
 
-        Feeds the disk preflight; unknown sizes fail open (the pull is
-        allowed) rather than blocking on a metadata hiccup.
+        Feeds the disk preflight and the download's byte progress bar --
+        the file list is what scopes that measurement to this pull, so a
+        repo dir holding an earlier quant cannot inflate it. Unknown
+        sizes fail open (the pull is allowed, the bar just stays still)
+        rather than blocking on a metadata hiccup.
         """
-        if not (state.repo_id and state.selected_quant):
-            return 0
+        if not (repo_id and quant_label):
+            return 0, []
         try:
-            contents = modelctl.get_repo_contents(state.repo_id)
+            contents = modelctl.get_repo_contents(repo_id)
         except Exception:
-            return 0
+            return 0, []
         for g in contents.get("quant_groups", []):
-            if g.get("label") == state.selected_quant:
-                return g.get("total_size") or 0
-        return 0
+            if g.get("label") == quant_label:
+                return g.get("total_size") or 0, list(g.get("files") or [])
+        return 0, []
 
     def _submit_download(state):
         """Submit the wizard's acquisition job exactly once.
@@ -260,10 +263,12 @@ def create_app(store=None, runner=None, collector=None,
                 state.download_job_id = mutate.submit_import_local(
                     runner, state.local_path)
             elif state.repo_id:
+                needed_bytes, needed_files = _quant_download(
+                    state.repo_id, state.selected_quant)
                 state.download_job_id = mutate.submit_pull(
                     runner, state.repo_id,
                     quant_label=state.selected_quant or None,
-                    needed_bytes=_selected_quant_bytes(state))
+                    needed_bytes=needed_bytes, needed_files=needed_files)
 
     def _refresh_download_outcome(state):
         """Fold the acquisition job's structured result into wizard state.
@@ -579,7 +584,15 @@ def create_app(store=None, runner=None, collector=None,
                     payload = {}
                 if payload.get("repo_id") == repo_id:
                     return {"job": j["id"], "deduplicated": True}
-        return {"job": mutate.submit_pull(runner, repo_id, quant_label=quant or None)}
+        # Same sizing the wizard does, so the shortcut gets the same disk
+        # preflight and the same moving progress bar instead of a job
+        # that reports nothing until it ends. Without a quant label there
+        # is nothing to size and this costs no metadata call.
+        needed_bytes, needed_files = _quant_download(repo_id, quant)
+        return {"job": mutate.submit_pull(runner, repo_id,
+                                          quant_label=quant or None,
+                                          needed_bytes=needed_bytes,
+                                          needed_files=needed_files)}
 
     @app.get("/api/jobs")
     def api_jobs():
