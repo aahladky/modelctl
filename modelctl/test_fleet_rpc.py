@@ -12,6 +12,7 @@ set must be indistinguishable from a checkout that has no fleet at all.
 An "optional" target that quietly perturbs the local plans is not
 optional.
 """
+import inspect
 import json
 import os
 import struct
@@ -321,6 +322,121 @@ class TestAdmissionRefusesOverBudget(FleetStateBase):
             vram_overhead_bytes={"RPC:ph16-71:CUDA0": 2 << 30})
         self.assertEqual(
             modelctl_plans._admission_overflow(claim, usable), {})
+
+
+class TestReservationBudgetsCarryTheFleet(FleetStateBase):
+    """A remote placement is charged against the node's declared budget.
+
+    The gap this pins (2026-08-04): `vram_admission_bytes()` carries
+    remote keys, but every reservation budget map was built from local
+    cards plus RAM alone. `budgets.get(dev, 0)` therefore read 0 for each
+    fleet device and EVERY rpc plan was refused -- "needs 10.2 GiB on
+    RPC:ph16-71-cuda0:CUDA0 but only 0.0 GiB is free" -- at plan test and
+    at managed serve alike, so the ladder could emit rung plans that
+    nothing was ever able to run.
+
+    Local cards contribute live free bytes minus their reserve; a remote
+    device contributes the operator's declared ceiling, because we cannot
+    see another machine's free bytes and the ceiling is what that machine
+    agreed to lend.
+    """
+
+    def _snap(self):
+        import modelctl_hardware
+        gpu = modelctl_hardware.GpuSnapshot(
+            device="SYCL0", name="local", total_bytes=16 << 30,
+            free_bytes=8 << 30, reserve_bytes=1 << 30, enabled=True,
+            role="primary", bandwidth_gbs=None)
+        return modelctl_hardware.HardwareSnapshot(
+            captured_at=0.0, fingerprint="fp", gpus=(gpu,),
+            ram_total_bytes=64 << 30, ram_available_bytes=32 << 30,
+            ram_reserve_bytes=2 << 30, storage=(), backend_fingerprints={})
+
+    def _present_node(self, budget):
+        fleet.save_fleet([a_node(budget=budget)])
+        fleet.refresh_presence(connect=lambda h, p, t: FakeSocket())
+
+    def _budgets(self):
+        import modelctl_hardware
+        return modelctl_hardware.reservation_budgets(self._snap())
+
+    def setUp(self):
+        super().setUp()
+        import modelctl_runtime
+        self.rdb = modelctl_runtime.RuntimeDB(Path(self.tmp) / "rt.db")
+
+    def _verdict(self, claim_vram):
+        return self.rdb.acquire_reservation_verdict(
+            "fixture", "p1", {"vram_bytes": claim_vram, "ram_bytes": 0},
+            os.getpid(), budgets=self._budgets())
+
+    def test_map_carries_local_free_ram_and_the_remote_ceiling(self):
+        self._present_node(8 << 30)
+        budgets = self._budgets()
+        self.assertEqual(budgets["SYCL0"], 7 << 30)
+        self.assertEqual(budgets["RAM"], 30 << 30)
+        self.assertEqual(budgets["RPC:ph16-71:CUDA0"], 8 << 30)
+
+    def test_an_absent_node_contributes_nothing(self):
+        fleet.save_fleet([a_node(budget=8 << 30)])  # never probed
+        self.assertNotIn("RPC:ph16-71:CUDA0", self._budgets())
+
+    def test_a_remote_claim_inside_the_budget_is_reserved(self):
+        self._present_node(8 << 30)
+        res, denial = self._verdict(
+            {"SYCL0": 2 << 30, "RPC:ph16-71:CUDA0": 6 << 30})
+        self.assertIsNone(denial)
+        self.assertIsNotNone(res)
+
+    def test_a_remote_claim_over_the_budget_is_a_capacity_denial(self):
+        self._present_node(4 << 30)
+        res, denial = self._verdict({"RPC:ph16-71:CUDA0": 6 << 30})
+        self.assertIsNone(res)
+        self.assertEqual(denial["code"], "insufficient_vram")
+        self.assertEqual(denial["resource"], "RPC:ph16-71:CUDA0")
+        self.assertEqual(denial["need_bytes"], 6 << 30)
+        self.assertEqual(denial["budget_bytes"], 4 << 30)
+        # A pure capacity shortfall with nobody else holding anything --
+        # the distinction f94c9e9 exists to make.
+        self.assertEqual(denial["holders"], [])
+
+
+class TestBothChargingPathsUseTheSharedBuilder(unittest.TestCase):
+    """The reservation map is built in ONE place, at every call site.
+
+    The 2026-08-04 bug was never in the map builder -- it was that
+    `modelctl_tune.test_launch_plan` and `modelctl_worker.worker_main`
+    each built their own local-only map, and both forgot the fleet. A
+    test that only exercises `reservation_budgets` directly stays green
+    when either call site is re-inlined, which is exactly how the bug
+    arrived the first time.
+
+    A STRUCTURAL pin, deliberately: driving either function to its
+    reservation call needs a profile, a compiled plan set, a hardware
+    probe and a spawned server, so a behavioural test here would assert
+    mostly about its own mocks. What actually needs guarding is narrow --
+    that neither function rebuilds the map by hand -- and reading the
+    source says exactly that and nothing more.
+    """
+
+    INLINE = "g.free_bytes - g.reserve_bytes"
+    SHARED = "modelctl_hardware.reservation_budgets(snap)"
+
+    def _assert_delegates(self, fn):
+        src = inspect.getsource(fn)
+        self.assertIn(self.SHARED, src,
+                      f"{fn.__qualname__} must charge the shared builder")
+        self.assertNotIn(self.INLINE, src,
+                         f"{fn.__qualname__} rebuilt the budget map by hand; "
+                         "a local-only map denies every remote claim")
+
+    def test_the_plan_test_path_delegates(self):
+        import modelctl_tune
+        self._assert_delegates(modelctl_tune.test_launch_plan)
+
+    def test_the_managed_worker_path_delegates(self):
+        import modelctl_worker
+        self._assert_delegates(modelctl_worker.worker_main)
 
 
 class TestFallbackIsByteIdentical(FleetStateBase):

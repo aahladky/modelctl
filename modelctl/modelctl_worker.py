@@ -151,9 +151,7 @@ def worker_main(profile_name, port):
     # resources (minus configured reserves and other workers' pending
     # claims). Admission itself is re-checked atomically at reservation time.
     rdb = modelctl_runtime.RuntimeDB()
-    budgets = {g.device: max(0, g.free_bytes - g.reserve_bytes)
-               for g in modelctl_hardware.enabled_gpus(snap)}
-    budgets["RAM"] = max(0, snap.ram_available_bytes - snap.ram_reserve_bytes)
+    budgets = modelctl_hardware.reservation_budgets(snap)
     pending_by_res = {}
     for cl in rdb.pending_claims(exclude_pid=os.getpid()):
         for dev, b in cl.get("vram_bytes", {}).items():

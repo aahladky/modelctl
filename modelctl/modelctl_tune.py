@@ -600,9 +600,7 @@ def test_launch_plan(profile_name, plan_id, log=print, prompt=None,
              "vram_cache_bytes": dict(plan.claim.vram_cache_bytes),
              "ram_resident_bytes": plan.claim.ram_resident_bytes,
              "mmap_bytes": plan.claim.mmap_bytes}
-    budgets = {g.device: max(0, g.free_bytes - g.reserve_bytes)
-               for g in modelctl_hardware.enabled_gpus(snap)}
-    budgets["RAM"] = max(0, snap.ram_available_bytes - snap.ram_reserve_bytes)
+    budgets = modelctl_hardware.reservation_budgets(snap)
     reservation, denial = rdb.acquire_reservation_verdict(
         profile_name, plan_id, claim, os.getpid(), budgets=budgets)
     if reservation is None:

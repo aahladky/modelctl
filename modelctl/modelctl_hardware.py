@@ -300,3 +300,65 @@ def enabled_gpus(snapshot):
     gpus = [g for g in snapshot.gpus if g.enabled]
     gpus.sort(key=lambda g: (g.role != "primary", -(g.total_bytes or 0)))
     return gpus
+
+
+def reservation_budgets(snapshot) -> dict:
+    """{resource: bytes} a reservation may charge against, right now.
+
+    The one builder of the RESERVATION map, because a resource missing
+    from it reads as ZERO budget at `acquire_reservation_verdict` -- so a
+    map that forgets a device denies every claim naming it. That is
+    exactly what remote placements hit: the plan test and the managed
+    worker each built their own local-only map, while the claim they
+    charged carried the fleet's admission keys, so every rpc plan was
+    refused for wanting bytes on a device nobody had budgeted
+    (2026-08-04).
+
+    Deliberately NOT the same map as its two siblings, which answer
+    different questions and must not be collapsed into this one:
+    `modelctl_plans._usable_vram_map` is capacity-based (limit_pct of the
+    card) because plan admission must not flap with desktop load, and
+    `modelctl_matrix._budgets` is total-based for the same reason about
+    routing.
+
+    Local cards contribute live free bytes minus their configured
+    reserve. Remote fleet devices contribute the operator's declared
+    ceiling instead: we cannot see another machine's free bytes, and the
+    ceiling is the number that machine agreed to lend. An unreachable
+    node contributes nothing -- `admission_budgets` reads presence, so a
+    closed laptop cannot hold a reservation open. Remote keys are
+    namespaced `RPC:<node>:<device>` by `modelctl_fleet.admission_key`,
+    so the merge below can only add keys, never shadow a local one.
+
+    KNOWN LIMIT (2026-08-04): a remote ceiling is not reduced by another
+    worker's ACTIVE reservation. A local card is protected implicitly --
+    its budget is driver-reported free bytes, so an active allocation is
+    already subtracted -- but no such reading exists for another machine,
+    and `acquire_reservation_verdict` counts only pending/starting
+    claims. Two managed models can therefore both be admitted against one
+    laptop's ceiling. Tracked in moe-review/open-items.md.
+
+    Returns a fresh dict on every call: `modelctl_worker` mutates the
+    returned map in place during its pre-admission re-probe, so this must
+    never become a cached module-level value.
+    """
+    # Imported here rather than at module scope to keep this module a
+    # local-hardware leaf: the fleet reads cluster state from two JSON
+    # files, which is not what "what is in this box" should depend on.
+    # There is no import cycle -- modelctl_fleet imports only fsutil and
+    # paths -- so an ImportError is a real defect and must not be caught.
+    import modelctl_fleet
+    budgets = {g.device: max(0, g.free_bytes - g.reserve_bytes)
+               for g in enabled_gpus(snapshot)}
+    budgets["RAM"] = max(0, snapshot.ram_available_bytes
+                         - snapshot.ram_reserve_bytes)
+    try:
+        budgets.update(modelctl_fleet.admission_budgets())
+    except (OSError, ValueError, TypeError):
+        # The fleet loaders already swallow unreadable/malformed state
+        # and return empty, so this only fires on something they did not
+        # anticipate. Degrading to the local-only map refuses remote
+        # plans, which is the safe direction -- the opposite would admit
+        # a claim against a budget we never confirmed.
+        pass
+    return budgets
