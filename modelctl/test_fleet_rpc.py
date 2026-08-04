@@ -287,6 +287,83 @@ class TestClaimReattribution(unittest.TestCase):
         self.assertIs(modelctl_plans._apply_rpc_placement(c, {}), c)
 
 
+class TestClientBufferNamesFoldIntoAdmissionKeys(unittest.TestCase):
+    """The same remote bytes must not appear under two device names.
+
+    A tier-ladder plan writes its rpc placement into config["extra"] as
+    -ot rules, so `_make_claim` has already attributed those bytes to the
+    llama.cpp-side buffer name ("RPC0[host:port]", or the bare "RPC0"
+    from --device) before `_apply_rpc_placement` runs. Left alongside the
+    admission key, that second name is an unbudgeted device: no budget
+    map contains it, so `acquire_reservation_verdict` reads
+    `budgets.get("RPC0[...]", 0)` -> 0 and denies the plan.
+
+    Observed live 2026-08-04 on the 122B tier-4 ladder plan, whose claim
+    carried RPC0[..:50052] 9.52 GiB and RPC0[..:50053] 15.36 GiB beside
+    the real RPC:ph16-71-cuda0:CUDA0 / RPC:ph16-71-cpu0:CPU keys.
+    """
+
+    # placements is EMPTY on purpose: plan_tiers emits the ladder's
+    # placement as -ot rules in config["extra"] and leaves this list
+    # empty, so the fold cannot be driven off it. Anyone "improving" the
+    # predicate to read the authoritative placements set instead would
+    # silently un-fix this -- with these tests still green if the fixture
+    # pretended otherwise.
+    LADDER = {"rpc": {"admission": {"RPC:n:CUDA0": 6 << 30},
+                      "placements": []}}
+
+    def _ladder_claim(self):
+        # SYCL0 is the LARGEST static holder, matching the live 122B
+        # shape (SYCL0 24.88 GiB vs alias 9.52/24.47). That ordering is
+        # what makes the double-debit visible: the un-fixed loop sorts by
+        # descending static and eats the local card first. With the alias
+        # largest, the un-fixed loop exhausts itself on the alias and the
+        # local card survives by luck -- a fixture that proves nothing.
+        return modelctl_plans.ResourceClaim(
+            vram_bytes={"SYCL0": 8 << 30, "RPC0[h:1]": 6 << 30, "RPC0": 0},
+            ram_bytes=0, storage_mode="mmap", expected_context=8192,
+            vram_static_bytes={"SYCL0": 8 << 30, "RPC0[h:1]": 6 << 30},
+            vram_kv_bytes={"SYCL0": 0}, vram_overhead_bytes={"SYCL0": 0})
+
+    def test_no_client_side_name_survives(self):
+        out = modelctl_plans._apply_rpc_placement(self._ladder_claim(),
+                                                  self.LADDER)
+        self.assertNotIn("RPC0[h:1]", out.vram_bytes)
+        self.assertNotIn("RPC0", out.vram_bytes)
+        self.assertEqual(out.vram_bytes["RPC:n:CUDA0"], 6 << 30)
+
+    def test_every_remaining_key_is_local_or_an_admission_key(self):
+        out = modelctl_plans._apply_rpc_placement(self._ladder_claim(),
+                                                  self.LADDER)
+        for dev in out.vram_bytes:
+            if dev.startswith("RPC"):
+                self.assertTrue(fleet.is_remote_key(dev), dev)
+
+    def test_the_local_card_keeps_bytes_it_never_gave_up(self):
+        # The -ot rule had already moved these 6 GiB off SYCL0. Debiting
+        # the local card a second time would understate the local claim
+        # and let an oversized plan pass local admission.
+        out = modelctl_plans._apply_rpc_placement(self._ladder_claim(),
+                                                  self.LADDER)
+        self.assertEqual(out.vram_bytes["SYCL0"], 8 << 30)
+        self.assertEqual(out.vram_static_bytes["SYCL0"], 8 << 30)
+
+    def test_the_single_rung_path_still_debits_the_local_card(self):
+        # _compile_rpc_plans does NOT write -ot into extra, so no client
+        # name exists and the old re-attribution must be unchanged.
+        claim = modelctl_plans.ResourceClaim(
+            vram_bytes={"CUDA0": 10 << 30}, ram_bytes=0, storage_mode="mmap",
+            expected_context=8192,
+            vram_static_bytes={"CUDA0": 8 << 30},
+            vram_kv_bytes={"CUDA0": 1 << 30},
+            vram_overhead_bytes={"CUDA0": 1 << 30})
+        out = modelctl_plans._apply_rpc_placement(
+            claim, {"rpc": {"admission": {"RPC:n:CUDA0": 4 << 30}}})
+        self.assertEqual(out.vram_static_bytes["CUDA0"], 4 << 30)
+        self.assertEqual(out.vram_bytes["CUDA0"], 6 << 30)
+        self.assertEqual(out.vram_bytes["RPC:n:CUDA0"], 4 << 30)
+
+
 class TestAdmissionRefusesOverBudget(FleetStateBase):
     """Per-node budgets ride the existing admission machinery."""
 

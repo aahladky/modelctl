@@ -608,12 +608,44 @@ def _apply_rpc_placement(claim, merged):
     The local side keeps its KV cache and overhead -- only static weight
     bytes move, because only weights are what the -ot rule relocated.
     """
+    import modelctl_fleet
     adm = ((merged or {}).get("rpc") or {}).get("admission") or {}
     if not adm:
         return claim
     static = dict(claim.vram_static_bytes)
     vram = dict(claim.vram_bytes)
-    remaining = sum(adm.values())
+
+    # Fold the client-side buffer names in FIRST. The two plan families
+    # arrive here in different states: _compile_rpc_plans leaves its
+    # placement out of config["extra"], so the moved bytes are still
+    # charged to a local card and the debit below is what relocates them.
+    # A tier-ladder plan writes its placement into extra as -ot rules, so
+    # _make_claim has ALREADY charged those bytes to the llama.cpp-side
+    # buffer name ("RPC0[host:port]", plus the bare "RPC0"/"RPC1" from
+    # --device). Those are the same bytes adm describes, under a second
+    # name no budget map contains -- left in place they read as an extra
+    # unbudgeted device and deny the plan at reservation (2026-08-04).
+    # Matches what the two producers actually emit -- buffer_type_for's
+    # "RPC{i}[{endpoint}]" and device_name_for's "RPC{i}" -- and never an
+    # admission key, which is_remote_key claims by its "RPC:" prefix.
+    # For every planner-emitted config vram[alias] == static[alias] (an
+    # alias reaches the claim only through the -ot `assigned` map, which
+    # seeds both, or through a --device slot whose tensor-split share is
+    # 0), so summing static loses nothing the pop discards.
+    already_remote = 0
+    for dev in [d for d in set(vram) | set(static)
+                if re.match(r"RPC\d", str(d))
+                and not modelctl_fleet.is_remote_key(d)]:
+        already_remote += static.get(dev, 0)
+        vram.pop(dev, None)
+        static.pop(dev, None)
+
+    # Debit only what the -ot rules had NOT already moved off the local
+    # cards. Without the subtraction the fold above and this loop each
+    # relocate the same bytes, and the second pass eats a local card's
+    # own resident experts: the 122B ladder plan was charging SYCL0 1.02
+    # GiB instead of 25.9 GiB, understating the local claim by 24.9 GiB.
+    remaining = max(0, sum(adm.values()) - already_remote)
     # Debit the device carrying the most static weight: that is where the
     # relocated layers were otherwise going to sit.
     for dev in sorted(static, key=lambda d: -static[d]):
