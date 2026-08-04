@@ -1,0 +1,2096 @@
+[
+  {
+    "run": 0,
+    "arm": "A",
+    "label": "q122b-fleet-A-r0",
+    "metrics": {
+      "arm": "A",
+      "label": "q122b-fleet-A-r0",
+      "argv": [
+        "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+        "--port",
+        "9502",
+        "--model",
+        "/home/aaron/models/unsloth/Qwen3.5-122B-A10B-MTP-GGUF/UD-Q4_K_M/Qwen3.5-122B-A10B-UD-Q4_K_M-00001-of-00003.gguf",
+        "--flash-attn",
+        "auto",
+        "--jinja",
+        "--parallel",
+        "1",
+        "-ngl",
+        "999",
+        "-c",
+        "8192",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "8,3",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0",
+        "--fit",
+        "off",
+        "--device",
+        "SYCL0,SYCL1",
+        "-ot",
+        "blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_shexp=SYCL0,blk\\.1[5-9]\\.ffn_.*_shexp=SYCL1,ffn_.*_shexp=SYCL0,blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_exps=SYCL0,blk\\.1[5-9]\\.ffn_.*_exps=SYCL1,ffn_.*_exps=CPU"
+      ],
+      "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+      "before": {
+        "rig_MemFree_kB": 9638616,
+        "rig_MemAvailable_kB": 22769508,
+        "rig_Cached_kB": 13144856,
+        "rig_rx_bytes": 173282118631,
+        "rig_tx_bytes": 28429755209,
+        "laptop_MemFree_kB": 338560,
+        "laptop_MemAvailable_kB": 30099828,
+        "laptop_Cached_kB": 29800316,
+        "laptop_rx_bytes": 619546885,
+        "laptop_tx_bytes": 82772677937
+      },
+      "pid": 3963533,
+      "load_seconds": 55.935389041900635,
+      "after_load": {
+        "rig_MemFree_kB": 521504,
+        "rig_MemAvailable_kB": 25856584,
+        "rig_Cached_kB": 25474352,
+        "rig_rx_bytes": 173282400528,
+        "rig_tx_bytes": 28431771976,
+        "laptop_MemFree_kB": 349924,
+        "laptop_MemAvailable_kB": 30112232,
+        "laptop_Cached_kB": 29801176,
+        "laptop_rx_bytes": 619610095,
+        "laptop_tx_bytes": 82772754784
+      },
+      "warmup_gen_tps": 3.9228930846137393,
+      "measured_wall_s": 29.42372179031372,
+      "generation_tps": 5.8989083793532675,
+      "prompt_tps": 5.706055655310665,
+      "predicted_n": 128,
+      "prompt_n": 44,
+      "stop_type": "limit",
+      "net_before_measured": {
+        "rig_MemFree_kB": 407732,
+        "rig_MemAvailable_kB": 25833688,
+        "rig_Cached_kB": 25581044,
+        "rig_rx_bytes": 173282506228,
+        "rig_tx_bytes": 28431801168,
+        "laptop_MemFree_kB": 335900,
+        "laptop_MemAvailable_kB": 30099132,
+        "laptop_Cached_kB": 29802092,
+        "laptop_rx_bytes": 619637433,
+        "laptop_tx_bytes": 82772787436
+      },
+      "net_after_measured": {
+        "rig_MemFree_kB": 315952,
+        "rig_MemAvailable_kB": 25412392,
+        "rig_Cached_kB": 25325024,
+        "rig_rx_bytes": 173282577403,
+        "rig_tx_bytes": 28431855910,
+        "laptop_MemFree_kB": 352672,
+        "laptop_MemAvailable_kB": 30116272,
+        "laptop_Cached_kB": 29802460,
+        "laptop_rx_bytes": 619675026,
+        "laptop_tx_bytes": 82772831695
+      },
+      "net_delta_measured": {
+        "rig_rx_bytes": 71175,
+        "rig_tx_bytes": 54742,
+        "laptop_rx_bytes": 37593,
+        "laptop_tx_bytes": 44259
+      },
+      "exit_code": 0,
+      "port_free_after": true,
+      "after": {
+        "rig_MemFree_kB": 1188216,
+        "rig_MemAvailable_kB": 26119488,
+        "rig_Cached_kB": 24905524,
+        "rig_rx_bytes": 173282584018,
+        "rig_tx_bytes": 28431861616,
+        "laptop_MemFree_kB": 346624,
+        "laptop_MemAvailable_kB": 30110232,
+        "laptop_Cached_kB": 29802464,
+        "laptop_rx_bytes": 619680716,
+        "laptop_tx_bytes": 82772838373
+      },
+      "finished": 1785811732.478886
+    },
+    "load": {
+      "samples": 22,
+      "interval_seconds": 5.0,
+      "started": 1785811625.9089415,
+      "finished": 1785811732.4821143,
+      "missed": 0,
+      "loadavg_1m": {
+        "min": 5.01,
+        "max": 7.61,
+        "mean": 5.917727272727273,
+        "n": 22
+      },
+      "loadavg_5m": {
+        "min": 3.16,
+        "max": 4.45,
+        "mean": 3.7209090909090907,
+        "n": 22
+      },
+      "loadavg_15m": {
+        "min": 3.1,
+        "max": 3.57,
+        "mean": 3.3045454545454547,
+        "n": 22
+      },
+      "runnable": {
+        "min": 2,
+        "max": 16,
+        "mean": 7.681818181818182,
+        "n": 22
+      },
+      "procs": {
+        "min": 3572,
+        "max": 3763,
+        "mean": 3625.4545454545455,
+        "n": 22
+      },
+      "mem_available_bytes": {
+        "min": 23316217856,
+        "max": 26670391296,
+        "mean": 25947504081.454544,
+        "n": 22
+      },
+      "mem_cached_bytes": {
+        "min": 13460303872,
+        "max": 26466009088,
+        "mean": 25128148805.81818,
+        "n": 22
+      },
+      "swap_free_bytes": {
+        "min": 63992741888,
+        "max": 66288496640,
+        "mean": 65844986600.72727,
+        "n": 22
+      }
+    }
+  },
+  {
+    "run": 0,
+    "arm": "B",
+    "label": "q122b-fleet-B-r0",
+    "metrics": {
+      "arm": "B",
+      "label": "q122b-fleet-B-r0",
+      "argv": [
+        "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+        "--rpc",
+        "192.168.0.76:50052",
+        "--port",
+        "9502",
+        "--model",
+        "/home/aaron/models/unsloth/Qwen3.5-122B-A10B-MTP-GGUF/UD-Q4_K_M/Qwen3.5-122B-A10B-UD-Q4_K_M-00001-of-00003.gguf",
+        "--flash-attn",
+        "auto",
+        "--jinja",
+        "--parallel",
+        "1",
+        "-ngl",
+        "999",
+        "-c",
+        "8192",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "8,3,0",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0",
+        "--fit",
+        "off",
+        "--device",
+        "SYCL0,SYCL1,RPC0",
+        "-ot",
+        "blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_shexp=SYCL0,blk\\.1[5-9]\\.ffn_.*_shexp=SYCL1,ffn_.*_shexp=SYCL0,blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_exps=SYCL0,blk\\.1[5-9]\\.ffn_.*_exps=SYCL1,blk\\.(?:4[2-8])\\.ffn_.*_exps=RPC0[192.168.0.76:50052],ffn_.*_exps=CPU"
+      ],
+      "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+      "before": {
+        "rig_MemFree_kB": 1341276,
+        "rig_MemAvailable_kB": 26151184,
+        "rig_Cached_kB": 24783480,
+        "rig_rx_bytes": 173282590618,
+        "rig_tx_bytes": 28431867402,
+        "laptop_MemFree_kB": 332536,
+        "laptop_MemAvailable_kB": 30096144,
+        "laptop_Cached_kB": 29802468,
+        "laptop_rx_bytes": 619686158,
+        "laptop_tx_bytes": 82772844507
+      },
+      "pid": 3998652,
+      "load_seconds": 101.13017559051514,
+      "after_load": {
+        "rig_MemFree_kB": 1087432,
+        "rig_MemAvailable_kB": 25812148,
+        "rig_Cached_kB": 24788044,
+        "rig_rx_bytes": 173301026294,
+        "rig_tx_bytes": 38768957455,
+        "laptop_MemFree_kB": 4824148,
+        "laptop_MemAvailable_kB": 30099640,
+        "laptop_Cached_kB": 25185392,
+        "laptop_rx_bytes": 11416406418,
+        "laptop_tx_bytes": 82790976086
+      },
+      "warmup_gen_tps": 6.300184910427121,
+      "measured_wall_s": 23.868542909622192,
+      "generation_tps": 6.67571295310489,
+      "prompt_tps": 9.391222536543596,
+      "predicted_n": 128,
+      "prompt_n": 44,
+      "stop_type": "limit",
+      "net_before_measured": {
+        "rig_MemFree_kB": 610788,
+        "rig_MemAvailable_kB": 25726460,
+        "rig_Cached_kB": 25095836,
+        "rig_rx_bytes": 173306966204,
+        "rig_tx_bytes": 38777826058,
+        "laptop_MemFree_kB": 4812260,
+        "laptop_MemAvailable_kB": 30095088,
+        "laptop_Cached_kB": 25192692,
+        "laptop_rx_bytes": 11425624866,
+        "laptop_tx_bytes": 82796670946
+      },
+      "net_after_measured": {
+        "rig_MemFree_kB": 2300336,
+        "rig_MemAvailable_kB": 25989036,
+        "rig_Cached_kB": 23723640,
+        "rig_rx_bytes": 173320565704,
+        "rig_tx_bytes": 38799557473,
+        "laptop_MemFree_kB": 4799132,
+        "laptop_MemAvailable_kB": 30084800,
+        "laptop_Cached_kB": 25194272,
+        "laptop_rx_bytes": 10478676,
+        "laptop_tx_bytes": 5741566
+      },
+      "net_delta_measured": {
+        "rig_rx_bytes": 13599500,
+        "rig_tx_bytes": 21731415,
+        "laptop_rx_bytes": -11415146190,
+        "laptop_tx_bytes": -82790929380
+      },
+      "exit_code": 0,
+      "port_free_after": true,
+      "after": {
+        "rig_MemFree_kB": 3150724,
+        "rig_MemAvailable_kB": 26557956,
+        "rig_Cached_kB": 23401796,
+        "rig_rx_bytes": 173320659802,
+        "rig_tx_bytes": 38799569854,
+        "laptop_MemFree_kB": 4804076,
+        "laptop_MemAvailable_kB": 30089960,
+        "laptop_Cached_kB": 25194480,
+        "laptop_rx_bytes": 10495678,
+        "laptop_tx_bytes": 5764059
+      },
+      "finished": 1785811871.5891867
+    },
+    "load": {
+      "samples": 28,
+      "interval_seconds": 5.0,
+      "started": 1785811732.4828572,
+      "finished": 1785811871.5901983,
+      "missed": 0,
+      "loadavg_1m": {
+        "min": 4.08,
+        "max": 7.24,
+        "mean": 5.421785714285714,
+        "n": 28
+      },
+      "loadavg_5m": {
+        "min": 4.16,
+        "max": 4.66,
+        "mean": 4.365,
+        "n": 28
+      },
+      "loadavg_15m": {
+        "min": 3.55,
+        "max": 3.75,
+        "mean": 3.601785714285714,
+        "n": 28
+      },
+      "runnable": {
+        "min": 2,
+        "max": 16,
+        "mean": 4.75,
+        "n": 28
+      },
+      "procs": {
+        "min": 3563,
+        "max": 3643,
+        "mean": 3602.035714285714,
+        "n": 28
+      },
+      "mem_available_bytes": {
+        "min": 25567502336,
+        "max": 27132518400,
+        "mean": 26343555949.714287,
+        "n": 28
+      },
+      "mem_cached_bytes": {
+        "min": 18280058880,
+        "max": 26917552128,
+        "mean": 23913858048.0,
+        "n": 28
+      },
+      "swap_free_bytes": {
+        "min": 65764098048,
+        "max": 66308296704,
+        "mean": 66114931858.28571,
+        "n": 28
+      }
+    }
+  },
+  {
+    "run": 0,
+    "arm": "C",
+    "label": "q122b-fleet-C-r0",
+    "metrics": {
+      "arm": "C",
+      "label": "q122b-fleet-C-r0",
+      "argv": [
+        "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+        "--rpc",
+        "192.168.0.76:50053",
+        "--port",
+        "9502",
+        "--model",
+        "/home/aaron/models/unsloth/Qwen3.5-122B-A10B-MTP-GGUF/UD-Q4_K_M/Qwen3.5-122B-A10B-UD-Q4_K_M-00001-of-00003.gguf",
+        "--flash-attn",
+        "auto",
+        "--jinja",
+        "--parallel",
+        "1",
+        "-ngl",
+        "999",
+        "-c",
+        "8192",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "8,3,0",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0",
+        "--fit",
+        "off",
+        "--device",
+        "SYCL0,SYCL1,RPC0",
+        "-ot",
+        "blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_shexp=SYCL0,blk\\.1[5-9]\\.ffn_.*_shexp=SYCL1,ffn_.*_shexp=SYCL0,blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_exps=SYCL0,blk\\.1[5-9]\\.ffn_.*_exps=SYCL1,blk\\.(?:3[3-9]|4[0-8])\\.ffn_.*_exps=RPC0[192.168.0.76:50053],ffn_.*_exps=CPU"
+      ],
+      "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+      "before": {
+        "rig_MemFree_kB": 3287736,
+        "rig_MemAvailable_kB": 26620472,
+        "rig_Cached_kB": 23326000,
+        "rig_rx_bytes": 173320666249,
+        "rig_tx_bytes": 38799575386,
+        "laptop_MemFree_kB": 4801616,
+        "laptop_MemAvailable_kB": 30087508,
+        "laptop_Cached_kB": 25194476,
+        "laptop_rx_bytes": 10501175,
+        "laptop_tx_bytes": 5770268
+      },
+      "pid": 4048660,
+      "load_seconds": 174.1495635509491,
+      "after_load": {
+        "rig_MemFree_kB": 756436,
+        "rig_MemAvailable_kB": 26071948,
+        "rig_Cached_kB": 25278888,
+        "rig_rx_bytes": 173363870935,
+        "rig_tx_bytes": 62291408341,
+        "laptop_MemFree_kB": 369124,
+        "laptop_MemAvailable_kB": 10986100,
+        "laptop_Cached_kB": 10901108,
+        "laptop_rx_bytes": 24546628229,
+        "laptop_tx_bytes": 48620326
+      },
+      "warmup_gen_tps": 7.488848636327468,
+      "measured_wall_s": 15.13437557220459,
+      "generation_tps": 9.6658996875951,
+      "prompt_tps": 23.271964106168813,
+      "predicted_n": 128,
+      "prompt_n": 44,
+      "stop_type": "limit",
+      "net_before_measured": {
+        "rig_MemFree_kB": 1816708,
+        "rig_MemAvailable_kB": 25703024,
+        "rig_Cached_kB": 23859240,
+        "rig_rx_bytes": 173378897130,
+        "rig_tx_bytes": 62313639521,
+        "laptop_MemFree_kB": 292908,
+        "laptop_MemAvailable_kB": 10256648,
+        "laptop_Cached_kB": 10257664,
+        "laptop_rx_bytes": 24569759870,
+        "laptop_tx_bytes": 62971882
+      },
+      "net_after_measured": {
+        "rig_MemFree_kB": 5061344,
+        "rig_MemAvailable_kB": 25625200,
+        "rig_Cached_kB": 20567488,
+        "rig_rx_bytes": 173412751035,
+        "rig_tx_bytes": 62367673392,
+        "laptop_MemFree_kB": 269024,
+        "laptop_MemAvailable_kB": 10255688,
+        "laptop_Cached_kB": 10280404,
+        "laptop_rx_bytes": 24625925299,
+        "laptop_tx_bytes": 95472158
+      },
+      "net_delta_measured": {
+        "rig_rx_bytes": 33853905,
+        "rig_tx_bytes": 54033871,
+        "laptop_rx_bytes": 56165429,
+        "laptop_tx_bytes": 32500276
+      },
+      "exit_code": 0,
+      "port_free_after": true,
+      "after": {
+        "rig_MemFree_kB": 6248340,
+        "rig_MemAvailable_kB": 26380812,
+        "rig_Cached_kB": 20095348,
+        "rig_rx_bytes": 173412758199,
+        "rig_tx_bytes": 62367679931,
+        "laptop_MemFree_kB": 20351040,
+        "laptop_MemAvailable_kB": 30338544,
+        "laptop_Cached_kB": 10281204,
+        "laptop_rx_bytes": 24625932093,
+        "laptop_tx_bytes": 95479402
+      },
+      "finished": 1785812073.6238759
+    },
+    "load": {
+      "samples": 41,
+      "interval_seconds": 5.0,
+      "started": 1785811871.5907993,
+      "finished": 1785812073.6247547,
+      "missed": 0,
+      "loadavg_1m": {
+        "min": 2.7,
+        "max": 6.14,
+        "mean": 4.048292682926829,
+        "n": 41
+      },
+      "loadavg_5m": {
+        "min": 3.85,
+        "max": 4.73,
+        "mean": 4.280731707317073,
+        "n": 41
+      },
+      "loadavg_15m": {
+        "min": 3.6,
+        "max": 3.8,
+        "mean": 3.703658536585366,
+        "n": 41
+      },
+      "runnable": {
+        "min": 2,
+        "max": 11,
+        "mean": 3.658536585365854,
+        "n": 41
+      },
+      "procs": {
+        "min": 3524,
+        "max": 3606,
+        "mean": 3573.0,
+        "n": 41
+      },
+      "mem_available_bytes": {
+        "min": 25832546304,
+        "max": 27311804416,
+        "mean": 26344051187.512196,
+        "n": 41
+      },
+      "mem_cached_bytes": {
+        "min": 20082688000,
+        "max": 26998198272,
+        "mean": 23729943027.512196,
+        "n": 41
+      },
+      "swap_free_bytes": {
+        "min": 66046214144,
+        "max": 66272509952,
+        "mean": 66132057212.87805,
+        "n": 41
+      }
+    }
+  },
+  {
+    "run": 0,
+    "arm": "D",
+    "label": "q122b-fleet-D-r0",
+    "metrics": {
+      "arm": "D",
+      "label": "q122b-fleet-D-r0",
+      "argv": [
+        "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+        "--rpc",
+        "192.168.0.76:50052,192.168.0.76:50053",
+        "--port",
+        "9502",
+        "--model",
+        "/home/aaron/models/unsloth/Qwen3.5-122B-A10B-MTP-GGUF/UD-Q4_K_M/Qwen3.5-122B-A10B-UD-Q4_K_M-00001-of-00003.gguf",
+        "--flash-attn",
+        "auto",
+        "--jinja",
+        "--parallel",
+        "1",
+        "-ngl",
+        "999",
+        "-c",
+        "8192",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "8,3,0,0",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0",
+        "--fit",
+        "off",
+        "--device",
+        "SYCL0,SYCL1,RPC0,RPC1",
+        "-ot",
+        "blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_shexp=SYCL0,blk\\.1[5-9]\\.ffn_.*_shexp=SYCL1,ffn_.*_shexp=SYCL0,blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_exps=SYCL0,blk\\.1[5-9]\\.ffn_.*_exps=SYCL1,blk\\.(?:4[2-8])\\.ffn_.*_exps=RPC0[192.168.0.76:50052],blk\\.(?:2[6-9]|3[0-9]|4[01])\\.ffn_.*_exps=RPC0[192.168.0.76:50053],ffn_.*_exps=CPU"
+      ],
+      "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+      "before": {
+        "rig_MemFree_kB": 6219612,
+        "rig_MemAvailable_kB": 26357540,
+        "rig_Cached_kB": 20100936,
+        "rig_rx_bytes": 173412764513,
+        "rig_tx_bytes": 62367685299,
+        "laptop_MemFree_kB": 20345244,
+        "laptop_MemAvailable_kB": 30333440,
+        "laptop_Cached_kB": 10281900,
+        "laptop_rx_bytes": 24625937595,
+        "laptop_tx_bytes": 95485536
+      },
+      "pid": 4121150,
+      "load_seconds": 138.1137499809265,
+      "after_load": {
+        "rig_MemFree_kB": 479724,
+        "rig_MemAvailable_kB": 25617368,
+        "rig_Cached_kB": 25120116,
+        "rig_rx_bytes": 173432214660,
+        "rig_tx_bytes": 72602088568,
+        "laptop_MemFree_kB": 763280,
+        "laptop_MemAvailable_kB": 7483412,
+        "laptop_Cached_kB": 7006736,
+        "laptop_rx_bytes": 35315408835,
+        "laptop_tx_bytes": 114544655
+      },
+      "warmup_gen_tps": 7.7222891085075736,
+      "measured_wall_s": 13.803125143051147,
+      "generation_tps": 10.518522913410616,
+      "prompt_tps": 26.947937809059162,
+      "predicted_n": 128,
+      "prompt_n": 44,
+      "stop_type": "limit",
+      "net_before_measured": {
+        "rig_MemFree_kB": 3374080,
+        "rig_MemAvailable_kB": 25603916,
+        "rig_Cached_kB": 22195868,
+        "rig_rx_bytes": 173453968682,
+        "rig_tx_bytes": 72634500283,
+        "laptop_MemFree_kB": 757208,
+        "laptop_MemAvailable_kB": 7479188,
+        "laptop_Cached_kB": 7008464,
+        "laptop_rx_bytes": 35349146357,
+        "laptop_tx_bytes": 135448333
+      },
+      "net_after_measured": {
+        "rig_MemFree_kB": 4394272,
+        "rig_MemAvailable_kB": 25743432,
+        "rig_Cached_kB": 21345892,
+        "rig_rx_bytes": 173503596937,
+        "rig_tx_bytes": 72713700932,
+        "laptop_MemFree_kB": 750884,
+        "laptop_MemAvailable_kB": 7475572,
+        "laptop_Cached_kB": 7011068,
+        "laptop_rx_bytes": 35431488504,
+        "laptop_tx_bytes": 183009297
+      },
+      "net_delta_measured": {
+        "rig_rx_bytes": 49628255,
+        "rig_tx_bytes": 79200649,
+        "laptop_rx_bytes": 82342147,
+        "laptop_tx_bytes": 47560964
+      },
+      "exit_code": 0,
+      "port_free_after": true,
+      "after": {
+        "rig_MemFree_kB": 5280236,
+        "rig_MemAvailable_kB": 26468228,
+        "rig_Cached_kB": 21156104,
+        "rig_rx_bytes": 173503614040,
+        "rig_tx_bytes": 72713714976,
+        "laptop_MemFree_kB": 23586464,
+        "laptop_MemAvailable_kB": 30311540,
+        "laptop_Cached_kB": 7011480,
+        "laptop_rx_bytes": 35431502295,
+        "laptop_tx_bytes": 183024342
+      },
+      "finished": 1785812235.6423893
+    },
+    "load": {
+      "samples": 33,
+      "interval_seconds": 5.0,
+      "started": 1785812073.62576,
+      "finished": 1785812235.646306,
+      "missed": 0,
+      "loadavg_1m": {
+        "min": 3.29,
+        "max": 6.4,
+        "mean": 4.518181818181818,
+        "n": 33
+      },
+      "loadavg_5m": {
+        "min": 3.99,
+        "max": 4.67,
+        "mean": 4.254848484848485,
+        "n": 33
+      },
+      "loadavg_15m": {
+        "min": 3.72,
+        "max": 3.96,
+        "mean": 3.789393939393939,
+        "n": 33
+      },
+      "runnable": {
+        "min": 2,
+        "max": 11,
+        "mean": 4.484848484848484,
+        "n": 33
+      },
+      "procs": {
+        "min": 3520,
+        "max": 3583,
+        "mean": 3545.151515151515,
+        "n": 33
+      },
+      "mem_available_bytes": {
+        "min": 25988599808,
+        "max": 27301306368,
+        "mean": 26533660113.454544,
+        "n": 33
+      },
+      "mem_cached_bytes": {
+        "min": 20583358464,
+        "max": 27145478144,
+        "mean": 24743822553.21212,
+        "n": 33
+      },
+      "swap_free_bytes": {
+        "min": 66052620288,
+        "max": 66298232832,
+        "mean": 66139181552.48485,
+        "n": 33
+      }
+    }
+  },
+  {
+    "run": 1,
+    "arm": "D",
+    "label": "q122b-fleet-D-r1",
+    "metrics": {
+      "arm": "D",
+      "label": "q122b-fleet-D-r1",
+      "argv": [
+        "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+        "--rpc",
+        "192.168.0.76:50052,192.168.0.76:50053",
+        "--port",
+        "9502",
+        "--model",
+        "/home/aaron/models/unsloth/Qwen3.5-122B-A10B-MTP-GGUF/UD-Q4_K_M/Qwen3.5-122B-A10B-UD-Q4_K_M-00001-of-00003.gguf",
+        "--flash-attn",
+        "auto",
+        "--jinja",
+        "--parallel",
+        "1",
+        "-ngl",
+        "999",
+        "-c",
+        "8192",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "8,3,0,0",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0",
+        "--fit",
+        "off",
+        "--device",
+        "SYCL0,SYCL1,RPC0,RPC1",
+        "-ot",
+        "blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_shexp=SYCL0,blk\\.1[5-9]\\.ffn_.*_shexp=SYCL1,ffn_.*_shexp=SYCL0,blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_exps=SYCL0,blk\\.1[5-9]\\.ffn_.*_exps=SYCL1,blk\\.(?:4[2-8])\\.ffn_.*_exps=RPC0[192.168.0.76:50052],blk\\.(?:2[6-9]|3[0-9]|4[01])\\.ffn_.*_exps=RPC0[192.168.0.76:50053],ffn_.*_exps=CPU"
+      ],
+      "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+      "before": {
+        "rig_MemFree_kB": 5266792,
+        "rig_MemAvailable_kB": 26462592,
+        "rig_Cached_kB": 21162384,
+        "rig_rx_bytes": 173503620228,
+        "rig_tx_bytes": 72713720278,
+        "laptop_MemFree_kB": 23586080,
+        "laptop_MemAvailable_kB": 30311692,
+        "laptop_Cached_kB": 7012000,
+        "laptop_rx_bytes": 35431507797,
+        "laptop_tx_bytes": 183030476
+      },
+      "pid": 4178425,
+      "load_seconds": 113.21002578735352,
+      "after_load": {
+        "rig_MemFree_kB": 1449492,
+        "rig_MemAvailable_kB": 26043744,
+        "rig_Cached_kB": 24603176,
+        "rig_rx_bytes": 173505510974,
+        "rig_tx_bytes": 72719896306,
+        "laptop_MemFree_kB": 924044,
+        "laptop_MemAvailable_kB": 12135516,
+        "laptop_Cached_kB": 11490128,
+        "laptop_rx_bytes": 35437902063,
+        "laptop_tx_bytes": 184630688
+      },
+      "warmup_gen_tps": 7.302398244503461,
+      "measured_wall_s": 14.2897310256958,
+      "generation_tps": 10.10674219982561,
+      "prompt_tps": 27.229930149040545,
+      "predicted_n": 128,
+      "prompt_n": 44,
+      "stop_type": "limit",
+      "net_before_measured": {
+        "rig_MemFree_kB": 3539140,
+        "rig_MemAvailable_kB": 25652392,
+        "rig_Cached_kB": 22156584,
+        "rig_rx_bytes": 173527282524,
+        "rig_tx_bytes": 72752348589,
+        "laptop_MemFree_kB": 891384,
+        "laptop_MemAvailable_kB": 10426268,
+        "laptop_Cached_kB": 9813512,
+        "laptop_rx_bytes": 35471680192,
+        "laptop_tx_bytes": 205553639
+      },
+      "net_after_measured": {
+        "rig_MemFree_kB": 5240732,
+        "rig_MemAvailable_kB": 25208432,
+        "rig_Cached_kB": 19930284,
+        "rig_rx_bytes": 173576848672,
+        "rig_tx_bytes": 72831545073,
+        "laptop_MemFree_kB": 877252,
+        "laptop_MemAvailable_kB": 9940868,
+        "laptop_Cached_kB": 9342224,
+        "laptop_rx_bytes": 35553976370,
+        "laptop_tx_bytes": 253094799
+      },
+      "net_delta_measured": {
+        "rig_rx_bytes": 49566148,
+        "rig_tx_bytes": 79196484,
+        "laptop_rx_bytes": 82296178,
+        "laptop_tx_bytes": 47541160
+      },
+      "exit_code": 0,
+      "port_free_after": true,
+      "after": {
+        "rig_MemFree_kB": 6067628,
+        "rig_MemAvailable_kB": 26022064,
+        "rig_Cached_kB": 19917580,
+        "rig_rx_bytes": 173576858381,
+        "rig_tx_bytes": 72831553047,
+        "laptop_MemFree_kB": 21239980,
+        "laptop_MemAvailable_kB": 30303688,
+        "laptop_Cached_kB": 9342316,
+        "laptop_rx_bytes": 35553984050,
+        "laptop_tx_bytes": 253102711
+      },
+      "finished": 1785812374.2476604
+    },
+    "load": {
+      "samples": 28,
+      "interval_seconds": 5.0,
+      "started": 1785812235.6478193,
+      "finished": 1785812374.2482684,
+      "missed": 0,
+      "loadavg_1m": {
+        "min": 3.43,
+        "max": 7.03,
+        "mean": 4.845,
+        "n": 28
+      },
+      "loadavg_5m": {
+        "min": 4.21,
+        "max": 4.92,
+        "mean": 4.525714285714286,
+        "n": 28
+      },
+      "loadavg_15m": {
+        "min": 3.89,
+        "max": 4.06,
+        "mean": 3.9614285714285713,
+        "n": 28
+      },
+      "runnable": {
+        "min": 2,
+        "max": 16,
+        "mean": 6.321428571428571,
+        "n": 28
+      },
+      "procs": {
+        "min": 3469,
+        "max": 3570,
+        "mean": 3539.714285714286,
+        "n": 28
+      },
+      "mem_available_bytes": {
+        "min": 25922818048,
+        "max": 27273109504,
+        "mean": 26688012288.0,
+        "n": 28
+      },
+      "mem_cached_bytes": {
+        "min": 20403740672,
+        "max": 26969845760,
+        "mean": 24546220178.285713,
+        "n": 28
+      },
+      "swap_free_bytes": {
+        "min": 66065260544,
+        "max": 66336825344,
+        "mean": 66157362322.28571,
+        "n": 28
+      }
+    }
+  },
+  {
+    "run": 1,
+    "arm": "C",
+    "label": "q122b-fleet-C-r1",
+    "metrics": {
+      "arm": "C",
+      "label": "q122b-fleet-C-r1",
+      "argv": [
+        "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+        "--rpc",
+        "192.168.0.76:50053",
+        "--port",
+        "9502",
+        "--model",
+        "/home/aaron/models/unsloth/Qwen3.5-122B-A10B-MTP-GGUF/UD-Q4_K_M/Qwen3.5-122B-A10B-UD-Q4_K_M-00001-of-00003.gguf",
+        "--flash-attn",
+        "auto",
+        "--jinja",
+        "--parallel",
+        "1",
+        "-ngl",
+        "999",
+        "-c",
+        "8192",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "8,3,0",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0",
+        "--fit",
+        "off",
+        "--device",
+        "SYCL0,SYCL1,RPC0",
+        "-ot",
+        "blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_shexp=SYCL0,blk\\.1[5-9]\\.ffn_.*_shexp=SYCL1,ffn_.*_shexp=SYCL0,blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_exps=SYCL0,blk\\.1[5-9]\\.ffn_.*_exps=SYCL1,blk\\.(?:3[3-9]|4[0-8])\\.ffn_.*_exps=RPC0[192.168.0.76:50053],ffn_.*_exps=CPU"
+      ],
+      "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+      "before": {
+        "rig_MemFree_kB": 6054812,
+        "rig_MemAvailable_kB": 26019556,
+        "rig_Cached_kB": 19927692,
+        "rig_rx_bytes": 173576864569,
+        "rig_tx_bytes": 72831558349,
+        "laptop_MemFree_kB": 21233956,
+        "laptop_MemAvailable_kB": 30297944,
+        "laptop_Cached_kB": 9342612,
+        "laptop_rx_bytes": 35553989620,
+        "laptop_tx_bytes": 253109011
+      },
+      "pid": 34494,
+      "load_seconds": 89.16988468170166,
+      "after_load": {
+        "rig_MemFree_kB": 1036564,
+        "rig_MemAvailable_kB": 25862388,
+        "rig_Cached_kB": 24990588,
+        "rig_rx_bytes": 173578215991,
+        "rig_tx_bytes": 72835817098,
+        "laptop_MemFree_kB": 1336092,
+        "laptop_MemAvailable_kB": 7363772,
+        "laptop_Cached_kB": 6292196,
+        "laptop_rx_bytes": 35558363961,
+        "laptop_tx_bytes": 254218995
+      },
+      "warmup_gen_tps": 7.176263611073423,
+      "measured_wall_s": 14.875158786773682,
+      "generation_tps": 9.943256630948106,
+      "prompt_tps": 22.080306073188183,
+      "predicted_n": 128,
+      "prompt_n": 44,
+      "stop_type": "limit",
+      "net_before_measured": {
+        "rig_MemFree_kB": 876464,
+        "rig_MemAvailable_kB": 25612988,
+        "rig_Cached_kB": 24708000,
+        "rig_rx_bytes": 173593243082,
+        "rig_tx_bytes": 72857947400,
+        "laptop_MemFree_kB": 1345056,
+        "laptop_MemAvailable_kB": 7373636,
+        "laptop_Cached_kB": 6293040,
+        "laptop_rx_bytes": 35581388426,
+        "laptop_tx_bytes": 268489228
+      },
+      "net_after_measured": {
+        "rig_MemFree_kB": 3149840,
+        "rig_MemAvailable_kB": 25488188,
+        "rig_Cached_kB": 22306544,
+        "rig_rx_bytes": 173627055790,
+        "rig_tx_bytes": 72911921598,
+        "laptop_MemFree_kB": 1349420,
+        "laptop_MemAvailable_kB": 7379096,
+        "laptop_Cached_kB": 6294084,
+        "laptop_rx_bytes": 35637503902,
+        "laptop_tx_bytes": 300953105
+      },
+      "net_delta_measured": {
+        "rig_rx_bytes": 33812708,
+        "rig_tx_bytes": 53974198,
+        "laptop_rx_bytes": 56115476,
+        "laptop_tx_bytes": 32463877
+      },
+      "exit_code": 0,
+      "port_free_after": true,
+      "after": {
+        "rig_MemFree_kB": 4279640,
+        "rig_MemAvailable_kB": 26154716,
+        "rig_Cached_kB": 21841552,
+        "rig_rx_bytes": 173627068317,
+        "rig_tx_bytes": 72911930625,
+        "laptop_MemFree_kB": 24312412,
+        "laptop_MemAvailable_kB": 30342344,
+        "laptop_Cached_kB": 6294352,
+        "laptop_rx_bytes": 35637510704,
+        "laptop_tx_bytes": 300960436
+      },
+      "finished": 1785812490.259385
+    },
+    "load": {
+      "samples": 24,
+      "interval_seconds": 5.0,
+      "started": 1785812374.2492442,
+      "finished": 1785812490.2600982,
+      "missed": 0,
+      "loadavg_1m": {
+        "min": 3.98,
+        "max": 6.08,
+        "mean": 4.965833333333333,
+        "n": 24
+      },
+      "loadavg_5m": {
+        "min": 4.42,
+        "max": 4.82,
+        "mean": 4.615,
+        "n": 24
+      },
+      "loadavg_15m": {
+        "min": 4.01,
+        "max": 4.16,
+        "mean": 4.062083333333333,
+        "n": 24
+      },
+      "runnable": {
+        "min": 2,
+        "max": 11,
+        "mean": 4.083333333333333,
+        "n": 24
+      },
+      "procs": {
+        "min": 3518,
+        "max": 3598,
+        "mean": 3548.5833333333335,
+        "n": 24
+      },
+      "mem_available_bytes": {
+        "min": 26113282048,
+        "max": 27305340928,
+        "mean": 26731150506.666668,
+        "n": 24
+      },
+      "mem_cached_bytes": {
+        "min": 20405956608,
+        "max": 26985623552,
+        "mean": 25302889813.333332,
+        "n": 24
+      },
+      "swap_free_bytes": {
+        "min": 66090184704,
+        "max": 66429431808,
+        "mean": 66192491861.333336,
+        "n": 24
+      }
+    }
+  },
+  {
+    "run": 1,
+    "arm": "B",
+    "label": "q122b-fleet-B-r1",
+    "metrics": {
+      "arm": "B",
+      "label": "q122b-fleet-B-r1",
+      "argv": [
+        "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+        "--rpc",
+        "192.168.0.76:50052",
+        "--port",
+        "9502",
+        "--model",
+        "/home/aaron/models/unsloth/Qwen3.5-122B-A10B-MTP-GGUF/UD-Q4_K_M/Qwen3.5-122B-A10B-UD-Q4_K_M-00001-of-00003.gguf",
+        "--flash-attn",
+        "auto",
+        "--jinja",
+        "--parallel",
+        "1",
+        "-ngl",
+        "999",
+        "-c",
+        "8192",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "8,3,0",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0",
+        "--fit",
+        "off",
+        "--device",
+        "SYCL0,SYCL1,RPC0",
+        "-ot",
+        "blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_shexp=SYCL0,blk\\.1[5-9]\\.ffn_.*_shexp=SYCL1,ffn_.*_shexp=SYCL0,blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_exps=SYCL0,blk\\.1[5-9]\\.ffn_.*_exps=SYCL1,blk\\.(?:4[2-8])\\.ffn_.*_exps=RPC0[192.168.0.76:50052],ffn_.*_exps=CPU"
+      ],
+      "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+      "before": {
+        "rig_MemFree_kB": 4162480,
+        "rig_MemAvailable_kB": 26071292,
+        "rig_Cached_kB": 21875548,
+        "rig_rx_bytes": 173627075368,
+        "rig_tx_bytes": 72911936604,
+        "laptop_MemFree_kB": 24313952,
+        "laptop_MemAvailable_kB": 30344048,
+        "laptop_Cached_kB": 6294512,
+        "laptop_rx_bytes": 35637516072,
+        "laptop_tx_bytes": 300966558
+      },
+      "pid": 74469,
+      "load_seconds": 64.13061237335205,
+      "after_load": {
+        "rig_MemFree_kB": 544704,
+        "rig_MemAvailable_kB": 25893692,
+        "rig_Cached_kB": 25355288,
+        "rig_rx_bytes": 173627796817,
+        "rig_tx_bytes": 72913705139,
+        "laptop_MemFree_kB": 16503812,
+        "laptop_MemAvailable_kB": 30327760,
+        "laptop_Cached_kB": 14088376,
+        "laptop_rx_bytes": 35639311663,
+        "laptop_tx_bytes": 301455305
+      },
+      "warmup_gen_tps": 6.252803991790069,
+      "measured_wall_s": 17.283637762069702,
+      "generation_tps": 10.111407168197728,
+      "prompt_tps": 9.528068281602057,
+      "predicted_n": 128,
+      "prompt_n": 44,
+      "stop_type": "limit",
+      "net_before_measured": {
+        "rig_MemFree_kB": 574232,
+        "rig_MemAvailable_kB": 25763744,
+        "rig_Cached_kB": 25181208,
+        "rig_rx_bytes": 173633736753,
+        "rig_tx_bytes": 72922555552,
+        "laptop_MemFree_kB": 16501324,
+        "laptop_MemAvailable_kB": 30326276,
+        "laptop_Cached_kB": 14089316,
+        "laptop_rx_bytes": 35648523628,
+        "laptop_tx_bytes": 307158841
+      },
+      "net_after_measured": {
+        "rig_MemFree_kB": 744596,
+        "rig_MemAvailable_kB": 25898100,
+        "rig_Cached_kB": 25128164,
+        "rig_rx_bytes": 173647217206,
+        "rig_tx_bytes": 72944128860,
+        "laptop_MemFree_kB": 16525572,
+        "laptop_MemAvailable_kB": 30350768,
+        "laptop_Cached_kB": 14089624,
+        "laptop_rx_bytes": 35670950937,
+        "laptop_tx_bytes": 320088855
+      },
+      "net_delta_measured": {
+        "rig_rx_bytes": 13480453,
+        "rig_tx_bytes": 21573308,
+        "laptop_rx_bytes": 22427309,
+        "laptop_tx_bytes": 12930014
+      },
+      "exit_code": 0,
+      "port_free_after": true,
+      "after": {
+        "rig_MemFree_kB": 1324424,
+        "rig_MemAvailable_kB": 26434468,
+        "rig_Cached_kB": 25078172,
+        "rig_rx_bytes": 173647225778,
+        "rig_tx_bytes": 72944136299,
+        "laptop_MemFree_kB": 16511576,
+        "laptop_MemAvailable_kB": 30336840,
+        "laptop_Cached_kB": 14089636,
+        "laptop_rx_bytes": 35670957660,
+        "laptop_tx_bytes": 320096157
+      },
+      "finished": 1785812586.4669278
+    },
+    "load": {
+      "samples": 20,
+      "interval_seconds": 5.0,
+      "started": 1785812490.2608767,
+      "finished": 1785812586.4695444,
+      "missed": 0,
+      "loadavg_1m": {
+        "min": 4.79,
+        "max": 7.72,
+        "mean": 5.859,
+        "n": 20
+      },
+      "loadavg_5m": {
+        "min": 4.76,
+        "max": 5.47,
+        "mean": 4.9545,
+        "n": 20
+      },
+      "loadavg_15m": {
+        "min": 4.16,
+        "max": 4.44,
+        "mean": 4.238,
+        "n": 20
+      },
+      "runnable": {
+        "min": 2,
+        "max": 13,
+        "mean": 5.8,
+        "n": 20
+      },
+      "procs": {
+        "min": 3526,
+        "max": 3609,
+        "mean": 3572.05,
+        "n": 20
+      },
+      "mem_available_bytes": {
+        "min": 26114256896,
+        "max": 27343011840,
+        "mean": 26558209024.0,
+        "n": 20
+      },
+      "mem_cached_bytes": {
+        "min": 22400233472,
+        "max": 27107880960,
+        "mean": 25570158796.8,
+        "n": 20
+      },
+      "swap_free_bytes": {
+        "min": 66038108160,
+        "max": 66401251328,
+        "mean": 66170842316.8,
+        "n": 20
+      }
+    }
+  },
+  {
+    "run": 1,
+    "arm": "A",
+    "label": "q122b-fleet-A-r1",
+    "metrics": {
+      "arm": "A",
+      "label": "q122b-fleet-A-r1",
+      "argv": [
+        "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+        "--port",
+        "9502",
+        "--model",
+        "/home/aaron/models/unsloth/Qwen3.5-122B-A10B-MTP-GGUF/UD-Q4_K_M/Qwen3.5-122B-A10B-UD-Q4_K_M-00001-of-00003.gguf",
+        "--flash-attn",
+        "auto",
+        "--jinja",
+        "--parallel",
+        "1",
+        "-ngl",
+        "999",
+        "-c",
+        "8192",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "8,3",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0",
+        "--fit",
+        "off",
+        "--device",
+        "SYCL0,SYCL1",
+        "-ot",
+        "blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_shexp=SYCL0,blk\\.1[5-9]\\.ffn_.*_shexp=SYCL1,ffn_.*_shexp=SYCL0,blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_exps=SYCL0,blk\\.1[5-9]\\.ffn_.*_exps=SYCL1,ffn_.*_exps=CPU"
+      ],
+      "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+      "before": {
+        "rig_MemFree_kB": 1311532,
+        "rig_MemAvailable_kB": 26433340,
+        "rig_Cached_kB": 25092132,
+        "rig_rx_bytes": 173647252245,
+        "rig_tx_bytes": 72944142088,
+        "laptop_MemFree_kB": 16499236,
+        "laptop_MemAvailable_kB": 30324532,
+        "laptop_Cached_kB": 14089672,
+        "laptop_rx_bytes": 35670963028,
+        "laptop_tx_bytes": 320102362
+      },
+      "pid": 108155,
+      "load_seconds": 50.0448203086853,
+      "after_load": {
+        "rig_MemFree_kB": 861392,
+        "rig_MemAvailable_kB": 25871816,
+        "rig_Cached_kB": 25120664,
+        "rig_rx_bytes": 173647410279,
+        "rig_tx_bytes": 72944211241,
+        "laptop_MemFree_kB": 16493872,
+        "laptop_MemAvailable_kB": 30321208,
+        "laptop_Cached_kB": 14091600,
+        "laptop_rx_bytes": 35671019166,
+        "laptop_tx_bytes": 320162925
+      },
+      "warmup_gen_tps": 4.024863594857231,
+      "measured_wall_s": 29.108027458190918,
+      "generation_tps": 6.213737622404563,
+      "prompt_tps": 5.177733346026625,
+      "predicted_n": 128,
+      "prompt_n": 44,
+      "stop_type": "limit",
+      "net_before_measured": {
+        "rig_MemFree_kB": 458108,
+        "rig_MemAvailable_kB": 26071160,
+        "rig_Cached_kB": 25747804,
+        "rig_rx_bytes": 173647538561,
+        "rig_tx_bytes": 72944238938,
+        "laptop_MemFree_kB": 16522056,
+        "laptop_MemAvailable_kB": 30350388,
+        "laptop_Cached_kB": 14092624,
+        "laptop_rx_bytes": 35671041067,
+        "laptop_tx_bytes": 320187909
+      },
+      "net_after_measured": {
+        "rig_MemFree_kB": 272712,
+        "rig_MemAvailable_kB": 25863424,
+        "rig_Cached_kB": 25644952,
+        "rig_rx_bytes": 173647603843,
+        "rig_tx_bytes": 72944292416,
+        "laptop_MemFree_kB": 16515644,
+        "laptop_MemAvailable_kB": 30345188,
+        "laptop_Cached_kB": 14093688,
+        "laptop_rx_bytes": 35671077516,
+        "laptop_tx_bytes": 320228278
+      },
+      "net_delta_measured": {
+        "rig_rx_bytes": 65282,
+        "rig_tx_bytes": 53478,
+        "laptop_rx_bytes": 36449,
+        "laptop_tx_bytes": 40369
+      },
+      "exit_code": 0,
+      "port_free_after": true,
+      "after": {
+        "rig_MemFree_kB": 1044604,
+        "rig_MemAvailable_kB": 26480952,
+        "rig_Cached_kB": 25407056,
+        "rig_rx_bytes": 173647610650,
+        "rig_tx_bytes": 72944298322,
+        "laptop_MemFree_kB": 16513504,
+        "laptop_MemAvailable_kB": 30343400,
+        "laptop_Cached_kB": 14094048,
+        "laptop_rx_bytes": 35671083361,
+        "laptop_tx_bytes": 320234728
+      },
+      "finished": 1785812686.4750957
+    },
+    "load": {
+      "samples": 20,
+      "interval_seconds": 5.0,
+      "started": 1785812586.4704654,
+      "finished": 1785812686.4758418,
+      "missed": 0,
+      "loadavg_1m": {
+        "min": 6.02,
+        "max": 8.29,
+        "mean": 6.8545,
+        "n": 20
+      },
+      "loadavg_5m": {
+        "min": 5.38,
+        "max": 6.0,
+        "mean": 5.511,
+        "n": 20
+      },
+      "loadavg_15m": {
+        "min": 4.44,
+        "max": 4.72,
+        "mean": 4.5055,
+        "n": 20
+      },
+      "runnable": {
+        "min": 2,
+        "max": 15,
+        "mean": 6.25,
+        "n": 20
+      },
+      "procs": {
+        "min": 3508,
+        "max": 3587,
+        "mean": 3559.0,
+        "n": 20
+      },
+      "mem_available_bytes": {
+        "min": 26126548992,
+        "max": 27483983872,
+        "mean": 26745234636.8,
+        "n": 20
+      },
+      "mem_cached_bytes": {
+        "min": 24865144832,
+        "max": 27138035712,
+        "mean": 26294413107.2,
+        "n": 20
+      },
+      "swap_free_bytes": {
+        "min": 65793392640,
+        "max": 66356219904,
+        "mean": 66083849011.2,
+        "n": 20
+      }
+    }
+  },
+  {
+    "run": 2,
+    "arm": "A",
+    "label": "q122b-fleet-A-r2",
+    "metrics": {
+      "arm": "A",
+      "label": "q122b-fleet-A-r2",
+      "argv": [
+        "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+        "--port",
+        "9502",
+        "--model",
+        "/home/aaron/models/unsloth/Qwen3.5-122B-A10B-MTP-GGUF/UD-Q4_K_M/Qwen3.5-122B-A10B-UD-Q4_K_M-00001-of-00003.gguf",
+        "--flash-attn",
+        "auto",
+        "--jinja",
+        "--parallel",
+        "1",
+        "-ngl",
+        "999",
+        "-c",
+        "8192",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "8,3",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0",
+        "--fit",
+        "off",
+        "--device",
+        "SYCL0,SYCL1",
+        "-ot",
+        "blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_shexp=SYCL0,blk\\.1[5-9]\\.ffn_.*_shexp=SYCL1,ffn_.*_shexp=SYCL0,blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_exps=SYCL0,blk\\.1[5-9]\\.ffn_.*_exps=SYCL1,ffn_.*_exps=CPU"
+      ],
+      "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+      "before": {
+        "rig_MemFree_kB": 934940,
+        "rig_MemAvailable_kB": 26374832,
+        "rig_Cached_kB": 25411204,
+        "rig_rx_bytes": 173647617066,
+        "rig_tx_bytes": 72944303624,
+        "laptop_MemFree_kB": 16513324,
+        "laptop_MemAvailable_kB": 30343216,
+        "laptop_Cached_kB": 14094048,
+        "laptop_rx_bytes": 35671088866,
+        "laptop_tx_bytes": 320240977
+      },
+      "pid": 141805,
+      "load_seconds": 52.12056064605713,
+      "after_load": {
+        "rig_MemFree_kB": 247328,
+        "rig_MemAvailable_kB": 25978912,
+        "rig_Cached_kB": 25919536,
+        "rig_rx_bytes": 173647816377,
+        "rig_tx_bytes": 72944379999,
+        "laptop_MemFree_kB": 16519092,
+        "laptop_MemAvailable_kB": 30352708,
+        "laptop_Cached_kB": 14097796,
+        "laptop_rx_bytes": 35671147992,
+        "laptop_tx_bytes": 320305914
+      },
+      "warmup_gen_tps": 3.758394432690327,
+      "measured_wall_s": 31.151787757873535,
+      "generation_tps": 5.481466775416683,
+      "prompt_tps": 5.6567375922996375,
+      "predicted_n": 128,
+      "prompt_n": 44,
+      "stop_type": "limit",
+      "net_before_measured": {
+        "rig_MemFree_kB": 489344,
+        "rig_MemAvailable_kB": 25710624,
+        "rig_Cached_kB": 25328556,
+        "rig_rx_bytes": 173647853227,
+        "rig_tx_bytes": 72944410829,
+        "laptop_MemFree_kB": 16504960,
+        "laptop_MemAvailable_kB": 30339676,
+        "laptop_Cached_kB": 14098776,
+        "laptop_rx_bytes": 35671174101,
+        "laptop_tx_bytes": 320335280
+      },
+      "net_after_measured": {
+        "rig_MemFree_kB": 375112,
+        "rig_MemAvailable_kB": 25645872,
+        "rig_Cached_kB": 25476520,
+        "rig_rx_bytes": 173648091019,
+        "rig_tx_bytes": 72944459430,
+        "laptop_MemFree_kB": 16505188,
+        "laptop_MemAvailable_kB": 30341416,
+        "laptop_Cached_kB": 14100284,
+        "laptop_rx_bytes": 35671211198,
+        "laptop_tx_bytes": 320376033
+      },
+      "net_delta_measured": {
+        "rig_rx_bytes": 237792,
+        "rig_tx_bytes": 48601,
+        "laptop_rx_bytes": 37097,
+        "laptop_tx_bytes": 40753
+      },
+      "exit_code": 0,
+      "port_free_after": true,
+      "after": {
+        "rig_MemFree_kB": 1349588,
+        "rig_MemAvailable_kB": 26493216,
+        "rig_Cached_kB": 25124736,
+        "rig_rx_bytes": 173648097737,
+        "rig_tx_bytes": 72944465040,
+        "laptop_MemFree_kB": 16504312,
+        "laptop_MemAvailable_kB": 30340564,
+        "laptop_Cached_kB": 14100296,
+        "laptop_rx_bytes": 35671220502,
+        "laptop_tx_bytes": 320385681
+      },
+      "finished": 1785812791.8072696
+    },
+    "load": {
+      "samples": 22,
+      "interval_seconds": 5.0,
+      "started": 1785812686.4767342,
+      "finished": 1785812791.8080792,
+      "missed": 0,
+      "loadavg_1m": {
+        "min": 6.74,
+        "max": 9.25,
+        "mean": 8.092727272727272,
+        "n": 22
+      },
+      "loadavg_5m": {
+        "min": 5.96,
+        "max": 6.85,
+        "mean": 6.298181818181818,
+        "n": 22
+      },
+      "loadavg_15m": {
+        "min": 4.72,
+        "max": 5.16,
+        "mean": 4.895,
+        "n": 22
+      },
+      "runnable": {
+        "min": 3,
+        "max": 16,
+        "mean": 7.2272727272727275,
+        "n": 22
+      },
+      "procs": {
+        "min": 3491,
+        "max": 3630,
+        "mean": 3594.318181818182,
+        "n": 22
+      },
+      "mem_available_bytes": {
+        "min": 25403895808,
+        "max": 27182280704,
+        "mean": 26429383214.545456,
+        "n": 22
+      },
+      "mem_cached_bytes": {
+        "min": 23480492032,
+        "max": 26899075072,
+        "mean": 25914781696.0,
+        "n": 22
+      },
+      "swap_free_bytes": {
+        "min": 65526362112,
+        "max": 66349387776,
+        "mean": 65976195630.545456,
+        "n": 22
+      }
+    }
+  },
+  {
+    "run": 2,
+    "arm": "B",
+    "label": "q122b-fleet-B-r2",
+    "metrics": {
+      "arm": "B",
+      "label": "q122b-fleet-B-r2",
+      "argv": [
+        "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+        "--rpc",
+        "192.168.0.76:50052",
+        "--port",
+        "9502",
+        "--model",
+        "/home/aaron/models/unsloth/Qwen3.5-122B-A10B-MTP-GGUF/UD-Q4_K_M/Qwen3.5-122B-A10B-UD-Q4_K_M-00001-of-00003.gguf",
+        "--flash-attn",
+        "auto",
+        "--jinja",
+        "--parallel",
+        "1",
+        "-ngl",
+        "999",
+        "-c",
+        "8192",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "8,3,0",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0",
+        "--fit",
+        "off",
+        "--device",
+        "SYCL0,SYCL1,RPC0",
+        "-ot",
+        "blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_shexp=SYCL0,blk\\.1[5-9]\\.ffn_.*_shexp=SYCL1,ffn_.*_shexp=SYCL0,blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_exps=SYCL0,blk\\.1[5-9]\\.ffn_.*_exps=SYCL1,blk\\.(?:4[2-8])\\.ffn_.*_exps=RPC0[192.168.0.76:50052],ffn_.*_exps=CPU"
+      ],
+      "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+      "before": {
+        "rig_MemFree_kB": 1309960,
+        "rig_MemAvailable_kB": 26462460,
+        "rig_Cached_kB": 25133952,
+        "rig_rx_bytes": 173648107065,
+        "rig_tx_bytes": 72944473672,
+        "laptop_MemFree_kB": 16481216,
+        "laptop_MemAvailable_kB": 30317536,
+        "laptop_Cached_kB": 14100372,
+        "laptop_rx_bytes": 35671228680,
+        "laptop_tx_bytes": 320396254
+      },
+      "pid": 178504,
+      "load_seconds": 62.11933875083923,
+      "after_load": {
+        "rig_MemFree_kB": 679340,
+        "rig_MemAvailable_kB": 25974704,
+        "rig_Cached_kB": 25279428,
+        "rig_rx_bytes": 173648742966,
+        "rig_tx_bytes": 72946217439,
+        "laptop_MemFree_kB": 16467376,
+        "laptop_MemAvailable_kB": 30307696,
+        "laptop_Cached_kB": 14104168,
+        "laptop_rx_bytes": 35673016993,
+        "laptop_tx_bytes": 320882137
+      },
+      "warmup_gen_tps": 6.367018842396386,
+      "measured_wall_s": 16.79084610939026,
+      "generation_tps": 10.488841470584742,
+      "prompt_tps": 9.618804588082345,
+      "predicted_n": 128,
+      "prompt_n": 44,
+      "stop_type": "limit",
+      "net_before_measured": {
+        "rig_MemFree_kB": 339268,
+        "rig_MemAvailable_kB": 25591332,
+        "rig_Cached_kB": 25396016,
+        "rig_rx_bytes": 173654671186,
+        "rig_tx_bytes": 72955073473,
+        "laptop_MemFree_kB": 16473144,
+        "laptop_MemAvailable_kB": 30313568,
+        "laptop_Cached_kB": 14104264,
+        "laptop_rx_bytes": 35682232789,
+        "laptop_tx_bytes": 326576158
+      },
+      "net_after_measured": {
+        "rig_MemFree_kB": 440840,
+        "rig_MemAvailable_kB": 25809544,
+        "rig_Cached_kB": 25443568,
+        "rig_rx_bytes": 173668133615,
+        "rig_tx_bytes": 72976680291,
+        "laptop_MemFree_kB": 16485064,
+        "laptop_MemAvailable_kB": 30326412,
+        "laptop_Cached_kB": 14105052,
+        "laptop_rx_bytes": 35704694516,
+        "laptop_tx_bytes": 339487193
+      },
+      "net_delta_measured": {
+        "rig_rx_bytes": 13462429,
+        "rig_tx_bytes": 21606818,
+        "laptop_rx_bytes": 22461727,
+        "laptop_tx_bytes": 12911035
+      },
+      "exit_code": 0,
+      "port_free_after": true,
+      "after": {
+        "rig_MemFree_kB": 1117320,
+        "rig_MemAvailable_kB": 26424224,
+        "rig_Cached_kB": 25319536,
+        "rig_rx_bytes": 173668144419,
+        "rig_tx_bytes": 72976690264,
+        "laptop_MemFree_kB": 16464504,
+        "laptop_MemAvailable_kB": 30306120,
+        "laptop_Cached_kB": 14105332,
+        "laptop_rx_bytes": 35704707452,
+        "laptop_tx_bytes": 339501257
+      },
+      "finished": 1785812884.9303555
+    },
+    "load": {
+      "samples": 19,
+      "interval_seconds": 5.0,
+      "started": 1785812791.8093028,
+      "finished": 1785812884.9314885,
+      "missed": 0,
+      "loadavg_1m": {
+        "min": 5.96,
+        "max": 9.25,
+        "mean": 7.514736842105263,
+        "n": 19
+      },
+      "loadavg_5m": {
+        "min": 6.43,
+        "max": 6.87,
+        "mean": 6.684736842105264,
+        "n": 19
+      },
+      "loadavg_15m": {
+        "min": 5.15,
+        "max": 5.23,
+        "mean": 5.178947368421053,
+        "n": 19
+      },
+      "runnable": {
+        "min": 3,
+        "max": 12,
+        "mean": 6.2631578947368425,
+        "n": 19
+      },
+      "procs": {
+        "min": 3561,
+        "max": 3626,
+        "mean": 3590.7368421052633,
+        "n": 19
+      },
+      "mem_available_bytes": {
+        "min": 26198142976,
+        "max": 27100852224,
+        "mean": 26625878554.94737,
+        "n": 19
+      },
+      "mem_cached_bytes": {
+        "min": 23872950272,
+        "max": 26912141312,
+        "mean": 25861833135.157894,
+        "n": 19
+      },
+      "swap_free_bytes": {
+        "min": 65612550144,
+        "max": 66101166080,
+        "mean": 65898879946.10526,
+        "n": 19
+      }
+    }
+  },
+  {
+    "run": 2,
+    "arm": "C",
+    "label": "q122b-fleet-C-r2",
+    "metrics": {
+      "arm": "C",
+      "label": "q122b-fleet-C-r2",
+      "argv": [
+        "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+        "--rpc",
+        "192.168.0.76:50053",
+        "--port",
+        "9502",
+        "--model",
+        "/home/aaron/models/unsloth/Qwen3.5-122B-A10B-MTP-GGUF/UD-Q4_K_M/Qwen3.5-122B-A10B-UD-Q4_K_M-00001-of-00003.gguf",
+        "--flash-attn",
+        "auto",
+        "--jinja",
+        "--parallel",
+        "1",
+        "-ngl",
+        "999",
+        "-c",
+        "8192",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "8,3,0",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0",
+        "--fit",
+        "off",
+        "--device",
+        "SYCL0,SYCL1,RPC0",
+        "-ot",
+        "blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_shexp=SYCL0,blk\\.1[5-9]\\.ffn_.*_shexp=SYCL1,ffn_.*_shexp=SYCL0,blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_exps=SYCL0,blk\\.1[5-9]\\.ffn_.*_exps=SYCL1,blk\\.(?:3[3-9]|4[0-8])\\.ffn_.*_exps=RPC0[192.168.0.76:50053],ffn_.*_exps=CPU"
+      ],
+      "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+      "before": {
+        "rig_MemFree_kB": 1121840,
+        "rig_MemAvailable_kB": 26434804,
+        "rig_Cached_kB": 25324280,
+        "rig_rx_bytes": 173668155037,
+        "rig_tx_bytes": 72976698360,
+        "laptop_MemFree_kB": 16476312,
+        "laptop_MemAvailable_kB": 30317928,
+        "laptop_Cached_kB": 14105328,
+        "laptop_rx_bytes": 35704713510,
+        "laptop_tx_bytes": 339507949
+      },
+      "pid": 210241,
+      "load_seconds": 96.26641941070557,
+      "after_load": {
+        "rig_MemFree_kB": 1292716,
+        "rig_MemAvailable_kB": 25916804,
+        "rig_Cached_kB": 24654420,
+        "rig_rx_bytes": 173669532243,
+        "rig_tx_bytes": 72980951999,
+        "laptop_MemFree_kB": 764908,
+        "laptop_MemAvailable_kB": 7338700,
+        "laptop_Cached_kB": 6837516,
+        "laptop_rx_bytes": 35709091592,
+        "laptop_tx_bytes": 340628051
+      },
+      "warmup_gen_tps": 7.90144332208283,
+      "measured_wall_s": 14.436484575271606,
+      "generation_tps": 10.143739965225992,
+      "prompt_tps": 24.22412601830793,
+      "predicted_n": 128,
+      "prompt_n": 44,
+      "stop_type": "limit",
+      "net_before_measured": {
+        "rig_MemFree_kB": 1422000,
+        "rig_MemAvailable_kB": 25322048,
+        "rig_Cached_kB": 23939728,
+        "rig_rx_bytes": 173684444757,
+        "rig_tx_bytes": 73003116761,
+        "laptop_MemFree_kB": 779796,
+        "laptop_MemAvailable_kB": 7354352,
+        "laptop_Cached_kB": 6838136,
+        "laptop_rx_bytes": 35732156520,
+        "laptop_tx_bytes": 354942440
+      },
+      "net_after_measured": {
+        "rig_MemFree_kB": 2758352,
+        "rig_MemAvailable_kB": 25514908,
+        "rig_Cached_kB": 22792052,
+        "rig_rx_bytes": 173718311061,
+        "rig_tx_bytes": 73057157945,
+        "laptop_MemFree_kB": 793796,
+        "laptop_MemAvailable_kB": 7373612,
+        "laptop_Cached_kB": 6843196,
+        "laptop_rx_bytes": 35788338774,
+        "laptop_tx_bytes": 387456084
+      },
+      "net_delta_measured": {
+        "rig_rx_bytes": 33866304,
+        "rig_tx_bytes": 54041184,
+        "laptop_rx_bytes": 56182254,
+        "laptop_tx_bytes": 32513644
+      },
+      "exit_code": 0,
+      "port_free_after": true,
+      "after": {
+        "rig_MemFree_kB": 3588460,
+        "rig_MemAvailable_kB": 26137384,
+        "rig_Cached_kB": 22580852,
+        "rig_rx_bytes": 173718391826,
+        "rig_tx_bytes": 73057165041,
+        "laptop_MemFree_kB": 23756228,
+        "laptop_MemAvailable_kB": 30336060,
+        "laptop_Cached_kB": 6843208,
+        "laptop_rx_bytes": 35788345805,
+        "laptop_tx_bytes": 387463256
+      },
+      "finished": 1785813007.1546628
+    },
+    "load": {
+      "samples": 25,
+      "interval_seconds": 5.0,
+      "started": 1785812884.9327357,
+      "finished": 1785813007.158636,
+      "missed": 0,
+      "loadavg_1m": {
+        "min": 4.27,
+        "max": 7.18,
+        "mean": 5.5328,
+        "n": 25
+      },
+      "loadavg_5m": {
+        "min": 5.82,
+        "max": 6.69,
+        "mean": 6.2544,
+        "n": 25
+      },
+      "loadavg_15m": {
+        "min": 5.11,
+        "max": 5.27,
+        "mean": 5.194,
+        "n": 25
+      },
+      "runnable": {
+        "min": 2,
+        "max": 13,
+        "mean": 5.52,
+        "n": 25
+      },
+      "procs": {
+        "min": 3535,
+        "max": 3663,
+        "mean": 3612.52,
+        "n": 25
+      },
+      "mem_available_bytes": {
+        "min": 25745473536,
+        "max": 27191005184,
+        "mean": 26465160888.32,
+        "n": 25
+      },
+      "mem_cached_bytes": {
+        "min": 21945077760,
+        "max": 26984923136,
+        "mean": 25105543495.68,
+        "n": 25
+      },
+      "swap_free_bytes": {
+        "min": 65870233600,
+        "max": 66346115072,
+        "mean": 66082016788.48,
+        "n": 25
+      }
+    }
+  },
+  {
+    "run": 2,
+    "arm": "D",
+    "label": "q122b-fleet-D-r2",
+    "metrics": {
+      "arm": "D",
+      "label": "q122b-fleet-D-r2",
+      "argv": [
+        "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+        "--rpc",
+        "192.168.0.76:50052,192.168.0.76:50053",
+        "--port",
+        "9502",
+        "--model",
+        "/home/aaron/models/unsloth/Qwen3.5-122B-A10B-MTP-GGUF/UD-Q4_K_M/Qwen3.5-122B-A10B-UD-Q4_K_M-00001-of-00003.gguf",
+        "--flash-attn",
+        "auto",
+        "--jinja",
+        "--parallel",
+        "1",
+        "-ngl",
+        "999",
+        "-c",
+        "8192",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "8,3,0,0",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0",
+        "--fit",
+        "off",
+        "--device",
+        "SYCL0,SYCL1,RPC0,RPC1",
+        "-ot",
+        "blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_shexp=SYCL0,blk\\.1[5-9]\\.ffn_.*_shexp=SYCL1,ffn_.*_shexp=SYCL0,blk\\.(?:[0-9]|1[0-4])\\.ffn_.*_exps=SYCL0,blk\\.1[5-9]\\.ffn_.*_exps=SYCL1,blk\\.(?:4[2-8])\\.ffn_.*_exps=RPC0[192.168.0.76:50052],blk\\.(?:2[6-9]|3[0-9]|4[01])\\.ffn_.*_exps=RPC0[192.168.0.76:50053],ffn_.*_exps=CPU"
+      ],
+      "binary": "/home/aaron/workspace/moe-serving/llama.cpp/build-sycl-rpc/bin/llama-server",
+      "before": {
+        "rig_MemFree_kB": 3847372,
+        "rig_MemAvailable_kB": 26267908,
+        "rig_Cached_kB": 22452188,
+        "rig_rx_bytes": 173718407550,
+        "rig_tx_bytes": 73057170537,
+        "laptop_MemFree_kB": 23754260,
+        "laptop_MemAvailable_kB": 30334092,
+        "laptop_Cached_kB": 6843212,
+        "laptop_rx_bytes": 35788351433,
+        "laptop_tx_bytes": 387469654
+      },
+      "pid": 251939,
+      "load_seconds": 105.1083447933197,
+      "after_load": {
+        "rig_MemFree_kB": 858392,
+        "rig_MemAvailable_kB": 25512952,
+        "rig_Cached_kB": 24714620,
+        "rig_rx_bytes": 173720337395,
+        "rig_tx_bytes": 73063419672,
+        "laptop_MemFree_kB": 692028,
+        "laptop_MemAvailable_kB": 7499548,
+        "laptop_Cached_kB": 7070908,
+        "laptop_rx_bytes": 35794740899,
+        "laptop_tx_bytes": 389069362
+      },
+      "warmup_gen_tps": 7.59695314697849,
+      "measured_wall_s": 13.821869134902954,
+      "generation_tps": 10.45359965620724,
+      "prompt_tps": 27.917789723207804,
+      "predicted_n": 128,
+      "prompt_n": 44,
+      "stop_type": "limit",
+      "net_before_measured": {
+        "rig_MemFree_kB": 3885516,
+        "rig_MemAvailable_kB": 25395904,
+        "rig_Cached_kB": 21595824,
+        "rig_rx_bytes": 173742134140,
+        "rig_tx_bytes": 73095865830,
+        "laptop_MemFree_kB": 651048,
+        "laptop_MemAvailable_kB": 7465828,
+        "laptop_Cached_kB": 7077964,
+        "laptop_rx_bytes": 35828512410,
+        "laptop_tx_bytes": 410009160
+      },
+      "net_after_measured": {
+        "rig_MemFree_kB": 4966844,
+        "rig_MemAvailable_kB": 25244052,
+        "rig_Cached_kB": 20324564,
+        "rig_rx_bytes": 173791778586,
+        "rig_tx_bytes": 73175061435,
+        "laptop_MemFree_kB": 664852,
+        "laptop_MemAvailable_kB": 7480336,
+        "laptop_Cached_kB": 7078660,
+        "laptop_rx_bytes": 35910846321,
+        "laptop_tx_bytes": 457559272
+      },
+      "net_delta_measured": {
+        "rig_rx_bytes": 49644446,
+        "rig_tx_bytes": 79195605,
+        "laptop_rx_bytes": 82333911,
+        "laptop_tx_bytes": 47550112
+      },
+      "exit_code": 0,
+      "port_free_after": true,
+      "after": {
+        "rig_MemFree_kB": 5764136,
+        "rig_MemAvailable_kB": 25991128,
+        "rig_Cached_kB": 20276168,
+        "rig_rx_bytes": 173791786350,
+        "rig_tx_bytes": 73175068863,
+        "laptop_MemFree_kB": 23521448,
+        "laptop_MemAvailable_kB": 30336944,
+        "laptop_Cached_kB": 7078668,
+        "laptop_rx_bytes": 35910853807,
+        "laptop_tx_bytes": 457567107
+      },
+      "finished": 1785813136.4841406
+    },
+    "load": {
+      "samples": 26,
+      "interval_seconds": 5.0,
+      "started": 1785813007.1601942,
+      "finished": 1785813136.4883392,
+      "missed": 0,
+      "loadavg_1m": {
+        "min": 3.79,
+        "max": 5.52,
+        "mean": 4.521923076923077,
+        "n": 26
+      },
+      "loadavg_5m": {
+        "min": 5.28,
+        "max": 6.04,
+        "mean": 5.625384615384615,
+        "n": 26
+      },
+      "loadavg_15m": {
+        "min": 5.01,
+        "max": 5.18,
+        "mean": 5.093076923076922,
+        "n": 26
+      },
+      "runnable": {
+        "min": 2,
+        "max": 11,
+        "mean": 6.038461538461538,
+        "n": 26
+      },
+      "procs": {
+        "min": 3560,
+        "max": 3645,
+        "mean": 3613.230769230769,
+        "n": 26
+      },
+      "mem_available_bytes": {
+        "min": 25848238080,
+        "max": 27187388416,
+        "mean": 26407143896.615383,
+        "n": 26
+      },
+      "mem_cached_bytes": {
+        "min": 20965904384,
+        "max": 26973192192,
+        "mean": 25066113339.076923,
+        "n": 26
+      },
+      "swap_free_bytes": {
+        "min": 66051051520,
+        "max": 66394828800,
+        "mean": 66193740878.76923,
+        "n": 26
+      }
+    }
+  }
+]
