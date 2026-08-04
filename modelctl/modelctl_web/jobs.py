@@ -236,7 +236,15 @@ class JobContext:
         # "real SIGTERM/SIGKILL cancellation via process groups".
         if not hasattr(proc, "pgid") and hasattr(os, "getpgid"):
             try:
-                proc.pgid = os.getpgid(proc.pid)
+                pgid = os.getpgid(proc.pid)
+                # Never record OUR OWN group: a child spawned without
+                # setpgrp/start_new_session shares it, and cleanup's
+                # killpg would then SIGTERM the whole web service --
+                # which is exactly how a completed smoke test took the
+                # console down on 2026-08-04. Such a child falls back to
+                # single-process terminate().
+                if pgid != os.getpgid(0):
+                    proc.pgid = pgid
             except (OSError, AttributeError):
                 pass
         with self._lock:

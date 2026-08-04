@@ -2201,3 +2201,71 @@ class TestPlansPageDecisionTrace(WebTestBase):
         self.assertFalse(baseline["tested"])
         self.assertIsNone(baseline["measured"])
         self.assertIn("the profile as saved", baseline["reason"])
+
+
+class TestOwnGroupKillGuard(unittest.TestCase):
+    """The 2026-08-04 console crash: smoke_test_profile spawned its
+    llama-server in the service's own process group, register_process
+    recorded that pgid, and the job runner's completion cleanup killpg'd
+    the whole web service. A registered child must never carry OUR pgid,
+    and the smoke child must be detached at spawn."""
+
+    def _ctx(self):
+        from modelctl_web.jobs import JobContext
+        from tempfile import TemporaryDirectory
+        from modelctl_web.jobs import JobStore
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = JobStore(Path(tmp.name) / "jobs.db")
+        job_id = store.create("smoke", "t", {})
+        return JobContext(store, job_id)
+
+    def test_never_records_our_own_process_group(self):
+        from types import SimpleNamespace
+        ctx = self._ctx()
+        proc = SimpleNamespace(pid=os.getpid(), poll=lambda: 0)
+        ctx.register_process(proc)
+        self.assertFalse(hasattr(proc, "pgid"),
+                         "recorded the service's own process group")
+        with mock.patch("modelctl_web.jobs.os.killpg") as kp:
+            ctx.cancel_all()
+        kp.assert_not_called()
+
+    def test_records_a_detached_childs_group(self):
+        from types import SimpleNamespace
+        from modelctl_web import jobs as jobs_mod
+        ctx = self._ctx()
+        proc = SimpleNamespace(pid=777777, poll=lambda: 0)
+        own = os.getpgid(0)
+        with mock.patch.object(jobs_mod.os, "getpgid",
+                               side_effect=lambda p: 4242 if p == 777777
+                               else own):
+            ctx.register_process(proc)
+        self.assertEqual(getattr(proc, "pgid", None), 4242)
+
+    def test_smoke_child_spawns_detached(self):
+        import modelctl
+        from types import SimpleNamespace
+        from tempfile import TemporaryDirectory
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        (Path(tmp.name) / "m").mkdir()
+        launch = SimpleNamespace(argv=("llama-server", "--port", "1"),
+                                 environment={}, is_valid=True)
+        seen = {}
+
+        def fake_popen(cmd, **kw):
+            seen.update(kw)
+            raise FileNotFoundError("stop here")
+
+        with mock.patch.object(modelctl, "load_profile",
+                               return_value={"name": "m"}), \
+             mock.patch.object(modelctl, "canonical_launch_command",
+                               return_value=(launch, True, [])), \
+             mock.patch.object(modelctl, "PROFILES_DIR", Path(tmp.name)), \
+             mock.patch.object(modelctl.subprocess, "Popen",
+                               side_effect=fake_popen):
+            res = modelctl.smoke_test_profile("m")
+        self.assertFalse(res["ok"])
+        self.assertTrue(seen.get("start_new_session"),
+                        "smoke llama-server must start in its own session")

@@ -3516,7 +3516,11 @@ def smoke_test_profile(name, timeout=600, prompt=None, proc_register=None):
     result["stage"] = "launch"
     with open(log_path, "w") as logf:
         try:
-            proc = subprocess.Popen(cmd, env=env, stdout=logf, stderr=subprocess.STDOUT)
+            # Own session: the registered pgid must be the child's, not
+            # the calling service's (see jobs.register_process).
+            proc = subprocess.Popen(cmd, env=env, stdout=logf,
+                                    stderr=subprocess.STDOUT,
+                                    start_new_session=True)
             if proc_register:
                 proc_register(proc)
         except FileNotFoundError as e:
