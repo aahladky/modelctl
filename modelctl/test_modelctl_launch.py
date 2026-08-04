@@ -251,3 +251,87 @@ class TestBuildLaunchCommandValidation(unittest.TestCase):
                                             "RANDOM_VAR": "x"}):
             b2 = modelctl_launch.resolve_backend(self._profile())
         self.assertEqual(b1.environment_fingerprint, b2.environment_fingerprint)
+
+
+class TestRpcPlanValidation(unittest.TestCase):
+    """A plan that places layers on a remote node must fail closed on a
+    binary whose build has no RPC backend -- the wizard's default binary
+    cannot execute a fleet plan, and that has to surface at validation,
+    not as an argv parse error mid-launch (2026-08-03 finding d)."""
+
+    def _profile(self):
+        return {
+            "name": "m", "backend": "llama-cpp",
+            "model_path": "/m.gguf",
+            "config": {"device": "", "split_mode": "", "tensor_split": "",
+                       "ctx": 8192, "flash_attn": "auto", "fit": "on",
+                       "mtp": "off", "extra": "", "ttl": 3600},
+            "moe_cache": {"mode": "off"},
+        }
+
+    def _backend(self, backends):
+        caps = {"schema": 2, "features": {}, "cli": {}}
+        if backends is not None:
+            caps["build"] = {"commit": "abc", "backends": list(backends)}
+        return modelctl_launch.ResolvedBackend(
+            name="llama-cpp", binary="/bin/llama-server",
+            binary_fingerprint="abc", environment={},
+            environment_fingerprint="def", capabilities=caps,
+            preflight_messages=())
+
+    class _RpcPlan:
+        id = "plan1"
+        env = {}
+        config = {"rpc": {"endpoints": ["192.168.0.76:50052"],
+                          "placements": [{"buffer_type": "RPC",
+                                          "first_layer": 42,
+                                          "last_layer": 48}]}}
+
+    def _build(self, backends):
+        with mock.patch("modelctl_backends.get_backend") as gb:
+            gb.return_value.build_command.return_value = ["/bin/llama-server"]
+            return modelctl_launch.build_launch_command(
+                self._profile(), self._RpcPlan(),
+                backend=self._backend(backends), port=8080)
+
+    def test_supports_rpc_verdicts(self):
+        self.assertTrue(modelctl_capabilities.supports_rpc(
+            {"build": {"backends": ["SYCL", "RPC", "CPU"]}}))
+        self.assertFalse(modelctl_capabilities.supports_rpc(
+            {"build": {"backends": ["SYCL", "CPU"]}}))
+        self.assertIsNone(modelctl_capabilities.supports_rpc(
+            {"build": {"commit": "abc"}}))
+        self.assertIsNone(modelctl_capabilities.supports_rpc({}))
+        self.assertIsNone(modelctl_capabilities.supports_rpc(None))
+
+    def test_rpc_plan_on_non_rpc_build_is_error(self):
+        cmd = self._build(["SYCL", "CPU"])
+        errors = [v.summary for v in cmd.validation if v.severity == "error"]
+        self.assertTrue(any("RPC" in e for e in errors))
+        self.assertFalse(cmd.is_valid)
+
+    def test_rpc_plan_on_rpc_build_is_clean(self):
+        cmd = self._build(["SYCL", "RPC", "CPU"])
+        self.assertFalse([v for v in cmd.validation
+                          if v.severity == "error" and "RPC" in v.summary])
+        self.assertTrue(cmd.is_valid)
+
+    def test_rpc_plan_on_unknown_build_is_warning(self):
+        cmd = self._build(None)
+        self.assertFalse([v for v in cmd.validation if v.severity == "error"])
+        self.assertTrue(any("RPC" in w for w in cmd.warnings))
+        self.assertTrue(cmd.is_valid)
+
+    def test_local_plan_never_triggers_rpc_validation(self):
+        class _LocalPlan:
+            id = "plan2"
+            env = {}
+            config = {"rpc": {}}
+        with mock.patch("modelctl_backends.get_backend") as gb:
+            gb.return_value.build_command.return_value = ["/bin/llama-server"]
+            cmd = modelctl_launch.build_launch_command(
+                self._profile(), _LocalPlan(),
+                backend=self._backend(["SYCL", "CPU"]), port=8080)
+        self.assertFalse([v for v in cmd.validation
+                          if "RPC" in v.summary])
+        self.assertFalse(any("RPC" in w for w in cmd.warnings))

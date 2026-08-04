@@ -674,6 +674,22 @@ def backend_build(caps: dict) -> dict:
     return caps.get("build", {})
 
 
+def supports_rpc(caps: dict | None):
+    """Whether the probed binary was built with the RPC backend.
+
+    True/False when the capability report's build.backends list answers
+    (fork binaries report it); None when it cannot be determined (stock
+    builds, failed probes) -- callers treat None as a warning, not an
+    error, because inventing un-support would block a binary that might
+    parse --rpc fine.
+    """
+    build = backend_build(caps or {})
+    backends = build.get("backends") if isinstance(build, dict) else None
+    if not backends:
+        return None
+    return "RPC" in backends
+
+
 def capability_fingerprint(caps: dict) -> str:
     """Stable digest of a capability response.
 

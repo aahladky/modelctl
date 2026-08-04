@@ -486,6 +486,11 @@ function Plans({ name, revision, onChanged }: {
                   {p.label}
                   {p.pinned && <span class="tag" style="margin-left:.4em">pinned</span>}
                   {p.disabled && <span class="tag" style="margin-left:.4em">disabled</span>}
+                  {p.admission?.fits === false && (
+                    <span class="tag" style="margin-left:.4em;color:var(--warn)">
+                      won't fit this machine
+                    </span>
+                  )}
                   {p.warnings.length > 0 && (
                     <div class="sub" style="color:var(--warn)">
                       {p.warnings.map((w) => <div key={w}>⚠ {w}</div>)}

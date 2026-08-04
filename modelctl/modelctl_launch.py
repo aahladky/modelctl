@@ -318,6 +318,29 @@ def build_launch_command(
             elif msg.startswith("WARNING:"):
                 warnings.append(msg[len("WARNING:"):].strip())
 
+        # A plan that places layers on a remote node needs a binary built
+        # with the RPC backend; the wizard's default build is not. Fail
+        # closed here, in words, instead of an argv parse error
+        # mid-launch (2026-08-03 baseline finding).
+        rpc_cfg = (getattr(plan, "config", None) or {}).get("rpc") or {}
+        if rpc_cfg.get("endpoints") or rpc_cfg.get("placements"):
+            import modelctl_capabilities
+            rpc_ok = modelctl_capabilities.supports_rpc(backend.capabilities)
+            if rpc_ok is False:
+                validation.append(ValidationMessage(
+                    code="backend_feature_missing",
+                    severity="error",
+                    summary=(f"this plan places layers on a remote node, "
+                             f"but {backend.binary} was built without the "
+                             "RPC backend -- point this profile at the "
+                             "RPC-enabled build first"),
+                ))
+            elif rpc_ok is None:
+                warnings.append(
+                    "this plan uses a remote node and the binary's RPC "
+                    "support could not be determined from its capability "
+                    "report")
+
     # A plan built with the desktop up saw less free VRAM on the B70 than
     # one built headless. Say so here rather than anywhere closer to the
     # planner: this is the one object every launch surface derives from,

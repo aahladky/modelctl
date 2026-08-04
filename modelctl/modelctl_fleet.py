@@ -385,6 +385,38 @@ def refresh_presence(nodes=None, **kw) -> list:
     return probes
 
 
+def ensure_fresh_presence(nodes=None, now=None, ttl=PRESENCE_TTL_SECONDS,
+                          **kw):
+    """Refresh presence for enabled nodes whose record is missing or
+    stale, then return the usable node list.
+
+    Planning entry points call this so a plan set is never silently
+    fleet-blind: the 2026-08-03 baseline compiled local-only plans for a
+    122B purely because nobody had opened the fleet page inside the
+    presence TTL. Bounded work: one probe (3 s TCP hello) per stale
+    node, no sockets at all while records are fresh. Fresh records are
+    preserved on save, mirroring the single-node probe route.
+    """
+    enabled = enabled_nodes(nodes)
+    if not enabled:
+        return []
+    presence = load_presence()
+    stamp = time.time() if now is None else now
+    stale = [n for n in enabled
+             if n.name not in presence
+             or stamp - presence[n.name].probed_at > ttl]
+    if stale:
+        recorded = dict(presence)
+        for node in stale:
+            try:
+                recorded[node.name] = probe_node(node, **kw)
+            except Exception:
+                continue
+        save_presence(list(recorded.values()))
+        presence = recorded
+    return usable_nodes(enabled, presence=presence, now=now, ttl=ttl)
+
+
 def usable_nodes(nodes=None, presence=None, now=None,
                  ttl=PRESENCE_TTL_SECONDS) -> list:
     """Enabled nodes whose last recorded probe says present, agreeing, fresh.

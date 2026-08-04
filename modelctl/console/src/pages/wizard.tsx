@@ -347,8 +347,17 @@ function PlansStep({ w, apply }:
   useEffect(() => {
     fetchWizardPlans(w.wizard_id)
       .then((r) => {
-        setPlans(r.plans);
-        if (!picked && r.plans.length > 0) setPicked(r.plans[0].id);
+        // Plans the planner says won't fit sort last and are never the
+        // default pick -- the 2026-08-03 baseline auto-picked an
+        // unfittable first row and failed at the test step.
+        const ordered = [...r.plans].sort(
+          (a, b) => Number(a.admission?.fits === false)
+                  - Number(b.admission?.fits === false));
+        setPlans(ordered);
+        if (!picked && ordered.length > 0) {
+          const fit = ordered.find((p) => p.admission?.fits !== false);
+          setPicked((fit ?? ordered[0]).id);
+        }
       })
       .catch((e) => setErr(String(e)));
   }, [w.wizard_id]);
@@ -377,6 +386,11 @@ function PlansStep({ w, apply }:
                     {p.measured
                       ? <span class="tag measured">measured</span>
                       : <span class="tag estimated">estimated</span>}
+                    {p.admission?.fits === false && (
+                      <span class="tag" style="color:var(--warn)">
+                        won't fit this machine
+                      </span>
+                    )}
                   </span>
                   {p.warnings.length > 0 && (
                     <div class="sub" style="color:var(--warn)">

@@ -478,5 +478,98 @@ class TestScratchSafeCoversTheFleet(FleetConsoleBase):
         self.assertEqual(len(mutating), len(FLEET_WRITES))
 
 
+class TestEnsureFreshPresence(FleetConsoleBase):
+    """Planning entry points refresh stale presence instead of going
+    fleet-blind: the 2026-08-03 baseline compiled local-only plans for a
+    122B purely because nobody had opened the fleet page in 15 minutes."""
+
+    def test_fresh_presence_probes_nothing(self):
+        fleet.save_fleet([cpu_node()])
+        fleet.save_presence([probe("ph16-71-cpu0", age=10.0)])
+        with mock.patch.object(fleet, "probe_node") as pn:
+            out = fleet.ensure_fresh_presence()
+        pn.assert_not_called()
+        self.assertEqual([n.name for n in out], ["ph16-71-cpu0"])
+
+    def test_stale_presence_triggers_probe_and_records(self):
+        fleet.save_fleet([cpu_node()])
+        fleet.save_presence([probe("ph16-71-cpu0", age=3600.0)])
+        fresh = probe("ph16-71-cpu0", age=0.0)
+        with mock.patch.object(fleet, "probe_node",
+                               return_value=fresh) as pn:
+            out = fleet.ensure_fresh_presence()
+        pn.assert_called_once()
+        self.assertEqual([n.name for n in out], ["ph16-71-cpu0"])
+        recorded = fleet.load_presence()["ph16-71-cpu0"]
+        self.assertLess(time.time() - recorded.probed_at, 60)
+
+    def test_missing_presence_counts_as_stale(self):
+        fleet.save_fleet([cpu_node()])
+        fresh = probe("ph16-71-cpu0", age=0.0)
+        with mock.patch.object(fleet, "probe_node",
+                               return_value=fresh) as pn:
+            fleet.ensure_fresh_presence()
+        pn.assert_called_once()
+
+    def test_only_stale_nodes_probed_and_fresh_records_kept(self):
+        fleet.save_fleet([cpu_node(), gpu_node()])
+        fresh_cpu = probe("ph16-71-cpu0", age=5.0)
+        stale_gpu = fleet.NodeProbe(
+            node="ph16-71-cuda0", endpoint="192.168.0.76:50052",
+            reachable=True, protocol="5.0.0", pin=PIN, pin_agrees=True,
+            detail="", probed_at=time.time() - 3600)
+        fleet.save_presence([fresh_cpu, stale_gpu])
+        reprobed = fleet.NodeProbe(
+            node="ph16-71-cuda0", endpoint="192.168.0.76:50052",
+            reachable=True, protocol="5.0.0", pin=PIN, pin_agrees=True,
+            detail="", probed_at=time.time())
+        with mock.patch.object(fleet, "probe_node",
+                               return_value=reprobed) as pn:
+            fleet.ensure_fresh_presence()
+        self.assertEqual(pn.call_count, 1)
+        self.assertEqual(pn.call_args[0][0].name, "ph16-71-cuda0")
+        recorded = fleet.load_presence()
+        self.assertIn("ph16-71-cpu0", recorded)  # fresh record preserved
+        self.assertIn("ph16-71-cuda0", recorded)
+
+    def test_no_enabled_nodes_probes_nothing(self):
+        fleet.save_fleet([cpu_node(enabled=False)])
+        with mock.patch.object(fleet, "probe_node") as pn:
+            out = fleet.ensure_fresh_presence()
+        pn.assert_not_called()
+        self.assertEqual(out, [])
+
+
+class TestPlanRowsRefreshesPresence(FleetConsoleBase):
+    """hub.plan_rows goes through ensure_fresh_presence so a plans view
+    is never silently computed against a stale (or absent) fleet."""
+
+    def test_plan_rows_calls_ensure_fresh_presence(self):
+        from types import SimpleNamespace
+        import modelctl_evidence
+        import modelctl_launch
+        import modelctl_plans
+        import modelctl_runtime
+        from modelctl_web import hub
+        snap = SimpleNamespace(fingerprint="hw")
+        rdb = SimpleNamespace(failures_for_profile=lambda name: {},
+                              observations_for_profile=lambda *a, **k: [])
+        with mock.patch.object(fleet, "ensure_fresh_presence",
+                               return_value=[]) as efp, \
+             mock.patch.object(modelctl_plans, "compile_launch_plans",
+                               return_value=[]), \
+             mock.patch.object(modelctl_evidence, "build_plan_evidence",
+                               return_value=[]), \
+             mock.patch.object(modelctl_launch, "resolve_backend",
+                               return_value=None), \
+             mock.patch.object(modelctl_runtime, "RuntimeDB",
+                               return_value=rdb), \
+             mock.patch.object(modelctl_runtime, "ObservationIdentity",
+                               SimpleNamespace(current=lambda **k: None)):
+            rows = hub.plan_rows({"name": "prof"}, snapshot=snap)
+        efp.assert_called_once()
+        self.assertEqual(rows, [])
+
+
 if __name__ == "__main__":
     unittest.main()

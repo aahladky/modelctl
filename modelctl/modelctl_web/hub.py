@@ -112,12 +112,20 @@ def plan_rows(profile, snapshot=None):
     numbers are measured or estimated -- the tag the spec makes
     first-class."""
     import modelctl_evidence
+    import modelctl_fleet
     import modelctl_hardware
     import modelctl_launch
     import modelctl_plans
     import modelctl_runtime
 
     name = profile.get("name", "")
+    # Presence gates the fleet plan family; refresh it here (bounded, one
+    # probe per stale node) so a plans view is never silently computed
+    # against a fleet nobody has looked at inside the TTL.
+    try:
+        modelctl_fleet.ensure_fresh_presence()
+    except Exception:
+        pass
     snap = snapshot or modelctl_hardware.capture_hardware_snapshot()
     plans = modelctl_plans.compile_launch_plans(profile, snap)
     rdb = modelctl_runtime.RuntimeDB()
