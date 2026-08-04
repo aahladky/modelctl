@@ -221,13 +221,37 @@ class TestPresenceIsTheStoredPlanningInput(FleetStateBase):
 
 
 class TestContiguousPlacement(unittest.TestCase):
-    def test_range_matches_only_the_named_layers(self):
+    def _rx(self, first, last):
         import re
-        pattern = fleet.contiguous_range(16, 19) % "RPC0"
-        rx = re.compile(pattern.rsplit("=", 1)[0])
-        for good in ("blk.16.", "blk.17.", "blk.18.", "blk.19."):
+        return re.compile(
+            (fleet.contiguous_range(first, last) % "RPC0").rsplit("=", 1)[0])
+
+    def test_range_matches_only_the_named_layers(self):
+        rx = self._rx(16, 19)
+        for good in (16, 17, 18, 19):
+            self.assertTrue(rx.search(f"blk.{good}.ffn_gate_exps.weight"), good)
+        for bad in (15, 20, 160, 1):
+            self.assertFalse(rx.search(f"blk.{bad}.ffn_gate_exps.weight"), bad)
+
+    def test_range_places_routed_experts_only(self):
+        """A whole-layer placement aborts llama.cpp at load.
+
+        The RPC buffer cannot run the norm/attention ops, so a pattern
+        catching every tensor in a layer dies at ggml-backend.cpp:934
+        ("pre-allocated tensor (blk.42.attn_norm.weight) in a buffer
+        (RPC0[...]) that cannot run the operation") -- observed live
+        2026-08-04 on plan 47ac2f5ab7bcb0c1. Only routed experts may
+        cross the wire: the same rule modelctl_tiers already emits for
+        the ladder plans, and the one the 122B fleet calibration proved.
+        """
+        rx = self._rx(16, 19)
+        for good in ("blk.16.ffn_gate_exps.weight",
+                     "blk.17.ffn_up_exps.weight",
+                     "blk.19.ffn_down_exps.weight"):
             self.assertTrue(rx.search(good), good)
-        for bad in ("blk.15.", "blk.20.", "blk.160.", "blk.1."):
+        for bad in ("blk.16.attn_norm.weight", "blk.16.attn_q.weight",
+                    "blk.17.ffn_norm.weight", "blk.18.attn_output.weight",
+                    "blk.19.ffn_gate_shexp.weight"):
             self.assertFalse(rx.search(bad), bad)
 
     def test_an_empty_range_is_refused(self):
@@ -241,7 +265,9 @@ class TestContiguousPlacement(unittest.TestCase):
                             "first_layer": 2, "last_layer": 3}]})
         self.assertEqual(args[:2], ["--rpc", "192.168.0.76:50052"])
         self.assertEqual(args[2], "-ot")
-        self.assertEqual(args[3], r"blk\.(2|3)\.=RPC0[192.168.0.76:50052]")
+        self.assertEqual(
+            args[3],
+            r"blk\.(2|3)\.ffn_.*_exps=RPC0[192.168.0.76:50052]")
 
     def test_no_endpoints_emits_nothing(self):
         self.assertEqual(fleet.placement_args({"endpoints": []}), [])
@@ -720,13 +746,18 @@ class TestRpcPlansAppearWhenTheNodeIs(FleetStateBase):
     test is the placement arithmetic and argv, not the GGUF parser.
     """
 
-    # A dense 8-layer model: 1 GiB of weights per layer plus 1 GiB of
-    # embeddings/output. Shaped to gguf_model_layout's full contract so
-    # _make_claim sees the same keys a real parse would hand it.
+    # An 8-layer MoE model: per layer, 1 GiB of routed experts plus 0.25
+    # GiB of attention/norms, over 1 GiB of embeddings/output. Only the
+    # expert bytes can cross the wire, so the two numbers are kept
+    # DIFFERENT on purpose -- a sizer that reaches for whole-layer bytes
+    # reads 1.25 GiB per layer here and the arithmetic tests catch it.
+    # Shaped to gguf_model_layout's full contract so _make_claim sees the
+    # same keys a real parse would hand it.
     LAYOUT = {"arch": "fixture", "meta": {}, "block_count": 8,
-              "is_moe": False, "weight_bytes": 9 << 30,
-              "non_expert_bytes": 9 << 30, "other_bytes": 1 << 30,
-              "layer_bytes": 8 << 30, "expert_bytes_per_layer": {},
+              "is_moe": True, "weight_bytes": 11 << 30,
+              "non_expert_bytes": 3 << 30, "other_bytes": 1 << 30,
+              "layer_bytes": 2 << 30,
+              "expert_bytes_per_layer": {i: 1 << 30 for i in range(8)},
               "has_shexp": False, "unknown_type_tensors": 0}
 
     def _profile(self):
@@ -738,7 +769,40 @@ class TestRpcPlansAppearWhenTheNodeIs(FleetStateBase):
                        "fit": "off"},
         }
 
-    def _rpc_plans(self, budget):
+    def _layout_with(self, expert_bytes_per_layer):
+        """LAYOUT with a different expert map, invariants kept.
+
+        gguf_model_layout always yields weight_bytes == non_expert_bytes +
+        sum(expert_bytes_per_layer). A derived fixture that changes the
+        expert map without restating weight_bytes drifts out of that
+        contract and would mask a real bug the day sizing cross-checks it.
+        """
+        return dict(self.LAYOUT,
+                    expert_bytes_per_layer=dict(expert_bytes_per_layer),
+                    weight_bytes=(self.LAYOUT["non_expert_bytes"]
+                                  + sum(expert_bytes_per_layer.values())))
+
+    def test_the_fixtures_satisfy_the_gguf_layout_contract(self):
+        for layout in (self.LAYOUT,
+                       self._layout_with({i: 1 << 30 for i in range(6)})):
+            self.assertEqual(
+                layout["weight_bytes"],
+                layout["non_expert_bytes"]
+                + sum(layout["expert_bytes_per_layer"].values()))
+            self.assertEqual(layout["non_expert_bytes"],
+                             layout["other_bytes"] + layout["layer_bytes"])
+
+    def _split_profile(self):
+        """A profile shaped like the live 122B: an explicit two-card split,
+        with --device carried in `extra` because build_server_args drops
+        config["device"] whenever a tensor split is configured."""
+        p = self._profile()
+        p["config"] = {**p["config"], "device": "", "split_mode": "layer",
+                       "tensor_split": "8,3",
+                       "extra": "--fit off --device SYCL0,SYCL1"}
+        return p
+
+    def _rpc_plans(self, budget, layout=None, profile=None):
         fleet.save_fleet([a_node(budget=budget)])
         fleet.refresh_presence(connect=lambda h, p, t: FakeSocket())
         import modelctl_hardware
@@ -748,9 +812,9 @@ class TestRpcPlansAppearWhenTheNodeIs(FleetStateBase):
             backend_fingerprints={})
         with mock.patch("os.path.exists", return_value=True), \
              mock.patch("modelctl_vram.gguf_model_layout",
-                        return_value=self.LAYOUT):
+                        return_value=layout or self.LAYOUT):
             plans = modelctl_plans._compile_rpc_plans(
-                self._profile(), snap, None)
+                profile or self._profile(), snap, None)
         return plans
 
     def test_a_present_node_yields_a_trailing_contiguous_range(self):
@@ -767,7 +831,8 @@ class TestRpcPlansAppearWhenTheNodeIs(FleetStateBase):
         self.assertIn("--rpc", argv)
         self.assertEqual(argv[argv.index("--rpc") + 1], "192.168.0.76:50052")
         # -ot takes the buffer type, endpoint and all -- not "RPC0".
-        self.assertIn(r"blk\.(5|6|7)\.=RPC0[192.168.0.76:50052]", argv)
+        self.assertIn(
+            r"blk\.(5|6|7)\.ffn_.*_exps=RPC0[192.168.0.76:50052]", argv)
 
     def test_the_range_never_swallows_every_layer(self):
         # A budget far larger than the model still leaves layers local.
@@ -780,8 +845,12 @@ class TestRpcPlansAppearWhenTheNodeIs(FleetStateBase):
         self.assertEqual(self._rpc_plans(1 << 20), [])
 
     def test_the_plan_is_labelled_by_where_the_layers_went(self):
+        # "experts of", not "layers": each layer's attention and norms
+        # stay local, and the plans page is read by someone deciding
+        # what this plan actually does.
         (plan,) = self._rpc_plans(3 << 30)
-        self.assertEqual(plan.label, "layers 5-7 on 192.168.0.76:50052")
+        self.assertEqual(plan.label,
+                         "experts of layers 5-7 on 192.168.0.76:50052")
 
     def test_the_remote_claim_is_charged_to_the_node_key(self):
         (plan,) = self._rpc_plans(3 << 30)
@@ -790,6 +859,148 @@ class TestRpcPlansAppearWhenTheNodeIs(FleetStateBase):
     def test_the_plan_warns_that_the_local_plans_remain(self):
         (plan,) = self._rpc_plans(3 << 30)
         self.assertTrue(any("local-only" in w for w in plan.warnings))
+
+    # --- sizing follows what actually crosses the wire ----------------
+    #
+    # Only routed experts move, so only routed-expert bytes may be spent
+    # against the remote budget or charged to the node's admission key.
+    # Sizing by whole-layer bytes was wrong in BOTH directions: it bought
+    # too few layers, and -- because _apply_rpc_placement debits the
+    # local card by exactly what it says went remote -- it understated
+    # the local claim by the attention/norm bytes that never left.
+
+    def test_the_charge_is_the_expert_bytes_that_actually_move(self):
+        # 1 GiB of routed experts per layer, so 3 layers charge 3 GiB --
+        # not the 3.75 GiB those layers weigh in full.
+        (plan,) = self._rpc_plans(3 << 30)
+        self.assertEqual(plan.decision_data["rpc"]["claimed_bytes"], 3 << 30)
+        self.assertEqual(plan.config["rpc"]["admission"],
+                         {"RPC:ph16-71:CUDA0": 3 << 30})
+
+    def test_sizing_uses_each_layers_own_expert_bytes(self):
+        # Layer 7 carries twice the experts of the rest, so a 3 GiB
+        # budget buys layers 6-7 (2 + 1), not three layers.
+        layout = self._layout_with(
+            {**{i: 1 << 30 for i in range(7)}, 7: 2 << 30})
+        (plan,) = self._rpc_plans(3 << 30, layout=layout)
+        rpc = plan.decision_data["rpc"]
+        self.assertEqual((rpc["first_layer"], rpc["last_layer"]), (6, 7))
+        self.assertEqual(rpc["claimed_bytes"], 3 << 30)
+
+    def test_layers_without_routed_experts_are_not_placed(self):
+        # Trailing dense layers hold nothing the RPC buffer may execute,
+        # so the placement ends at the last layer that has experts.
+        layout = self._layout_with({i: 1 << 30 for i in range(6)})
+        (plan,) = self._rpc_plans(3 << 30, layout=layout)
+        rpc = plan.decision_data["rpc"]
+        self.assertEqual((rpc["first_layer"], rpc["last_layer"]), (3, 5))
+
+    def test_a_dense_model_yields_no_rpc_plan(self):
+        # No routed experts means an expert-only -ot rule would place
+        # nothing at all; a plan whose remote range is empty is a plan
+        # that pays the wire cost for no work. The whole-layer rule this
+        # replaced would have emitted one -- and it aborted at load.
+        dense = dict(self.LAYOUT, is_moe=False, expert_bytes_per_layer={},
+                     non_expert_bytes=11 << 30, layer_bytes=10 << 30)
+        self.assertEqual(self._rpc_plans(3 << 30, layout=dense), [])
+
+    # --- the RPC device has to be in --device to receive anything ------
+    #
+    # llama.cpp only offloads to devices named in --device, and every
+    # fleet config that has ever loaded (the tier-4 ladder, the laguna R2
+    # promotion) lists the RPC client there with a ZERO tensor-split
+    # share -- the -ot rule decides what lands on it, so it must take no
+    # part of the automatic layer split. These plans omitted it entirely.
+
+    def test_the_rpc_client_joins_an_existing_device_list(self):
+        (plan,) = self._rpc_plans(3 << 30, profile=self._split_profile())
+        self.assertIn("--device SYCL0,SYCL1,RPC0", plan.config["extra"])
+
+    def test_the_rpc_client_takes_a_zero_share_of_an_existing_split(self):
+        (plan,) = self._rpc_plans(3 << 30, profile=self._split_profile())
+        self.assertEqual(plan.config["tensor_split"], "8,3,0")
+
+    def test_the_device_list_reaches_the_argv_after_rpc(self):
+        # --rpc must precede --device: the RPC backend registers its
+        # devices when --rpc is parsed (laguna R2 gotcha).
+        (plan,) = self._rpc_plans(3 << 30, profile=self._split_profile())
+        argv = list(plan.argv)
+        self.assertIn("--device", argv)
+        self.assertEqual(argv[argv.index("--device") + 1],
+                         "SYCL0,SYCL1,RPC0")
+        self.assertLess(argv.index("--rpc"), argv.index("--device"))
+
+    def test_a_single_local_device_gains_a_split_so_rpc_gets_no_layers(self):
+        # The fixture profile names one card and no split at all. Left
+        # alone, two devices with no --tensor-split let llama.cpp spread
+        # layers onto the RPC device automatically, on top of the -ot rule.
+        (plan,) = self._rpc_plans(3 << 30)
+        self.assertIn("--device CUDA0,RPC0", plan.config["extra"])
+        self.assertEqual(plan.config["tensor_split"], "1,0")
+        self.assertEqual(plan.config["split_mode"], "layer")
+
+    def test_split_positions_always_match_the_device_list(self):
+        for profile in (self._profile(), self._split_profile()):
+            (plan,) = self._rpc_plans(3 << 30, profile=profile)
+            argv = list(plan.argv)
+            devices = argv[argv.index("--device") + 1].split(",")
+            split = argv[argv.index("--tensor-split") + 1].split(",")
+            self.assertEqual(len(devices), len(split))
+            self.assertEqual(split[-1], "0", "the RPC client takes no share")
+            self.assertTrue(devices[-1].startswith("RPC"))
+
+    def test_a_split_that_does_not_match_the_devices_yields_no_plan(self):
+        # Three shares for two cards: the positional mapping is already
+        # broken, so appending a fourth would place the remote device
+        # against the wrong share. Fail closed rather than guess -- the
+        # same stance RPC plans take on a non-RPC build.
+        profile = self._split_profile()
+        profile["config"] = {**profile["config"], "tensor_split": "8,3,1"}
+        self.assertEqual(self._rpc_plans(3 << 30, profile=profile), [])
+
+    def test_a_device_list_already_naming_the_client_is_not_doubled(self):
+        profile = self._split_profile()
+        profile["config"] = {
+            **profile["config"], "tensor_split": "8,3,0",
+            "extra": "--fit off --device SYCL0,SYCL1,RPC0"}
+        (plan,) = self._rpc_plans(3 << 30, profile=profile)
+        self.assertEqual(plan.config["extra"].count("RPC0"), 1)
+        self.assertEqual(plan.config["tensor_split"], "8,3,0")
+
+    def test_an_already_listed_client_with_a_real_share_yields_no_plan(self):
+        # Present in --device is not enough: a nonzero share means the
+        # automatic layer split ALSO hands the RPC device attention and
+        # norm tensors it cannot run, which is the whole failure this
+        # function exists to prevent. Accepting it because the name was
+        # already there would smuggle the defect back in.
+        profile = self._split_profile()
+        profile["config"] = {
+            **profile["config"], "tensor_split": "8,3,2",
+            "extra": "--fit off --device SYCL0,SYCL1,RPC0"}
+        self.assertEqual(self._rpc_plans(3 << 30, profile=profile), [])
+
+    def test_an_already_listed_client_with_no_split_yields_no_plan(self):
+        # No --tensor-split at all means llama.cpp spreads layers across
+        # every named device by its own rule -- including the RPC one.
+        profile = self._split_profile()
+        profile["config"] = {
+            **profile["config"], "tensor_split": "", "split_mode": "",
+            "extra": "--fit off --device SYCL0,SYCL1,RPC0"}
+        self.assertEqual(self._rpc_plans(3 << 30, profile=profile), [])
+
+    def test_the_equals_form_of_device_is_recognised(self):
+        # llama.cpp accepts --device=X, and _make_claim already parses
+        # both forms; a second parser in the same file that saw only the
+        # space form would miss the list and append a CONFLICTING second
+        # --device token instead of extending the first.
+        profile = self._split_profile()
+        profile["config"] = {**profile["config"], "device": "CUDA0",
+                             "extra": "--fit off --device=SYCL0,SYCL1"}
+        (plan,) = self._rpc_plans(3 << 30, profile=profile)
+        extra = plan.config["extra"]
+        self.assertEqual(extra.count("--device"), 1)
+        self.assertIn("--device SYCL0,SYCL1,RPC0", extra)
+        self.assertEqual(plan.config["tensor_split"], "8,3,0")
 
 
 class TestActiveRemoteClaimsStillCharge(unittest.TestCase):

@@ -663,19 +663,33 @@ def stale_input_profiles(live=None) -> list:
 # --- placement ------------------------------------------------------
 
 def contiguous_range(first_layer: int, last_layer: int) -> str:
-    """An -ot regex matching exactly the layers first..last inclusive.
+    """An -ot regex for the ROUTED EXPERTS of layers first..last inclusive.
 
-    Spelled as an explicit alternation of indices rather than a clever
-    numeric range pattern: `blk\\.(1[6-9]|2[0-3])\\.` is the kind of
-    thing that silently also matches blk.160 on a model with more
-    layers. An alternation of exact indices, anchored on the trailing
-    dot, cannot.
+    Routed experts only, never the whole layer. A layer also holds norm
+    and attention tensors, and the RPC buffer cannot run those ops, so a
+    whole-layer pattern aborts llama.cpp at load:
+
+        ggml-backend.cpp:934: pre-allocated tensor
+        (blk.42.attn_norm.weight) in a buffer (RPC0[192.168.0.76:50052])
+        that cannot run the operation (NONE)
+
+    -- observed live 2026-08-04, and it blocked every plan this function
+    feeds. `ffn_.*_exps` is the calibration-proven placement, and the
+    same rule modelctl_tiers emits for the ladder plans that do serve.
+    It excludes shared experts (`_shexp`) on purpose: those run every
+    token and belong with the layer's attention on the local card.
+
+    The layer set is spelled as an explicit alternation of indices
+    rather than a clever numeric range pattern: `blk\\.(1[6-9]|2[0-3])\\.`
+    is the kind of thing that silently also matches blk.160 on a model
+    with more layers. An alternation of exact indices, anchored on the
+    trailing dot, cannot.
     """
     if last_layer < first_layer:
         raise ValueError(
             f"empty layer range {first_layer}..{last_layer}")
     idx = "|".join(str(i) for i in range(first_layer, last_layer + 1))
-    return rf"blk\.({idx})\.=%s"
+    return rf"blk\.({idx})\.ffn_.*_exps=%s"
 
 
 def placement_args(rpc_config: dict) -> list:

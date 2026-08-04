@@ -240,7 +240,8 @@ def _plan_label(config, source, gpu_names=None):
         # wants the endpoint, since that is what names the machine.
         buf = pl.get("buffer_type", "RPC")
         where = buf.partition("[")[2].rstrip("]") or buf
-        return f"layers {first}-{last} on {where}"
+        # "experts of", not "layers": only routed experts cross the wire.
+        return f"experts of layers {first}-{last} on {where}"
     if source == "tier-planner":
         tier = config.get("_tier", "?")
         return f"tier {tier} plan"
@@ -1314,41 +1315,166 @@ def compile_launch_plans(profile, hardware=None, include_experimental=False):
 
 
 def _rpc_layer_budget(profile, budget_bytes):
-    """How many trailing layers fit in a remote device's budget.
+    """The trailing routed-expert layers that fit a remote device's budget.
 
-    Returns (n_layers, per_layer_bytes, block_count) or (0, 0, 0) when
-    the model's layout is unknown -- an estimate is not good enough to
-    place tensors on another machine with.
+    Returns (first_layer, last_layer, expert_bytes), or None when nothing
+    can be placed -- including when the model's layout is unknown, since
+    an estimate is not good enough to place tensors on another machine
+    with.
+
+    Sized in ROUTED-EXPERT bytes, because those are the only bytes that
+    move: the -ot rule is expert-only (modelctl_fleet.contiguous_range),
+    so each layer's attention and norm tensors stay on the local card.
+    Spending whole-layer bytes here was wrong in both directions -- it
+    bought too few layers, and because _apply_rpc_placement debits the
+    local devices by exactly what this reports, it also understated the
+    local claim by the bytes that never left.
+
+    A dense model places nothing: with no routed experts an expert-only
+    rule moves zero bytes, and a plan whose remote range is empty pays
+    the wire cost for no work.
     """
     model_path = profile.get("model_path", "")
     if not model_path or not os.path.exists(model_path) or budget_bytes <= 0:
-        return 0, 0, 0
+        return None
     try:
         layout = modelctl_vram.gguf_model_layout(model_path)
     except Exception:
-        return 0, 0, 0
+        return None
     if not layout or not layout.get("block_count"):
-        return 0, 0, 0
-    n = layout["block_count"]
-    per_layer = (layout["weight_bytes"] - layout["other_bytes"]) / n
-    if per_layer <= 0:
-        return 0, 0, 0
-    fits = int(budget_bytes / per_layer)
-    # Never the whole model: a remote range that swallows every layer
-    # leaves the local side holding nothing but the KV cache, which is
-    # not a serving topology anyone asked for -- and it makes the
-    # local-fallback comparison meaningless.
-    return max(0, min(n - 1, fits)), int(per_layer), n
+        return None
+    try:
+        # OverflowError too: int(float("inf")) raises it, and this runs on
+        # every plan compilation -- a raise here wedges the console, so
+        # the house rule is degrade, never raise.
+        per_layer = {}
+        for key, value in (layout.get("expert_bytes_per_layer") or {}).items():
+            if (nbytes := int(value)) > 0:
+                per_layer[int(key)] = nbytes
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        return None
+    if not per_layer:
+        return None
+
+    # Contiguous and trailing (see _compile_rpc_plans for why), so walk
+    # back from the last expert-bearing layer and stop at the first layer
+    # that does not fit or that hosts no experts at all.
+    last = max(per_layer)
+    # Never every expert layer: a remote range that swallows them all
+    # leaves the local side holding nothing but attention and the KV
+    # cache, which is not a serving topology anyone asked for -- and it
+    # makes the local-fallback comparison meaningless.
+    limit = len(per_layer) - 1
+    chosen, spent = [], 0
+    for layer in range(last, -1, -1):
+        nbytes = per_layer.get(layer)
+        if not nbytes or spent + nbytes > budget_bytes or len(chosen) >= limit:
+            break
+        chosen.append(layer)
+        spent += nbytes
+    if not chosen:
+        return None
+    return min(chosen), last, spent
+
+
+# Both spellings, matching _make_claim's parser for the same field a few
+# hundred lines up: llama.cpp accepts --device=X, and a second parser in
+# this file that saw only the space form would miss an existing list and
+# append a CONFLICTING --device token instead of extending it.
+_DEVICE_ARG_RE = re.compile(r"--device[= ]([A-Za-z0-9_,]+)")
+
+
+def _attach_rpc_device(merged, client_device):
+    """Add the RPC client to the plan's device list with a zero split share.
+
+    Three-valued on purpose, so the caller must test `is None` and not
+    truthiness:
+      dict -- the config overrides to merge
+      {}   -- already correctly configured; nothing to change
+      None -- cannot be made safe, so the caller DROPS the plan rather
+              than emit one that cannot load
+
+    llama.cpp only offloads to devices named in --device, and every fleet
+    config that has ever served -- the tier-4 ladder and the laguna R2
+    promotion -- names the RPC client there with a ZERO tensor-split
+    share. The share must be zero because the -ot rule already decides
+    what lands remotely; a nonzero share would ALSO hand it a slice of
+    the automatic layer split, including the attention and norm tensors
+    the RPC buffer cannot run.
+
+    --device goes into `extra`, not config["device"], because
+    build_server_args emits the split instead of config["device"]
+    whenever split_mode and tensor_split are both set -- so a device list
+    written to config would silently never reach the argv. `extra` is
+    also emitted after placement_args, which keeps --rpc ahead of
+    --device (the laguna R2 gotcha).
+    """
+    extra = str(merged.get("extra", "") or "")
+    match = _DEVICE_ARG_RE.search(extra)
+    if match:
+        devices = [d for d in match.group(1).split(",") if d]
+    else:
+        devices = [d for d in str(merged.get("device", "") or "").split(",")
+                   if d]
+    if not devices:
+        # No explicit device list to extend. Inventing one would restrict
+        # the model to fewer devices than the profile intends.
+        return None
+
+    split = str(merged.get("tensor_split", "") or "")
+    shares = [s for s in split.split(",") if s]
+
+    if client_device in devices:
+        # Being NAMED is not enough. Without a matching zero share the
+        # automatic layer split still hands this device a slice of the
+        # model -- attention and norms included -- on top of whatever the
+        # -ot rule places, which is the exact failure this function
+        # exists to prevent. Accept only a provably zero share.
+        if len(shares) != len(devices):
+            return None
+        try:
+            if float(shares[devices.index(client_device)]) != 0.0:
+                return None
+        except ValueError:
+            return None
+        return {}
+
+    if shares:
+        if len(shares) != len(devices):
+            # Position i of --tensor-split maps to position i of --device;
+            # a mapping that is already broken cannot be extended without
+            # guessing which share belongs to the remote device.
+            return None
+        new_split = ",".join(shares + ["0"])
+    elif len(devices) == 1:
+        new_split = "1,0"
+    else:
+        # Several local cards and no split: llama.cpp is spreading layers
+        # by its own rule, and there is no share list to append a 0 to.
+        return None
+
+    new_devices = ",".join(devices + [client_device])
+    if match:
+        new_extra = extra[:match.start()] + f"--device {new_devices}" \
+            + extra[match.end():]
+    else:
+        new_extra = (extra + " " if extra else "") + f"--device {new_devices}"
+    return {"extra": new_extra, "device": "", "split_mode": "layer",
+            "tensor_split": new_split}
 
 
 def _compile_rpc_plans(profile, hardware, capabilities):
-    """One plan per usable remote device: a contiguous trailing layer range.
+    """One plan per usable remote device: the routed experts of a
+    contiguous trailing layer range.
 
     Contiguous and trailing on purpose. llama.cpp streams activations
     across the RPC boundary once per contiguous region, so a scattered
     placement pays the network cost repeatedly per token; a single
     trailing block crosses the wire twice. The work order allows
     contiguous ranges only, and this is why.
+
+    Routed experts only, never whole layers -- see contiguous_range. A
+    model with no routed experts therefore yields no plans here.
     """
     out = []
     try:
@@ -1367,12 +1493,11 @@ def _compile_rpc_plans(profile, hardware, capabilities):
         for dev_index, device in enumerate(node.devices):
             if device.budget_bytes <= 0:
                 continue
-            n_layers, per_layer, block_count = _rpc_layer_budget(
-                profile, device.budget_bytes)
-            if n_layers <= 0:
+            placement = _rpc_layer_budget(profile, device.budget_bytes)
+            if placement is None:
                 continue
-            first = block_count - n_layers
-            last = block_count - 1
+            first, last, moved_bytes = placement
+            n_layers = last - first + 1
             rpc_device = modelctl_fleet.device_name_for(
                 endpoints, node.endpoint, dev_index)
             buf_type = modelctl_fleet.buffer_type_for(
@@ -1383,15 +1508,22 @@ def _compile_rpc_plans(profile, hardware, capabilities):
                 "placements": [{"buffer_type": buf_type,
                                 "first_layer": first, "last_layer": last}],
                 # Carried so admission can charge the remote budget to the
-                # right key without re-deriving it from the argv.
-                "admission": {key: int(n_layers * per_layer)},
+                # right key without re-deriving it from the argv. The
+                # routed-expert bytes only: that is all the -ot rule moves.
+                "admission": {key: int(moved_bytes)},
             }
+            # The remote device must be in --device or nothing reaches it.
+            attach = _attach_rpc_device(
+                {**profile.get("config", {})}, rpc_device)
+            if attach is None:
+                continue
             out.append(_make_plan(
-                profile, {"rpc": rpc_cfg}, "fleet-rpc", hardware,
+                profile, {"rpc": rpc_cfg, **attach}, "fleet-rpc", hardware,
                 extra_warnings=(
-                    f"layers {first}-{last} execute on {node.name} "
-                    f"({device.name}) over the network; the local-only "
-                    f"plans remain available if the node goes away",),
+                    f"the routed experts of layers {first}-{last} execute "
+                    f"on {node.name} ({device.name}) over the network; "
+                    f"the local-only plans remain available if the node "
+                    f"goes away",),
                 decision={"rpc": {
                     "node": node.name, "endpoint": node.endpoint,
                     "device": device.name, "client_device": rpc_device,
@@ -1399,7 +1531,7 @@ def _compile_rpc_plans(profile, hardware, capabilities):
                     "first_layer": first, "last_layer": last,
                     "layers": n_layers,
                     "budget_bytes": int(device.budget_bytes),
-                    "claimed_bytes": int(n_layers * per_layer),
+                    "claimed_bytes": int(moved_bytes),
                     "admission_key": key}},
                 capabilities=capabilities))
     return out
