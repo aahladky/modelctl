@@ -108,6 +108,16 @@ class TestRegistryRoundTrip(FleetStateBase):
         self.fleet_path.write_text("{not json")
         self.assertEqual(fleet.load_fleet(), [])
 
+    def test_valid_json_of_the_wrong_shape_reads_as_no_fleet(self):
+        """"Never raises" has to mean it. A top-level list or null is
+        valid JSON, so it survived the decode and then met `raw.get` --
+        an AttributeError out of a loader every budget builder calls
+        without a guard of its own."""
+        for text in ("[]", "null", "42", '"nodes"'):
+            with self.subTest(text=text):
+                self.fleet_path.write_text(text)
+                self.assertEqual(fleet.load_fleet(), [])
+
     def test_a_malformed_node_is_skipped_not_fatal(self):
         self.fleet_path.write_text(json.dumps(
             {"nodes": [{"host": "h"}, a_node().to_dict()]}))
@@ -476,6 +486,128 @@ class TestReservationBudgetsCarryTheFleet(FleetStateBase):
         # A pure capacity shortfall with nobody else holding anything --
         # the distinction f94c9e9 exists to make.
         self.assertEqual(denial["holders"], [])
+
+
+class TestMatrixBudgetsCarryTheFleet(FleetStateBase):
+    """An rpc-planned profile keeps its llama-swap route.
+
+    The gap this pins (2026-08-04): `profile_claim` returns the PINNED
+    plan's claim for a managed profile, so an rpc-planned model claims
+    `RPC:<node>:<device>` keys -- while `_budgets` was built from local
+    cards plus RAM alone. `_fits` then read `budgets.get(remote_key, 0)`
+    -> 0, and `generate_matrix` dropped the model as "exceeds budgets
+    alone", losing its `mc_` route at the next
+    `routing_service.apply_matrix` (which rewrites config.yaml and
+    restarts llama-swap). Measured on the live rig for
+    qwen3-5-122b-a10b-ud: claim SYCL0 25.90, SYCL1 8.86,
+    RPC:ph16-71-cuda0:CUDA0 9.52, RPC:ph16-71-cpu0:CPU 24.47 GiB against
+    budgets naming only SYCL0, SYCL1 and RAM.
+
+    The merged map is `budget_input` -- declared ceilings for ENABLED
+    nodes -- and deliberately neither of its siblings.
+    `admission_budgets` is presence-gated, so a closed laptop would
+    delete a model's route; `reservation_budgets` is free-based. Routing
+    must not flap with a lid or with desktop load, which is the same
+    reason the local half is total-based.
+    """
+
+    INVENTORY = [{"device": "SYCL0", "total_bytes": 20 << 30}]
+    DEFAULTS = {"vram_limit_pct": 90}
+    LOCAL_BUDGET = (20 << 30) * (90 / 100.0)
+
+    def setUp(self):
+        super().setUp()
+        import modelctl
+        import modelctl_hardware
+        self.profiles = Path(self.tmp) / "profiles"
+        self.profiles.mkdir()
+        for target, attr, val in (
+                (modelctl_hardware, "load_settings",
+                 lambda: {"devices": {}, "ram": {"reserve_bytes": 0}}),
+                (modelctl_hardware, "_system_ram", lambda: 64 << 30),
+                (modelctl, "PROFILES_DIR", self.profiles)):
+            p = mock.patch.object(target, attr, val)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _budgets(self):
+        import modelctl_matrix
+        return modelctl_matrix._budgets(self.INVENTORY, self.DEFAULTS)
+
+    def test_a_declared_remote_ceiling_is_a_matrix_budget(self):
+        fleet.save_fleet([a_node(budget=8 << 30)])
+        self.assertEqual(self._budgets()["RPC:ph16-71:CUDA0"], 8 << 30)
+
+    def test_a_closed_laptop_does_not_move_the_matrix(self):
+        """Presence-independent on purpose: were this map presence-gated,
+        every probe that missed would delete an rpc-planned model's route
+        and the next one would put it back."""
+        fleet.save_fleet([a_node(budget=8 << 30)])
+        absent = self._budgets()  # never probed
+        fleet.refresh_presence(connect=lambda h, p, t: FakeSocket())
+        self.assertEqual(self._budgets(), absent)
+
+    def test_a_disabled_node_is_not_lent(self):
+        fleet.save_fleet([a_node(budget=8 << 30, enabled=False)])
+        self.assertNotIn("RPC:ph16-71:CUDA0", self._budgets())
+
+    def test_the_local_half_stays_total_based(self):
+        fleet.save_fleet([a_node(budget=8 << 30)])
+        budgets = self._budgets()
+        self.assertEqual(budgets["SYCL0"], self.LOCAL_BUDGET)
+        self.assertEqual(budgets["RAM"], 64 << 30)
+
+    def test_a_claim_inside_the_declared_ceiling_fits(self):
+        import modelctl_matrix
+        fleet.save_fleet([a_node(budget=8 << 30)])
+        claim = {"m": {"SYCL0": 10 << 30, "RPC:ph16-71:CUDA0": 6 << 30}}
+        self.assertTrue(
+            modelctl_matrix._fits(claim, ["m"], self._budgets()))
+
+    def test_a_claim_over_the_declared_ceiling_still_does_not_fit(self):
+        import modelctl_matrix
+        fleet.save_fleet([a_node(budget=8 << 30)])
+        claim = {"m": {"SYCL0": 10 << 30, "RPC:ph16-71:CUDA0": 12 << 30}}
+        self.assertFalse(
+            modelctl_matrix._fits(claim, ["m"], self._budgets()))
+
+    def _generate(self, claim):
+        """generate_matrix over one profile with a recorded claim.
+
+        The claim is injected rather than computed: producing a real one
+        needs a managed profile, a pinned plan and a hardware probe, all
+        of which this test would then be asserting about instead of the
+        thing it is here for. The shape is the live 122B's.
+        """
+        import modelctl_matrix
+        import modelctl_runtime
+        (self.profiles / "planned.json").write_text(json.dumps(
+            {"name": "planned", "model_path": "/fake/m.gguf",
+             "config": {"ctx": 8192}}))
+
+        class FakeRdb:
+            def plan_runs_for(self, name, limit=10):
+                return []
+
+        with mock.patch.object(modelctl_matrix, "profile_claim",
+                               lambda p, inv, d=None: dict(claim)), \
+                mock.patch.object(modelctl_runtime, "RuntimeDB", FakeRdb):
+            return modelctl_matrix.generate_matrix(self.INVENTORY,
+                                                   self.DEFAULTS)
+
+    def test_an_rpc_planned_profile_keeps_its_managed_route(self):
+        fleet.save_fleet([a_node(budget=8 << 30)])
+        out = self._generate({"SYCL0": 10 << 30, "RPC:ph16-71:CUDA0": 6 << 30})
+        self.assertEqual(out["excluded"], [])
+        self.assertIn("mc_planned", out["sets"])
+
+    def test_a_profile_that_really_is_too_big_is_still_excluded(self):
+        """The merge must not turn the routing gate into a rubber stamp."""
+        fleet.save_fleet([a_node(budget=8 << 30)])
+        out = self._generate({"SYCL0": 10 << 30, "RPC:ph16-71:CUDA0": 12 << 30})
+        self.assertNotIn("mc_planned", out["sets"])
+        self.assertEqual([e["reason"] for e in out["excluded"]],
+                         ["exceeds budgets alone"])
 
 
 class TestBothChargingPathsUseTheSharedBuilder(unittest.TestCase):

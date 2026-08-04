@@ -100,7 +100,24 @@ def profile_claim(profile, inventory, defaults=None):
 def _budgets(inventory, defaults):
     """Stable budgets: card capacity * limit minus any configured hardware
     reserves (hardware.json), and RAM from TOTAL memory minus reserve -- not
-    transient free RAM, which would make the matrix flap with desktop load."""
+    transient free RAM, which would make the matrix flap with desktop load.
+
+    Fleet devices contribute their DECLARED ceiling, for the same
+    stability reason. A managed profile's claim is its pinned plan's
+    claim, so an rpc-planned model names `RPC:<node>:<device>` keys; a
+    map without them makes `_fits` read 0 and `generate_matrix` drop the
+    model as "exceeds budgets alone", deleting the `mc_` route it is
+    being served on today (2026-08-04).
+
+    `budget_input` is the right sibling here and its two neighbours are
+    not: `admission_budgets` is presence-gated, so a closed laptop would
+    delete a model's route and reopening it would put the route back --
+    routing flap driven by a lid; `reservation_budgets` is free-based,
+    which is the right question for "may this launch spend the bytes
+    now" and the wrong one for "may these models coexist at all". Remote
+    keys are namespaced by `modelctl_fleet.admission_key`, so the merge
+    can only add keys, never shadow a local one.
+    """
     import modelctl_hardware
     settings = modelctl_hardware.load_settings()
     dev_cfg = settings.get("devices", {})
@@ -112,6 +129,17 @@ def _budgets(inventory, defaults):
     ram_reserve = (settings.get("ram") or {}).get("reserve_bytes",
                                                  4 * (1 << 30))
     budgets["RAM"] = max(0, modelctl_hardware._system_ram() - ram_reserve)
+    try:
+        import modelctl_fleet
+        budgets.update(modelctl_fleet.budget_input())
+    except (OSError, ValueError, TypeError):
+        # The fleet loaders already swallow unreadable/malformed state and
+        # return empty, so this only fires on something they did not
+        # anticipate. Degrading to the local-only map costs an rpc-planned
+        # model its managed route, which is visible and recoverable;
+        # inventing budgets we could not read would coexist models that do
+        # not fit, on someone else's machine.
+        pass
     return budgets
 
 

@@ -205,6 +205,14 @@ def load_fleet(path=None) -> list:
         raw = json.loads(p.read_text())
     except (OSError, ValueError):
         return []
+    if not isinstance(raw, dict):
+        # Valid JSON of the wrong shape ("[]", "null", "42") reached
+        # `raw.get` and raised AttributeError, straight through the
+        # "never raises" promise above and out of every caller that
+        # trusts it -- including both budget builders, where it would
+        # fail a routing or launch job with a traceback instead of
+        # degrading to local-only budgets.
+        return []
     nodes = []
     for entry in raw.get("nodes", []):
         try:
