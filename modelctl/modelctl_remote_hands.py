@@ -922,8 +922,9 @@ def handle_message(msg, peer=None, xff=None):
             "instructions":
                 "Files and shell on Aaron's rig. Filesystem tools are "
                 "restricted to " + ", ".join(str(r) for r in allow_roots())
-                + ". The serving stack (llama-swap, OVMS, the web console) "
-                  "must never be restarted.",
+                + ". llama-swap and OVMS must never be restarted. "
+                  "modelctl-web may be restarted once /api/v2/jobs "
+                  "shows no running job (decided 2026-08-05).",
         })
     if method in ("notifications/initialized", "notifications/cancelled"):
         return None

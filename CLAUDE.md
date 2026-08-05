@@ -4,8 +4,12 @@ Aaron's homelab inference stack. Task context arrives inside each
 dispatched work order; this file is only the safety floor for ad-hoc
 sessions.
 
-- The serving stack is live: don't touch ~/services/, systemd, or
-  docker, and never restart llama-swap or OVMS.
+- The serving stack is live: don't touch ~/services/ or docker, and
+  never restart llama-swap or OVMS. Exception (decided 2026-08-05):
+  restarting modelctl-web is allowed and expected after landing
+  console changes — check /api/v2/jobs for running jobs first, then
+  `systemctl --user restart modelctl-web`, then verify /api/v2/models
+  answers. All other systemd units stay hands-off.
 - Workflow: the ECC rules (~/.claude/rules/ecc/) govern how work gets
   done — plan first, tests before implementation, code review before
   any commit, conventional commit messages. Where an older doc here
