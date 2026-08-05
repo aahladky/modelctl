@@ -135,17 +135,39 @@ def worker_main(profile_name, port):
         )
 
     snap = modelctl_hardware.capture_hardware_snapshot()
-    plans = modelctl_plans.compile_launch_plans(profile, snap)
     rdb = modelctl_runtime.RuntimeDB()
-    observations = rdb.observations_for_profile(
-        profile_name, snap.fingerprint,
-        snap.backend_fingerprints.get(profile.get("backend", "llama-cpp"), ""))
-    failures = rdb.failures_for_profile(profile_name)
-    ranked = modelctl_plans.rank_plans(plans, policy, observations, failures)
 
-    disabled = set(rt.get("disabled_plan_ids", []))
-    if disabled:
-        ranked = [(p, s) for p, s in ranked if p.id not in disabled]
+    # Where this model runs is the profile's stored selection, and the
+    # launcher asks the same function the placement screen asks. These
+    # were two implementations of one fact -- the screen asking
+    # plan_for_selection, the launcher compiling its own candidates and
+    # promoting a pinned id -- and they could disagree without either side
+    # being able to tell.
+    #
+    # An empty selection still means the automatic placement, so a profile
+    # nobody has placed by hand keeps exactly today's behaviour: compile,
+    # rank, honour the pin. That is what makes this landable without a
+    # migration.
+    selection = (profile.get("planning") or {}).get("selection") or {}
+    if selection:
+        ranked = modelctl_plans.plans_for_selection_launch(
+            profile, selection, policy, hardware=snap,
+            log=lambda message: print(f"modelctl-worker: {message}",
+                                      file=sys.stderr))
+        plans = [p for p, _s in ranked]
+    else:
+        plans = modelctl_plans.compile_launch_plans(profile, snap)
+        observations = rdb.observations_for_profile(
+            profile_name, snap.fingerprint,
+            snap.backend_fingerprints.get(
+                profile.get("backend", "llama-cpp"), ""))
+        failures = rdb.failures_for_profile(profile_name)
+        ranked = modelctl_plans.rank_plans(plans, policy, observations,
+                                           failures)
+
+        disabled = set(rt.get("disabled_plan_ids", []))
+        if disabled:
+            ranked = [(p, s) for p, s in ranked if p.id not in disabled]
 
     # Live feasibility: drop plans whose claim doesn't fit current free
     # resources (minus configured reserves and what other workers already
@@ -180,12 +202,29 @@ def worker_main(profile_name, port):
     ranked = feasible
 
     if not ranked:
-        print(f"modelctl-worker: no feasible plans for '{profile_name}'", file=sys.stderr)
+        if selection:
+            # "No feasible plans" would be the wrong reason: there is one
+            # intent here, not a candidate set that came up empty, and the
+            # ladder has already said on stderr which rung refused it.
+            print(f"modelctl-worker: the placement chosen for "
+                  f"'{profile_name}' cannot run on this machine right now",
+                  file=sys.stderr)
+        else:
+            print(f"modelctl-worker: no feasible plans for '{profile_name}'",
+                  file=sys.stderr)
         return 1
 
     # Pinned plan goes first; alternatives stay as fallback unless the
     # policy explicitly disables fallback.
-    if policy.pinned_plan_id and not policy.allow_fallback:
+    #
+    # Legacy, and skipped entirely once a selection exists: a pin names a
+    # compiled artifact, and plan ids hash that artifact, so every planner
+    # improvement stranded the pin -- the 122B's ladder plan moved
+    # cf4274bf -> 2b426a8f after the --no-mmap fix and needed a person at
+    # a terminal to re-pin. A selection is intent and survives that. It
+    # still decides the launch for any profile that has no selection, so
+    # nothing in flight breaks.
+    if policy.pinned_plan_id and not policy.allow_fallback and not selection:
         ranked = [(p, s) for p, s in ranked if p.id == policy.pinned_plan_id]
         if not ranked:
             print(f"modelctl-worker: pinned plan {policy.pinned_plan_id} not feasible "

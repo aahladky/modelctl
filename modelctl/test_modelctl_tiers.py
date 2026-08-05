@@ -1,7 +1,9 @@
+import json
 import re
 import shlex
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import modelctl_tiers
 import modelctl_vram
@@ -763,6 +765,236 @@ class TestRemoteRungs(unittest.TestCase):
             layout=moe_layout(60, 1.1), remote_rungs=[])
         self.assertEqual(_json.dumps(a, sort_keys=True, default=str),
                          _json.dumps(b, sort_keys=True, default=str))
+
+
+class TestLaunchPlanForSelection(unittest.TestCase):
+    """The selection is what runs, not only what is previewed.
+
+    plan_for_selection had exactly two callers -- the placement screen and
+    its apply -- while the launcher compiled its own candidate set and
+    promoted a pinned plan id. Two implementations of "where does this
+    model run", which is the failure the placement endpoint exists to
+    prevent, one layer further down.
+    """
+
+    def _profile(self):
+        """The shared fixture plus the keys build_server_args requires.
+
+        plan_tiers never needed flash_attn, so the module fixture omits
+        it; turning a plan into argv does. Kept local rather than widened
+        into profile(), which 50-odd other tests in this file compare
+        against.
+        """
+        p = profile()
+        p["name"] = "m1"
+        p["config"] = {**p["config"], "flash_attn": "auto"}
+        return p
+
+    def _inputs(self, ram_gib=40):
+        return {"inventory": INVENTORY, "vram_limit_pct": 90,
+                "primary": "SYCL0", "ram_available_bytes": ram_gib * GIB}
+
+    def _both(self, selection, ram_gib=40):
+        """(previewed tier plan, launch plan) for one selection."""
+        import modelctl_plans
+        kw = dict(inputs=self._inputs(ram_gib),
+                  remote_rungs=[RUNG_GPU, RUNG_CPU],
+                  layout=moe_layout(60, 1.1, has_shexp=True))
+        return (modelctl_plans.plan_for_selection(self._profile(), selection,
+                                                  **kw),
+                modelctl_plans.launch_plan_for_selection(self._profile(),
+                                                         selection, **kw))
+
+    def test_the_launch_plan_carries_the_previewed_placement(self):
+        """The assertion this whole phase exists for. If these ever differ,
+        the screen is describing a layout the machine will not run."""
+        for selection in ({},
+                          {RUNG_CPU["name"]: {"on": False}},
+                          {"SYCL0": {"ceiling_bytes": 12 * GIB}}):
+            with self.subTest(selection=selection):
+                previewed, launch = self._both(selection)
+                for key, value in previewed["config"].items():
+                    self.assertEqual(
+                        launch.config.get(key), value,
+                        f"{key} differs between what the screen showed and "
+                        f"what the launcher would run")
+
+    def test_the_launch_plan_is_a_real_plan_the_worker_can_run(self):
+        """A dict is not enough: the worker needs argv to exec, a claim to
+        charge against the admission gate, and an id to record events."""
+        _previewed, launch = self._both({})
+        self.assertTrue(launch.argv, "nothing to exec")
+        self.assertTrue(launch.id)
+        self.assertEqual(launch.source, "selection")
+        self.assertTrue(launch.claim.vram_admission_bytes())
+
+    def test_the_previewed_warnings_survive_onto_the_launch_plan(self):
+        """A layout warned about on screen must not launch quietly."""
+        previewed, launch = self._both({}, ram_gib=4)
+        for w in previewed["warnings"]:
+            self.assertIn(w, launch.warnings)
+
+    def test_an_unplannable_selection_answers_none_rather_than_raising(self):
+        import modelctl_plans
+        with mock.patch.object(modelctl_plans, "plan_for_selection",
+                               return_value=None):
+            self.assertIsNone(modelctl_plans.launch_plan_for_selection(
+                profile(), {}, inputs=self._inputs()))
+
+
+class TestSelectionLaunchLadder(unittest.TestCase):
+    """Graceful degradation, decided 2026-08-04: a selection that cannot be
+    met degrades rather than failing, with a floor and a report.
+
+    The load-bearing rule is that the STORED selection is never rewritten.
+    A closed laptop makes its node unavailable for tonight's launch; it
+    does not un-tick it. Degradation is a property of one compilation,
+    intent is a property of the profile.
+    """
+
+    def _profile(self):
+        p = profile()
+        p["name"] = "m1"
+        p["config"] = {**p["config"], "flash_attn": "auto"}
+        p["planning"] = {"selection": {"SYCL0": {"ceiling_bytes": 12 * GIB}}}
+        return p
+
+    def _policy(self, **over):
+        import modelctl_plans
+        base = dict(objective="balanced", pinned_plan_id=None,
+                    allow_fallback=True, allow_untested=True,
+                    minimum_context=None, maximum_cpu_bytes=None,
+                    maximum_storage_tier=3)
+        base.update(over)
+        return modelctl_plans.RuntimePolicy(**base)
+
+    def _resolver(self, stored_ram=40, live_ram=8):
+        """resolve_planning_inputs stand-in: a recorded snapshot with room
+        and a live machine with less, which is the case degradation is
+        for."""
+        def resolve(_profile, refresh=False):
+            ram = live_ram if refresh else stored_ram
+            return ({"inventory": INVENTORY, "vram_limit_pct": 90,
+                     "primary": "SYCL0",
+                     "ram_available_bytes": int(ram * GIB)},
+                    "live" if refresh else "stored")
+        return resolve
+
+    def _stub_plans(self, *plans):
+        """Stand in for the compilations, so these tests exercise the
+        ladder's own decisions -- order, dedup, the floor, allow_fallback
+        -- rather than re-testing plan_tiers through it.
+
+        The hermetic profile points at a model file that does not exist,
+        so a real claim comes back degenerate (storage_mode "none", zero
+        bytes) and could never reach the floor. Whether the planner
+        actually spills is plan_tiers' own business and is covered above.
+        """
+        import modelctl_plans
+        seq = list(plans)
+
+        def fake(_profile, _selection, **_kw):
+            return seq.pop(0) if seq else None
+        return mock.patch.object(modelctl_plans, "launch_plan_for_selection",
+                                 side_effect=fake)
+
+    def _plan(self, plan_id, storage_mode="none"):
+        claim = mock.Mock(storage_mode=storage_mode)
+        return mock.Mock(id=plan_id, claim=claim, source="selection")
+
+    def _ladder(self, policy=None, resolver=None, prof=None):
+        import modelctl_plans
+        logged = []
+        target = prof or self._profile()
+        plans = modelctl_plans.plans_for_selection_launch(
+            target, target["planning"]["selection"],
+            policy or self._policy(),
+            resolve_inputs=resolver or self._resolver(),
+            remote_rungs=[], log=logged.append)
+        return plans, logged
+
+    def test_the_stored_selection_is_tried_first(self):
+        with self._stub_plans(self._plan("stored"), self._plan("degraded")):
+            plans, _ = self._ladder()
+        self.assertEqual([p.id for p, _ in plans], ["stored", "degraded"])
+
+    def test_a_tighter_machine_earns_a_second_compilation(self):
+        """Rung 2: a ceiling is a cap, not a reservation. When reality is
+        tighter than the recorded snapshot, re-planning against the machine
+        as it is now is what relaxing to real capacity means."""
+        with self._stub_plans(self._plan("stored"), self._plan("degraded")):
+            plans, logged = self._ladder()
+        self.assertEqual(len(plans), 2)
+        self.assertTrue(any("degraded" in m for m in logged),
+                        "a launch that is not the one asked for must say so")
+
+    def test_the_selection_on_the_profile_is_never_rewritten(self):
+        """The rule the whole ladder hangs on."""
+        prof = self._profile()
+        before = json.loads(json.dumps(prof["planning"]["selection"]))
+        with self._stub_plans(self._plan("stored"), self._plan("degraded")):
+            self._ladder(prof=prof)
+        self.assertEqual(prof["planning"]["selection"], before)
+
+    def test_refusing_to_degrade_leaves_exactly_one_compilation(self):
+        """allow_fallback=False is the strict reading: launch exactly what
+        was selected or fail. That is the honest setting for a profile
+        whose measured numbers depend on an exact layout."""
+        with self._stub_plans(self._plan("stored"), self._plan("degraded")):
+            plans, _ = self._ladder(policy=self._policy(allow_fallback=False))
+        self.assertEqual([p.id for p, _ in plans], ["stored"])
+
+    def test_the_ladder_stops_at_the_storage_floor(self):
+        """Degradation may not solve the problem by streaming from disk
+        when the profile forbids it. Reaching the floor is a named refusal,
+        never a silent slow launch."""
+        with self._stub_plans(self._plan("a", storage_mode="mmap"),
+                              self._plan("b", storage_mode="mmap")):
+            floored, logged = self._ladder(
+                policy=self._policy(maximum_storage_tier=2))
+        self.assertFalse(floored, "nothing may cross the floor")
+        self.assertTrue(any("storage" in m for m in logged),
+                        "the floor must say why it refused")
+
+    def test_streaming_is_allowed_when_the_profile_permits_it(self):
+        """Tier 3 is the default: spilling to SSD is then a choice, not a
+        violation, and must not be filtered out."""
+        with self._stub_plans(self._plan("a", storage_mode="mmap")):
+            plans, _ = self._ladder(policy=self._policy(maximum_storage_tier=3))
+        self.assertEqual([p.id for p, _ in plans], ["a"])
+
+    def test_an_identical_recompilation_is_not_offered_twice(self):
+        """When the live machine still matches the record, degrading yields
+        the same layout -- trying it again is a wasted launch attempt."""
+        with self._stub_plans(self._plan("same"), self._plan("same")):
+            plans, _ = self._ladder()
+        self.assertEqual(len(plans), 1)
+
+    def test_a_machine_that_cannot_be_read_does_not_take_the_launch_down(self):
+        def explode(_profile, refresh=False):
+            if refresh:
+                raise OSError("xpu-smi went away")
+            return ({"inventory": INVENTORY, "vram_limit_pct": 90,
+                     "primary": "SYCL0", "ram_available_bytes": 40 * GIB},
+                    "stored")
+        with self._stub_plans(self._plan("stored")):
+            plans, logged = self._ladder(resolver=explode)
+        self.assertEqual([p.id for p, _ in plans], ["stored"])
+        self.assertTrue(any("could not read the machine" in m for m in logged))
+
+    def test_the_compilations_are_planned_from_the_resolved_inputs(self):
+        """Stored snapshot first, live machine second -- the two pictures
+        the ladder exists to try, in that order."""
+        import modelctl_plans
+        seen = []
+
+        def fake(_profile, _selection, **kw):
+            seen.append(kw["inputs"]["ram_available_bytes"])
+            return self._plan(f"p{len(seen)}")
+        with mock.patch.object(modelctl_plans, "launch_plan_for_selection",
+                               side_effect=fake):
+            self._ladder()
+        self.assertEqual(seen, [40 * GIB, 8 * GIB])
 
 
 class TestPlacementInvariant(unittest.TestCase):

@@ -1027,6 +1027,122 @@ def plan_for_selection(profile, selection, inputs=None, remote_rungs=None,
         hw_settings=inputs.get("hw_settings"), remote_rungs=rungs)
 
 
+def launch_plan_for_selection(profile, selection, hardware=None, inputs=None,
+                              remote_rungs=None, layout=None,
+                              capabilities=None):
+    """The LaunchPlan for a stored selection -- what actually runs.
+
+    plan_for_selection answers where the weights land; this turns that
+    answer into the thing the worker can exec: argv, a resource claim to
+    charge against the admission gate, and an id to record events under.
+    Built by handing the tier plan's config to the SAME _make_plan() every
+    other candidate goes through, so a selection is not a second kind of
+    plan the rest of the system has to learn.
+
+    The point of the indirection is that the launcher and the placement
+    screen now derive their layout from one function and one selection.
+    Before this they were two implementations of "where does this model
+    run" -- the screen asking the planner, the launcher compiling its own
+    candidates and promoting a pinned id -- and they could, and did,
+    disagree.
+
+    The id still hashes the compiled config rather than the selection.
+    That was an open question and the answer fell out of removing the pin:
+    an id was fragile only because something stored it, and a stored id
+    went stale every time the planner improved. Nothing pins by id here --
+    the selection is what is durable -- which frees the id to go on being
+    what it is, a content hash of one layout, and that is precisely what
+    the evidence trail needs to key a measurement to the layout that
+    produced it.
+    """
+    tier_plan = plan_for_selection(profile, selection, inputs=inputs,
+                                   remote_rungs=remote_rungs, layout=layout)
+    if tier_plan is None:
+        return None
+    if capabilities is None:
+        capabilities = (inputs or {}).get("capabilities")
+    return _make_plan(profile, tier_plan.get("config") or {}, "selection",
+                      hardware,
+                      extra_warnings=tuple(tier_plan.get("warnings") or ()),
+                      capabilities=capabilities)
+
+
+def plans_for_selection_launch(profile, selection, policy, hardware=None,
+                               resolve_inputs=None, remote_rungs=None,
+                               layout=None, log=None):
+    """Compilations of one stored intent, best first.
+
+    The launcher's replacement for compile-rank-pin when a profile carries
+    a selection. It returns a list because a launch may need to try more
+    than once, but every entry is the SAME intent compiled against a
+    different picture of the machine -- not a ranked set of alternative
+    placements the operator never chose.
+
+    The stored selection is never rewritten here, and that is the rule the
+    whole ladder hangs on. A closed laptop makes its node unavailable for
+    this launch; it does not un-tick it. When the laptop comes back the
+    next launch gets it again with nothing to re-select. Degradation is a
+    property of one compilation; intent is a property of the profile.
+
+    Most of the ladder already existed inside the planner and is left
+    there rather than reimplemented: _remote_rungs omits a node nobody can
+    reach (rung 1, unavailable devices drop out), select_inputs clamps a
+    ceiling to what a device actually has (part of rung 2), and plan_tiers
+    IS the descent from VRAM to RAM to SSD (rung 3). What this adds is the
+    rest of rung 2 -- re-planning against the machine as it is now instead
+    of the recorded snapshot, which is what "ceilings relax to real
+    capacity" means once reality has got tighter -- and the floor.
+
+    The floor is `maximum_storage_tier`. Degradation may not solve the
+    problem by streaming from the disk when the profile forbids it;
+    reaching it is a named refusal, never a silent slow launch.
+
+    `allow_fallback` finally means something honest. It used to decide
+    whether the worker could leave a pinned plan for another compiled
+    candidate; with no candidate list to leave for, it now decides whether
+    this launch may degrade the selection at all. False is the strict
+    reading -- launch exactly what was chosen or fail -- which is the
+    right setting for a profile whose measured numbers depend on an exact
+    layout.
+    """
+    log = log or (lambda _message: None)
+    resolve = resolve_inputs or modelctl.resolve_planning_inputs
+    name = profile.get("name", "this model")
+    plans, seen = [], set()
+    for refresh in (False, True):
+        if refresh and not policy.allow_fallback:
+            break
+        try:
+            inputs, source = resolve(profile, refresh=refresh)
+        except Exception as e:
+            log(f"could not read the machine ({e})")
+            continue
+        plan = launch_plan_for_selection(profile, selection, hardware=hardware,
+                                         inputs=inputs,
+                                         remote_rungs=remote_rungs,
+                                         layout=layout)
+        if plan is None:
+            continue
+        # The same layout twice is a wasted launch attempt, not a rung: it
+        # happens whenever the live machine still matches the record.
+        if plan.id in seen:
+            continue
+        seen.add(plan.id)
+        if (policy.maximum_storage_tier < 3
+                and plan.claim.storage_mode == "mmap"):
+            log(f"NOT LAUNCHED: this selection needs to stream from storage "
+                f"and {name} is limited to "
+                f"{'GPU only' if policy.maximum_storage_tier == 1 else 'GPU + RAM'}"
+                f" -- widen the selection, raise the storage limit, or free "
+                f"memory")
+            continue
+        if refresh:
+            log(f"degraded: the selection did not fit the recorded machine, "
+                f"replanned against the machine as it is now ({source})")
+        plans.append((plan, 0.0))
+    return plans
+
+
 def current_profile_plan(profile, hardware=None, capabilities=None):
     """The single LaunchPlan meaning "this profile exactly as saved".
 

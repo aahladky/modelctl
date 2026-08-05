@@ -333,3 +333,74 @@ class TestMmapIsNotChargedAsResidentRam(AdmissionTruthBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheSelectionDecidesTheLaunch(AdmissionTruthBase):
+    """Phase 2 of the backend alignment plan: the launcher plans the
+    profile's stored selection instead of compiling its own candidate set
+    and promoting a pinned plan id.
+
+    The two used to be independent answers to "where does this model run",
+    which is how qwen3-5-122b-a10b-ud came to serve a four-device fleet
+    ladder while its placement surface described three local devices.
+    """
+
+
+    def _roomy_snap(self, plan):
+        """A machine with room to spare, so these tests are about which
+        planner path ran and not about admission arithmetic."""
+        need = plan.claim.vram_admission_bytes()
+        return FakeSnapshot(
+            [FakeGpu(dev, free_bytes=b + 8 * GiB, total_bytes=b + 8 * GiB)
+             for dev, b in (need or {"SYCL0": 0}).items()],
+            ram_available=64 * GiB)
+
+    def _with_selection(self, selection):
+        profile = self.make_profile()
+        profile["planning"] = {"selection": selection}
+        (self.profiles / "admtest.json").write_text(json.dumps(profile))
+        return profile
+
+    def test_a_stored_selection_is_what_the_worker_launches(self):
+        profile = self._with_selection({"SYCL0": {"on": True}})
+        plan = self.make_plan(profile)
+        snap = self._roomy_snap(plan)
+        with mock.patch.object(modelctl_plans, "plans_for_selection_launch",
+                               return_value=[(plan, 0.0)]) as ladder, \
+             mock.patch.object(modelctl_plans, "compile_launch_plans",
+                               side_effect=AssertionError(
+                                   "the candidate compiler must not run for "
+                                   "a profile that has been placed by hand")):
+            self.run_worker(plan, snap, launch_succeeds=True)
+        self.assertTrue(ladder.called)
+        self.assertEqual(ladder.call_args[0][1], {"SYCL0": {"on": True}},
+                         "the ladder is handed the selection verbatim")
+
+    def test_no_selection_still_compiles_and_ranks(self):
+        """The migration-free half: a profile nobody has placed by hand
+        keeps exactly the old path, so nothing in flight changes."""
+        profile = self.make_profile()
+        plan = self.make_plan(profile)
+        with mock.patch.object(modelctl_plans, "plans_for_selection_launch",
+                               side_effect=AssertionError(
+                                   "no selection means the automatic "
+                                   "placement, not the ladder")):
+            _code, claims = self.run_worker(plan, self._roomy_snap(plan),
+                                            launch_succeeds=True)
+        # What matters is which planner path ran and that it reached
+        # admission; the fake backend's exit code is this harness's own
+        # business and is asserted where that is the subject.
+        self.assertTrue(claims, "the compiled candidate never reached the "
+                                "admission gate")
+
+    def test_the_worker_never_writes_the_selection_back(self):
+        """Degradation is a property of one compilation; intent is a
+        property of the profile. A closed laptop must not un-tick a node."""
+        selection = {"SYCL0": {"ceiling_bytes": 12 << 30}}
+        profile = self._with_selection(selection)
+        plan = self.make_plan(profile)
+        with mock.patch.object(modelctl_plans, "plans_for_selection_launch",
+                               return_value=[(plan, 0.0)]):
+            self.run_worker(plan, self._roomy_snap(plan), launch_succeeds=True)
+        after = json.loads((self.profiles / "admtest.json").read_text())
+        self.assertEqual(after["planning"]["selection"], selection)
