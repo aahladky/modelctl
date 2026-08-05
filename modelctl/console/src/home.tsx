@@ -37,10 +37,14 @@ import type { FleetView, JobRow, ModelRow } from "./lib/types";
 function Trouble({ items }: { items: TroubleItem[] }) {
   if (!items.length) {
     return (
-      <div class="calm">
+      <div class="calm"
+           title="every registered model is servable and every enabled node is reachable">
         <span class="calm-mark">✓</span>
-        <span>Nothing is wrong. Every registered model is servable and every
-              enabled node is reachable.</span>
+        <span>all clear</span>
+        {/* title is mouse-only and unreliably spoken; the sentence the
+            pill compressed stays for screen readers. */}
+        <span class="sr-only">— every registered model is servable and
+              every enabled node is reachable</span>
       </div>
     );
   }
@@ -65,7 +69,13 @@ function Trouble({ items }: { items: TroubleItem[] }) {
    withholding or the desktop is using. The dashed line still marks
    where the planner's room ends -- at held+free, which for a GPU is its
    budget and for RAM is held beside live free room; stack.ts owns that
-   rule so this component cannot re-derive it wrong. */
+   rule so this component cannot re-derive it wrong.
+
+   The numbers live in the bar and the legend lives on the section
+   (Aaron 2026-08-05): a caption per row narrating held/free/fitted five
+   times over is text describing the picture instead of the picture
+   saying it. The only words left on a row are a holder's name, in the
+   share it holds, and an absence -- the two facts a bar cannot draw. */
 function StackRow({ bar }: { bar: StackBar }) {
   const held = bar.heldBytes;
   const free = bar.freeBytes;
@@ -76,6 +86,20 @@ function StackRow({ bar }: { bar: StackBar }) {
   const holders = (bar.held ?? [])
     .map((h) => `${h.profile} ${fmtGiB(h.bytes)}`)
     .join(", ");
+  const withheld = bar.capacity - (held ?? 0) - (free ?? 0);
+  const spoken = (held == null
+    ? `what is held could not be read; ${free == null
+        ? "" : `${fmtGiB(free)} GiB free to plan, `}${fmtGiB(bar.capacity)} GiB fitted`
+    : `${fmtGiB(held)} GiB held${holders ? ` (${holders})` : ""}, `
+      + `${fmtGiB(free ?? 0)} GiB free to plan, `
+      + `${fmtGiB(bar.capacity)} GiB fitted`)
+    /* The legend names "withheld" for sighted users; the spoken row
+       must not know less. */
+    + (withheld > 0 ? `; ${fmtGiB(withheld)} GiB withheld by policy` : "");
+  /* The right edge only IS capacity when nothing overflows past it, and
+     the number only fits when some withheld region exists to hold it --
+     drawn over a labeled segment it collides and lies. */
+  const showCap = span === bar.capacity && heldPct + freePct <= 90;
 
   return (
     <div class={`dev${absent ? " dev-absent" : ""}`}>
@@ -88,31 +112,35 @@ function StackRow({ bar }: { bar: StackBar }) {
                 : "not reachable"}
               {bar.detail ? ` — ${bar.detail}` : ""}
             </span>
-          : <span class="dev-note">
-              {held == null
-                ? "cannot read what is held"
-                : holders || "nothing held"}
-            </span>}
+          : null}
       </div>
-      {/* Decorative: the figures line below carries the same numbers as
-          text, so the track is hidden from assistive tech rather than
-          read out as three unlabeled boxes. */}
-      <div class="dev-track" aria-hidden="true">
+      <span class="sr-only">{spoken}</span>
+      <div class="dev-track" aria-hidden="true" title={spoken}>
         {held != null && held > 0
-          ? <div class="dev-fill" style={`width:${heldPct}%`} />
+          ? <div class="stack-held" style={`width:${heldPct}%`}>
+              <span class="bar-num bar-num-held">
+                {holders || fmtGiB(held)}
+              </span>
+            </div>
           : null}
         {free != null && free > 0
           ? <div class="stack-free"
-                 style={`left:${heldPct}%;width:${freePct}%`} />
+                 style={`left:${heldPct}%;width:${freePct}%`}>
+              {/* Suppressed when held is unknown: the unknown badge
+                  anchors at the same left edge, and two labels on one
+                  spot are both unreadable. */}
+              {held != null
+                ? <span class="bar-num bar-num-free">{fmtGiB(free)} free</span>
+                : null}
+            </div>
+          : null}
+        {held == null
+          ? <span class="bar-num bar-num-unknown">held unreadable</span>
           : null}
         <div class="dev-limit" style={`left:${heldPct + freePct}%`} />
-      </div>
-      <div class="dev-figures">
-        <span>{held == null ? "held unknown" : `${fmtGiB(held)} GiB held`}</span>
-        <span class="sub">
-          {free == null ? "" : `${fmtGiB(free)} free to plan · `}
-          {fmtGiB(bar.capacity)} fitted
-        </span>
+        {showCap
+          ? <span class="bar-num bar-num-cap">{fmtGiB(bar.capacity)}</span>
+          : null}
       </div>
     </div>
   );
@@ -123,9 +151,21 @@ function Machine({ bars, holdingsError }:
   if (!bars.length) return null;
   return (
     <div class="widget">
-      <div class="label"><span>the machine</span></div>
+      <div class="label">
+        <span>the machine</span>
+        {/* One legend for every row; the calm alternative is a caption
+            per bar saying the same three words five times. */}
+        <span class="bar-legend" aria-hidden="true">
+          <span class="bar-key">
+            <span class="bar-swatch bar-swatch-held" />held</span>
+          <span class="bar-key">
+            <span class="bar-swatch bar-swatch-free" />free to plan</span>
+          <span class="bar-key">
+            <span class="bar-swatch bar-swatch-withheld" />withheld</span>
+        </span>
+      </div>
       {holdingsError
-        ? <p class="sub">what models hold could not be read — {holdingsError}</p>
+        ? <p class="sub">what is held could not be read — {holdingsError}</p>
         : null}
       {bars.map((b) => <StackRow key={b.key} bar={b} />)}
     </div>
@@ -188,8 +228,12 @@ function Serving({ models, bars, fleetReady }:
               <ShareOrWhy m={m} bars={bars} fleetReady={fleetReady} />
             </div>
           ))
-        : <p class="sub">Nothing is loaded. The next API call will load
-                         whatever it asks for.</p>}
+        : <p class="sub"
+             title="models load on demand: the next API call loads whatever it asks for">
+            idle
+            <span class="sr-only">— models load on demand; the next API
+                  call loads whatever it asks for</span>
+          </p>}
     </div>
   );
 }
@@ -199,7 +243,11 @@ function Ready({ models }: { models: ModelRow[] }) {
   return (
     <div class="widget">
       <div class="label">
-        <span>{idle.length} more the API can ask for</span>
+        <span title="registered and enabled; the API loads them on demand">
+          ready · {idle.length}
+          <span class="sr-only">models, registered and enabled; the API
+                loads them on demand</span>
+        </span>
       </div>
       <p class="ready">
         {idle.map((m) => <span key={m.name} class="ready-chip">{m.name}</span>)}

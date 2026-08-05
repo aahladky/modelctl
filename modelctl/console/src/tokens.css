@@ -611,13 +611,66 @@ button.busy { opacity: .6; cursor: progress; }
    band is itself the answer, so "nothing is wrong" gets a calm line of
    its own rather than an absence you have to interpret. */
 
+/* Two words and a mark, not a paragraph: the calm state is a status,
+   and status is not narrated (Aaron 2026-08-05, "I don't like how text
+   describes everything"). What was checked lives in the title. */
 .calm {
-  display: flex; align-items: baseline; gap: .5rem;
+  display: inline-flex; align-items: baseline; gap: .5rem;
+  width: fit-content;
   color: var(--ok); background: var(--ok-wash);
-  border: 1px solid var(--ok); border-radius: var(--radius);
-  padding: .7rem .9rem; font-size: .88rem;
+  border: 1px solid var(--ok); border-radius: 999px;
+  padding: .35rem .9rem; font-size: .88rem;
 }
 .calm-mark { font-weight: 700; }
+
+/* Numbers live IN the bar, not in a caption under it. Small, mono,
+   clipped by their segment rather than wrapped -- a segment too narrow
+   for its number still has the sr-only text and the title. */
+.bar-num {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  font-family: var(--mono); font-size: .72rem;
+  white-space: nowrap; overflow: hidden; max-width: 100%;
+  padding: 0 6px; pointer-events: none;
+}
+.bar-num-held { color: var(--accent-contrast); }
+.bar-num-free { color: var(--muted); }
+.bar-num-cap { right: 0; color: var(--faint); }
+.bar-num-unknown { color: var(--warn); left: 0; }
+
+/* The held segment for READ-ONLY bars. Deliberately not .dev-fill: that
+   rule softens itself with `opacity`, which composites its whole
+   subtree -- a label inside it renders at ~3:1 and fails AA. This one
+   keeps the surface solid and puts the per-theme ink (--accent-contrast)
+   on it, because "white on rust" is only readable in the theme where
+   the rust is dark. */
+.stack-held {
+  position: absolute; inset: 0 auto 0 0;
+  background: var(--accent);
+  transition: width .12s linear;
+}
+
+/* One legend for the whole machine, replacing a caption per row. */
+.bar-legend {
+  display: inline-flex; gap: .9rem; align-items: center;
+  font-size: .72rem; color: var(--muted);
+}
+.bar-key { display: inline-flex; align-items: center; gap: .35rem; }
+.bar-swatch {
+  width: 10px; height: 10px; border-radius: 2px; display: inline-block;
+}
+.bar-swatch-held { background: var(--accent); }
+.bar-swatch-free {
+  background: var(--accent-wash); border: 1px solid var(--faint);
+}
+.bar-swatch-withheld {
+  background: var(--bg-inset); border: 1px solid var(--faint);
+}
+
+/* The accessible text for a bar whose visuals are aria-hidden. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
 
 .trouble { border-color: var(--err); background: var(--err-wash); }
 .trouble .label a { color: var(--err); }
