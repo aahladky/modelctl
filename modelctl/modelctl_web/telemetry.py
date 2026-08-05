@@ -21,6 +21,7 @@ hung ssh must not stall the front page. The thread is not started at all
 until the registry actually names a remote node.
 """
 import json
+import math
 import re
 import threading
 import time
@@ -70,6 +71,29 @@ def fetch_metrics_text(port, timeout=2):
         return None
 
 
+def _finite(value):
+    """A metric as a float, or None when it is not a measurement.
+
+    llama.cpp builds its rates by division, so a worker that has predicted
+    one token inside a zero-millisecond window reports
+    predicted_tokens_seconds as inf. JSON has no infinity and starlette
+    renders with allow_nan=False, so one such value raises inside the
+    response: /api/v2/models and the telemetry tick each carry every
+    model, which means one worker's bad number takes down the live console
+    for all of them. Observed 2026-08-04, laguna-s2.1 loaded with
+    tokens_predicted_total 1.
+
+    Dropped rather than passed on, because an infinity is not a very fast
+    model -- it is the absence of a rate, and the row already has a way to
+    say that.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def parse_worker_metrics(text):
     """One /metrics text -> {"plain": {name: float}, "moe": {device: {k: v}}}.
 
@@ -94,10 +118,10 @@ def parse_worker_metrics(text):
         if len(parts) < 2:
             continue
         name = parts[0].split("{", 1)[0]
-        try:
-            plain[name] = float(parts[-1])
-        except ValueError:
+        value = _finite(parts[-1])
+        if value is None:
             continue
+        plain[name] = value
     return {"plain": plain, "moe": moe}
 
 
@@ -111,23 +135,21 @@ def summarize_cache(moe):
     learning = None
     ratios = []
     for dev, stats in moe.items():
-        try:
-            hits += int(float(stats.get("hits_total", 0)))
-            misses += int(float(stats.get("misses_total", 0)))
-        except ValueError:
-            pass
+        # Through _finite for the same reason as the plain map, and not
+        # through int(float(...)) directly: int(float("inf")) raises
+        # OverflowError, which the except ValueError here never caught.
+        hit = _finite(stats.get("hits_total", 0))
+        miss = _finite(stats.get("misses_total", 0))
+        hits += int(hit) if hit is not None else 0
+        misses += int(miss) if miss is not None else 0
         if "learning" in stats:
-            try:
-                flag = float(stats["learning"]) > 0
-            except ValueError:
-                flag = None
+            flag = _finite(stats["learning"])
             if flag is not None:
-                learning = flag if learning is None else (learning or flag)
-        if "hit_ratio" in stats:
-            try:
-                ratios.append(float(stats["hit_ratio"]))
-            except ValueError:
-                pass
+                learning = (flag > 0) if learning is None else (
+                    learning or flag > 0)
+        ratio_value = _finite(stats.get("hit_ratio"))
+        if ratio_value is not None:
+            ratios.append(ratio_value)
     if hits + misses > 0:
         ratio = hits / (hits + misses)
     elif ratios:

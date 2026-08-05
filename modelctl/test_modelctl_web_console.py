@@ -88,6 +88,35 @@ class TestParsing(unittest.TestCase):
     def test_summarize_cache_empty_is_none(self):
         self.assertIsNone(telemetry.summarize_cache({}))
 
+    def test_an_infinite_rate_is_not_a_measurement(self):
+        """llama.cpp builds its rates by division, so a worker that has
+        predicted one token in a zero-millisecond window reports
+        predicted_tokens_seconds as inf. Observed live 2026-08-04 with
+        laguna-s2.1 loaded and tokens_predicted_total 1."""
+        text = METRICS_TEXT.replace("llamacpp:predicted_tokens_seconds 14.2",
+                                    "llamacpp:predicted_tokens_seconds inf")
+        plain = telemetry.parse_worker_metrics(text)["plain"]
+        self.assertNotIn("llamacpp:predicted_tokens_seconds", plain,
+                         "an infinity is the absence of a rate, not a fast "
+                         "one -- it must not reach a response")
+        self.assertEqual(plain["llamacpp:tokens_predicted_total"], 1000)
+
+    def test_a_nan_rate_is_dropped_too(self):
+        text = METRICS_TEXT.replace("llamacpp:prompt_tokens_seconds 412",
+                                    "llamacpp:prompt_tokens_seconds nan")
+        plain = telemetry.parse_worker_metrics(text)["plain"]
+        self.assertNotIn("llamacpp:prompt_tokens_seconds", plain)
+
+    def test_a_non_finite_cache_counter_does_not_raise(self):
+        """int(float("inf")) is an OverflowError, which the summariser's
+        except ValueError does not catch."""
+        moe = {"SYCL0": {"hits_total": "inf", "misses_total": "400",
+                         "hit_ratio": "nan", "learning": "0"}}
+        s = telemetry.summarize_cache(moe)
+        self.assertEqual(s["hits"], 0)
+        self.assertEqual(s["misses"], 400)
+        self.assertIsNotNone(s)
+
     def test_read_meminfo(self):
         with TemporaryDirectory() as tmp:
             p = Path(tmp) / "meminfo"
@@ -144,6 +173,21 @@ class TestCollector(unittest.TestCase):
         second = c.snapshot()["models"][0]
         self.assertIsNotNone(second["tok_s"])
         self.assertGreater(second["tok_s"], 0)
+
+    def test_a_worker_reporting_inf_does_not_take_the_console_down(self):
+        """The whole crash, end to end. Starlette renders JSON with
+        allow_nan=False, so a single inf anywhere in a tick raises
+        ValueError inside the response and 500s it. That is not one bad
+        number in one row -- /api/v2/models and the telemetry tick both
+        carry every model, so one worker takes down the live console for
+        every model. Serializing the way the wire does is the assertion.
+        """
+        text = METRICS_TEXT.replace("llamacpp:predicted_tokens_seconds 14.2",
+                                    "llamacpp:predicted_tokens_seconds inf")
+        c = make_collector(metrics_text=text)
+        snap = c.snapshot()
+        self.assertIsNone(snap["models"][0]["tok_s_avg"])
+        json.dumps(snap, allow_nan=False)
 
     def test_stopped_model_resets_rate_state(self):
         c = make_collector()
