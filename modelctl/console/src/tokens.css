@@ -673,6 +673,9 @@ button.busy { opacity: .6; cursor: progress; }
 }
 
 .trouble { border-color: var(--err); background: var(--err-wash); }
+/* A standing caution, not a failure: the legacy-pin band and its kin.
+   Warn-toned so it cannot be mistaken for the trouble band. */
+.warnband { border-color: var(--warn); background: var(--warn-wash); }
 .trouble .label a { color: var(--err); }
 .trouble-row {
   display: flex; gap: .6rem; flex-wrap: wrap; margin: .4rem 0 0;

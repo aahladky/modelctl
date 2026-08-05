@@ -322,10 +322,14 @@ export type PlacementSelection = Record<string, DeviceChoice>;
 
 export interface PlacedDevice {
   bytes: number;
-  backing: "VRAM" | "over RPC" | "RAM" | "SSD via mmap";
+  backing: "VRAM" | "over RPC" | "RAM" | "SSD via mmap" | "";
   fits: boolean;
   capacity_bytes?: number;
   usable_bytes?: number;
+  /* The owning node's presence, so a row whose machine is unreachable
+     or on the wrong commit says so instead of drawing an empty bar. */
+  state?: PresenceState | "";
+  detail?: string;
   /* What live models hold on this device right now, and this model's own
      share of it. The RAM row's usable is free memory, which already has a
      running model subtracted -- without these a running model reads as
@@ -364,11 +368,29 @@ export interface PlacementView {
     recorded_at: string | null;
     ram_available_bytes: number;
   };
+  /* The profile's own ceiling on reaching for the disk. `crossed` also
+     rides the warnings channel; it is here so the screen can render the
+     standing constraint even when this layout respects it. */
+  storage_floor: { allows_disk: boolean; crossed: boolean; detail: string };
+  /* Set when a pinned plan id, not the selection, still decides what
+     launches. The screen must say so rather than render an automatic
+     placement that is not what runs. */
+  legacy_pin: { plan_id: string; mode: string } | null;
 }
 
 export interface PlacementApplyResult {
   job_id: string;
   gate: Gate;
+}
+
+/* GET /placement/adopt-pin: the selection that would use the devices
+   the pinned plan uses, plus the layout it produces. A read; adopting
+   is sending `selection` to the ordinary apply. */
+export interface AdoptPinPreview {
+  pinned: { plan_id: string; mode: string; label: string };
+  selection: PlacementSelection;
+  placement: PlacementView | null;
+  caveat: string;
 }
 
 export interface AdmissionPreview {

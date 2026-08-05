@@ -1,5 +1,6 @@
 import type {
-  AdmissionPreview, BudgetSubmitted, CacheResetResult, CancelResult,
+  AdmissionPreview, AdoptPinPreview, BudgetSubmitted, CacheResetResult,
+  CancelResult,
   ConfigSaveResult, FleetView, GgufAnalysis, HistoryRow, JobRow, JobSubmitted,
   LogTail, ModelDetail, ModelRow, PlacementApplyResult, PlacementSelection,
   PlacementView, PlanRow, ProbeResult, RegisterData,
@@ -159,6 +160,11 @@ export const applyPlacement = (name: string, selection: PlacementSelection,
   postJson<PlacementApplyResult>(`/api/v2/models/${enc(name)}/placement`,
                                  { selection, accept_tier_change: accept,
                                    fresh });
+
+/* A read: what adopting the profile's pinned plan would select. 409
+   (surfaced as ApiError) when there is no pin left to adopt. */
+export const fetchAdoptPin = (name: string) =>
+  get<AdoptPinPreview>(`/api/v2/models/${enc(name)}/placement/adopt-pin`);
 
 export const fetchRuntimePolicy = (name: string) =>
   get<RuntimePolicyView>(`/api/v2/models/${enc(name)}/runtime-policy`);

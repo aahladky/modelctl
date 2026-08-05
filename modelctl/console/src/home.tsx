@@ -218,7 +218,9 @@ function Serving({ models, bars, fleetReady }:
         ? live.map((m) => (
             <div key={m.name}>
               <p class="srv">
-                <span class="srv-name">{m.name}</span>
+                <a class="srv-name"
+                   href={`/v2/?place=${encodeURIComponent(m.name)}`}
+                   title="open this model's placement">{m.name}</a>
                 <span class="srv-state">{stateLabel(m.state)}</span>
                 <span class="sub">
                   {m.tok_s ? `${m.tok_s.toFixed(1)} tok/s` : ""}
@@ -250,7 +252,11 @@ function Ready({ models }: { models: ModelRow[] }) {
         </span>
       </div>
       <p class="ready">
-        {idle.map((m) => <span key={m.name} class="ready-chip">{m.name}</span>)}
+        {idle.map((m) => (
+          <a key={m.name} class="ready-chip"
+             href={`/v2/?place=${encodeURIComponent(m.name)}`}
+             title="open this model's placement">{m.name}</a>
+        ))}
       </p>
     </div>
   );
