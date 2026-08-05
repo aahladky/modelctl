@@ -118,10 +118,16 @@ def create_app(store=None, runner=None, collector=None,
     # install with no fleet gets no thread, which is also what keeps the
     # test suite (whose redirected MODELCTL_HOME has no registry) from
     # opening a connection from here.
+    #
+    # And never in scratch-safe mode. The sweep runs immediately on start,
+    # so a scratch console with a registry would probe every enabled node
+    # across the LAN just by being opened, and write the results into the
+    # presence record the live console plans from -- the two things a
+    # scratch instance exists not to do.
     app.state.presence_poller = None
     try:
         import modelctl_fleet
-        if modelctl_fleet.load_fleet():
+        if modelctl_fleet.load_fleet() and not scratch_safe_mode():
             app.state.presence_poller = modelctl_fleet.PresencePoller()
             app.state.presence_poller.start()
     except Exception:

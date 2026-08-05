@@ -527,6 +527,40 @@ class TestFleetRoutes(ClientBase):
         self.assertFalse(self.presence_path.exists())
 
 
+class TestPresenceRefresherStarts(FleetConsoleBase):
+    """The live half of the scratch rule.
+
+    Presence ages out after 15 minutes, and a node that aged out is a node
+    whose memory is not offered -- the weights that would have lived there
+    go to the SSD instead. So the refresher not starting is not a quiet
+    inconvenience, and "we turned it off for scratch" must not become "we
+    turned it off".
+    """
+
+    def _created_with(self, fleet_rows):
+        """create_app with a spy poller: constructed and started is the
+        assertion, and no thread means no probe on the LAN from a test."""
+        if fleet_rows:
+            fleet.save_fleet(fleet_rows)
+        poller = mock.Mock()
+        store = JobStore(self.root / "jobs.db")
+        runner = JobRunner(store)
+        self.addCleanup(lambda: runner._thread.join(timeout=0.05) or None)
+        with mock.patch.object(fleet, "PresencePoller", return_value=poller):
+            app = create_app(store=store, runner=runner)
+        return app, poller
+
+    def test_a_console_with_a_fleet_starts_the_refresher(self):
+        app, poller = self._created_with([cpu_node()])
+        self.assertIs(app.state.presence_poller, poller)
+        self.assertTrue(poller.start.called)
+
+    def test_a_console_with_no_fleet_starts_no_thread(self):
+        app, poller = self._created_with([])
+        self.assertIsNone(app.state.presence_poller)
+        self.assertFalse(poller.start.called)
+
+
 class TestScratchSafeCoversTheFleet(FleetConsoleBase):
     """The scratch walk of this surface, as an assertion.
 
@@ -557,6 +591,14 @@ class TestScratchSafeCoversTheFleet(FleetConsoleBase):
                 reason = r.json()["reason"]
                 self.assertIn("scratch-safe mode", reason)
                 self.assertIn(path, reason)
+
+    def test_the_scratch_console_runs_no_presence_refresher(self):
+        """The refresher probes every enabled node the moment it starts.
+        A scratch instance exists to be walked, and a walk must not put
+        traffic on the LAN or rewrite a live node's presence record --
+        which is a stored planning input the real console reads.
+        """
+        self.assertIsNone(self.app.state.presence_poller)
 
     def test_no_fleet_write_reaches_the_registry_or_the_wire(self):
         with mock.patch.object(fleet, "set_device_budget") as setter, \
