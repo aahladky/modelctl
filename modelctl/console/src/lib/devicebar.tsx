@@ -68,7 +68,15 @@ export function DeviceRow(p: DeviceRowProps) {
             hardware the policy is withholding, which is a fact worth
             seeing rather than a bar that simply stops. */}
         <div class="dev-limit" style={`left:${marks.usable}%`} />
+        {/* The slider spans exactly the part of the track it can
+            address. At full width its scale was 0..usable drawn across
+            0..capacity, so a ceiling of "all of the budget" put its
+            handle out at the hardware's edge -- the control
+            misreporting its own range. Now the handle stops on the
+            dashed line, and the withheld hardware to the right of it is
+            visibly not draggable. */}
         <input class="dev-ceiling" type="range"
+               style={`width:${marks.usable}%`}
                min={0} max={p.usable} step={CEILING_STEP_BYTES}
                value={ceiling}
                disabled={!p.on}

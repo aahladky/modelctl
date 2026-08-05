@@ -99,7 +99,11 @@ body {
   margin: 0; background: var(--bg); color: var(--text);
   font: 13.5px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
-#app { display: grid; grid-template-columns: 212px 1fr; min-height: 100vh; }
+/* One column. The 212px track here was the sidebar's, and the sidebar
+   went with the rest of the surface in 829300b -- but the track stayed,
+   so every shell since has landed in a 212px column and overflowed it.
+   A nav that returns brings its own track back. */
+#app { display: grid; grid-template-columns: 1fr; min-height: 100vh; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 /* the page title is the one serif moment in the chrome */
@@ -474,25 +478,31 @@ button.busy { opacity: .6; cursor: progress; }
   background: var(--bg-inset); border-radius: var(--radius);
   overflow: hidden;
 }
+/* Solid, like .meterbar .fill. The first cut used --accent-wash, which
+   is an 8%-alpha background tint: against the inset track the committed
+   amount -- the most important number on the control -- was invisible. */
 .dev-fill {
   position: absolute; inset: 0 auto 0 0;
-  background: var(--accent-wash); border-right: 2px solid var(--accent);
+  background: var(--accent); opacity: .72;
   transition: width .12s linear;
 }
-.dev-fill-over { background: var(--err-wash); border-right-color: var(--err); }
+.dev-fill-over { background: var(--err); opacity: .8; }
 
 /* Where the planner's budget ends. Everything right of it is hardware
    the policy is withholding -- a fact worth seeing, rather than a bar
    that simply stops. */
 .dev-limit {
   position: absolute; top: 0; bottom: 0; width: 0;
-  border-left: 1px dashed var(--border-strong);
+  border-left: 2px dashed var(--text); opacity: .45;
 }
 
 /* The range IS the picture: transparent track, visible thumb sitting on
    the bar. Not a control beside a readout. */
+/* Width is set inline, to the usable fraction of the track: the slider
+   addresses exactly the span it can set, so the handle cannot come to
+   rest anywhere the planner would not honour. */
 .dev-ceiling {
-  position: absolute; inset: 0; width: 100%; height: 100%;
+  position: absolute; top: 0; bottom: 0; left: 0; height: 100%;
   margin: 0; padding: 0; background: transparent;
   -webkit-appearance: none; appearance: none; cursor: ew-resize;
 }
@@ -512,9 +522,13 @@ button.busy { opacity: .6; cursor: progress; }
 .dev-ceiling:disabled::-moz-range-thumb { width: 0; border: 0; }
 
 .dev-figures {
-  display: flex; align-items: baseline; gap: .5rem;
+  display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap;
   font-size: .82rem; font-family: var(--mono);
 }
+/* A fleet key is long and has no spaces; without this it sets the row's
+   min-content width and drags the whole layout wide. */
+.dev-name { overflow-wrap: anywhere; }
+.dev-head { flex-wrap: wrap; }
 .dev-fig-over { color: var(--err); }
 .dev-clear {
   margin-left: auto; background: none; border: 0; padding: 0;
