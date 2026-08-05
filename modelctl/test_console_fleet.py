@@ -803,3 +803,81 @@ class TestPlanRowsRefreshesPresence(FleetConsoleBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPlanningDoesNotProbeABusyNode(FleetConsoleBase):
+    """The busy-node fix reached the background poller but not the
+    planning path.
+
+    ggml-rpc-server serves one client behind listen(backlog=1), so probing
+    a node a model already holds cannot be accepted: it times out, the
+    node records unreachable, usable_nodes drops it, and the planner stops
+    offering memory that is in use at that very moment -- weights to the
+    SSD by the exact route this refresh exists to close. Each attempt also
+    parks a CLOSE-WAIT socket and makes the next likelier to fail
+    (observed on ph16-71 2026-08-04: two live sessions, four CLOSE-WAIT,
+    accept queue over-full).
+
+    probe_and_record has skipped busy endpoints since e69517f, but
+    ensure_fresh_presence hand-rolled its own probe loop and never learned
+    it -- and ensure_fresh_presence is the one on the PLANNING path
+    (hub.plan_rows), which is worse than the poller it was fixed for.
+    """
+
+    def test_a_busy_node_is_not_probed_while_planning(self):
+        fleet.save_fleet([cpu_node()])
+        fleet.save_presence([probe("ph16-71-cpu0", age=3600.0)])
+        with mock.patch.object(fleet, "probe_node") as pn:
+            fleet.ensure_fresh_presence(
+                busy_fn=lambda: {cpu_node().endpoint})
+        pn.assert_not_called()
+
+    def test_a_busy_node_stays_usable_instead_of_ageing_out(self):
+        """Being connected to a node is stronger evidence than a
+        handshake. Dropping it is what sent 34 GiB of experts to the SSD."""
+        fleet.save_fleet([cpu_node()])
+        fleet.save_presence([probe("ph16-71-cpu0", age=3600.0)])
+        with mock.patch.object(fleet, "probe_node"):
+            out = fleet.ensure_fresh_presence(
+                busy_fn=lambda: {cpu_node().endpoint})
+        self.assertEqual([n.name for n in out], ["ph16-71-cpu0"],
+                         "a node in use must stay in the planner's world")
+
+    def test_an_idle_stale_node_is_still_probed(self):
+        fleet.save_fleet([cpu_node()])
+        fleet.save_presence([probe("ph16-71-cpu0", age=3600.0)])
+        fresh = probe("ph16-71-cpu0", age=0.0)
+        with mock.patch.object(fleet, "probe_node",
+                               return_value=fresh) as pn:
+            fleet.ensure_fresh_presence(busy_fn=lambda: set())
+        pn.assert_called_once()
+
+    def test_a_busy_endpoint_lookup_that_fails_does_not_stop_planning(self):
+        """Presence must degrade to the old behaviour, never take the
+        plan compile down with it."""
+        fleet.save_fleet([cpu_node()])
+        fleet.save_presence([probe("ph16-71-cpu0", age=3600.0)])
+        fresh = probe("ph16-71-cpu0", age=0.0)
+
+        def boom():
+            raise RuntimeError("runtime db is locked")
+        with mock.patch.object(fleet, "probe_node", return_value=fresh) as pn:
+            fleet.ensure_fresh_presence(busy_fn=boom)
+        pn.assert_called_once()
+
+    def test_reservations_name_the_busy_endpoints(self):
+        """The evidence available on the planning path: an ACTIVE
+        reservation charging an RPC: key means something on this machine
+        is holding that node right now."""
+        fleet.save_fleet([cpu_node()])
+        charged = {"RPC:ph16-71-cpu0:CPU": 24 << 30, "SYCL0": 8 << 30}
+        with mock.patch.object(fleet, "_charged_resources",
+                               return_value=charged):
+            self.assertEqual(fleet.busy_endpoints_from_reservations(),
+                             {cpu_node().endpoint})
+
+    def test_no_active_remote_claim_means_nothing_is_busy(self):
+        fleet.save_fleet([cpu_node()])
+        with mock.patch.object(fleet, "_charged_resources",
+                               return_value={"SYCL0": 8 << 30}):
+            self.assertEqual(fleet.busy_endpoints_from_reservations(), set())

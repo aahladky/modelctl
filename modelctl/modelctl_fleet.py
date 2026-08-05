@@ -400,8 +400,48 @@ def refresh_presence(nodes=None, **kw) -> list:
     return probes
 
 
+def _charged_resources():
+    """{resource: bytes} the reservation table is charging right now.
+
+    Its own function so the busy-endpoint lookup has a seam that does not
+    need a RuntimeDB in a test. Imported lazily: reading the fleet must
+    not drag the runtime database into every module that does it.
+    """
+    import modelctl_runtime
+    return modelctl_runtime.RuntimeDB().charged_bytes() or {}
+
+
+def busy_endpoints_from_reservations(nodes=None) -> set:
+    """Endpoints of nodes something on this machine is holding right now.
+
+    An ACTIVE reservation charging an `RPC:<node>:<device>` key means a
+    model is using that node, and charged_bytes is the same fold the
+    admission gate applies -- so this is evidence the planning path
+    already trusts, and unlike llama-swap's running set it is reachable
+    from here.
+
+    Never raises: a busy lookup that fails must leave presence behaving
+    exactly as it did before, not take a plan compile down with it.
+    """
+    try:
+        charged = _charged_resources()
+    except Exception:
+        return set()
+    live = set()
+    for resource, byte_count in (charged or {}).items():
+        if not byte_count or not is_remote_key(str(resource)):
+            continue
+        live.add(str(resource).split(":")[1])
+    if not live:
+        return set()
+    try:
+        return {n.endpoint for n in enabled_nodes(nodes) if n.name in live}
+    except Exception:
+        return set()
+
+
 def ensure_fresh_presence(nodes=None, now=None, ttl=PRESENCE_TTL_SECONDS,
-                          **kw):
+                          busy_fn=None, **kw):
     """Refresh presence for enabled nodes whose record is missing or
     stale, then return the usable node list.
 
@@ -411,6 +451,17 @@ def ensure_fresh_presence(nodes=None, now=None, ttl=PRESENCE_TTL_SECONDS,
     presence TTL. Bounded work: one probe (3 s TCP hello) per stale
     node, no sockets at all while records are fresh. Fresh records are
     preserved on save, mirroring the single-node probe route.
+
+    The stale set goes through probe_and_record instead of a probe loop
+    of its own, and that is what makes a node in use exempt here too. The
+    exemption reached the background poller in e69517f and not this path
+    -- and this is the one that PLANS, so the failure it prevents landed
+    on the planner: probe a node a model is holding, the single-client
+    rpc-server cannot accept it, the timeout records absence,
+    usable_nodes drops it, and 34 GiB of experts go to the SSD.
+
+    busy_fn defaults to the reservation table, the only evidence of "in
+    use" available this far from llama-swap.
     """
     enabled = enabled_nodes(nodes)
     if not enabled:
@@ -421,14 +472,12 @@ def ensure_fresh_presence(nodes=None, now=None, ttl=PRESENCE_TTL_SECONDS,
              if n.name not in presence
              or stamp - presence[n.name].probed_at > ttl]
     if stale:
-        recorded = dict(presence)
-        for node in stale:
-            try:
-                recorded[node.name] = probe_node(node, **kw)
-            except Exception:
-                continue
-        save_presence(list(recorded.values()))
-        presence = recorded
+        probe_and_record(
+            stale,
+            probe_fn=(lambda node: probe_node(node, **kw)) if kw else None,
+            busy_fn=busy_fn if busy_fn is not None
+            else busy_endpoints_from_reservations)
+        presence = load_presence()
     return usable_nodes(enabled, presence=presence, now=now, ttl=ttl)
 
 
@@ -458,7 +507,13 @@ def probe_and_record(nodes, probe_fn=None, busy_fn=None) -> list:
     left alone: there is nothing truthful to write.
     """
     fn = probe_fn or probe_node
-    busy = set(busy_fn() or ()) if busy_fn else set()
+    # A busy lookup that fails degrades to "nothing is busy", which is
+    # only the behaviour before the exemption existed. It must never take
+    # the refresh -- or the plan compile above it -- down with it.
+    try:
+        busy = set(busy_fn() or ()) if busy_fn else set()
+    except Exception:
+        busy = set()
     probes = []
     held = []
     for n in nodes:
