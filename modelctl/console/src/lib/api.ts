@@ -1,7 +1,8 @@
 import type {
   AdmissionPreview, BudgetSubmitted, CacheResetResult, CancelResult,
   ConfigSaveResult, FleetView, GgufAnalysis, HistoryRow, JobRow, JobSubmitted,
-  LogTail, ModelDetail, ModelRow, PlanRow, ProbeResult, RegisterData,
+  LogTail, ModelDetail, ModelRow, PlacementApplyResult, PlacementSelection,
+  PlacementView, PlanRow, ProbeResult, RegisterData,
   RepoContents, RoutingMatrix, RunCommand, RuntimePolicyView, SaveResult,
   SearchResult, SettingsOverview, TierApplyResult, WizardDetail, WizardSummary,
 } from "./types";
@@ -126,6 +127,32 @@ export const planAction = (name: string, planId: string, action: PlanAction) =>
 export const applyTier = (name: string, accept: boolean) =>
   postJson<TierApplyResult>(`/api/v2/models/${enc(name)}/tier/apply`,
                             { accept_tier_change: accept });
+
+/* ---- placement ----
+   The selection goes to the planner and the planner answers where the
+   weights land. Preview and apply send the SAME selection, so the layout
+   on screen is the layout the apply computes. */
+
+export function placementQuery(selection: PlacementSelection): string {
+  const q = new URLSearchParams();
+  for (const [dev, choice] of Object.entries(selection)) {
+    if (choice.on != null) q.set(`on.${dev}`, choice.on ? "1" : "0");
+    if (choice.ceiling_bytes != null) {
+      q.set(`ceiling.${dev}`, String(Math.round(choice.ceiling_bytes)));
+    }
+  }
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
+export const fetchPlacement = (name: string, selection: PlacementSelection) =>
+  get<PlacementView>(
+    `/api/v2/models/${enc(name)}/placement${placementQuery(selection)}`);
+
+export const applyPlacement = (name: string, selection: PlacementSelection,
+                               accept: boolean) =>
+  postJson<PlacementApplyResult>(`/api/v2/models/${enc(name)}/placement`,
+                                 { selection, accept_tier_change: accept });
 
 export const fetchRuntimePolicy = (name: string) =>
   get<RuntimePolicyView>(`/api/v2/models/${enc(name)}/runtime-policy`);

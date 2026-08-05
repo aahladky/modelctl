@@ -350,6 +350,13 @@ def placement_preview(profile, selection):
     return {
         "name": profile.get("name", ""),
         "selection": dict(selection or {}),
+        # What is set to run right now, as recorded by the last apply. The
+        # screen opens on this and compares against it to know whether it
+        # has unsaved changes; without it the only way to tell would be to
+        # reconstruct the choice from the emitted -ot rules, which is the
+        # second reader of placement this endpoint exists to remove.
+        "applied_selection": (profile.get("planning") or {})
+                             .get("selection") or {},
         "tier": plan.get("tier"),
         "config": plan.get("config"),
         "warnings": list(plan.get("warnings") or ()),

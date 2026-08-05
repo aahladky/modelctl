@@ -1,31 +1,32 @@
-/* per-model page: overview + placement, compiled plans with
-   measured/estimated tags, full measurement history from the store, log
-   tail, and the typed configure form. The form's save path fetches the
-   planner's fit preview (requested / assumed / chosen + warnings,
-   the server's own wording) and surfaces the structural-change gate as
-   an explicit confirm -- never a silent rewrite. */
+/* per-model page: overview, where it runs, full measurement history from
+   the store, log tail, and the typed configure form. The form's save path
+   fetches the planner's fit preview (requested / assumed / chosen +
+   warnings, the server's own wording) and surfaces the structural-change
+   gate as an explicit confirm -- never a silent rewrite.
+
+   The ranked list of compiled plans used to live here, with select /
+   disable / enable / test on every row. It is gone: a plan is something
+   the planner emits, not something an operator picks, and the choice
+   that actually belongs to a person -- which machines may hold this
+   model, and how much of each -- is what the placement tab now asks. A
+   layout is measured by applying it and benching it, the same loop every
+   other setting on this page uses. */
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { useStream } from "../lib/stream";
 import {
   ApiError, applyTier, autotuneModel, benchModel, deleteModel,
   fetchAdmission, fetchLogTail, fetchModelDetail, fetchModelHistory,
-  fetchModelPlans, fetchRunCommand, fetchRuntimePolicy, fmtAgo, fmtClock,
-  fmtGiB, planAction, resetModelCache, restartModel, saveModelConfig,
+  fetchRunCommand, fetchRuntimePolicy, fmtAgo, fmtClock,
+  fmtGiB, resetModelCache, restartModel, saveModelConfig,
   saveRuntimePolicy, smokeModel, stateLabel } from "../lib/api";
-import type { PlanAction } from "../lib/api";
 import { ConfirmButton, submitAction } from "../lib/actions";
 import { Info } from "../lib/info";
 import { toast } from "../lib/toasts";
+import { WhereItRuns } from "./whereitruns";
 import type {
   AdmissionPreview, Gate, HistoryRow, LogTail as LogTailT, ModelDetail,
-  ModelRow, PlanRow, RunCommand as RunCommandT, RuntimePolicyView,
+  ModelRow, RunCommand as RunCommandT, RuntimePolicyView,
 } from "../lib/types";
-
-function MeasuredTag({ measured }: { measured: boolean }) {
-  return measured
-    ? <span class="tag measured">measured</span>
-    : <span class="tag estimated">estimated</span>;
-}
 
 function Overview({ d, live, stale, lastAt, retryIn }: {
   d: ModelDetail; live: ModelRow | null; stale: boolean;
@@ -371,157 +372,6 @@ function TierApply({ name, revision, onApplied }: {
             </button>
           </div>
         </>
-      )}
-    </div>
-  );
-}
-
-/* ---- plans, with their four actions ---------------------------------- */
-
-function PlanActions({ name, plan, onChanged, onOptimistic }: {
-  name: string; plan: PlanRow; onChanged: () => void;
-  onOptimistic: (planId: string, disabled: boolean | null) => void;
-}) {
-  const [busy, setBusy] = useState("");
-  const act = (action: PlanAction, label: string) => {
-    setBusy(action);
-    submitAction(() => planAction(name, plan.id, action),
-                 `${label} ${plan.label}`, onChanged)
-      .finally(() => setBusy(""));
-  };
-  /* enable/disable are the only reversible ones, so they are the only
-     ones that reflect before the server answers -- and they un-happen
-     loudly (the row snaps back and the toast carries the reason) when it
-     refuses. select rewrites the profile's launch config and test starts
-     a real server; neither is something to pretend has happened. */
-  const toggle = (action: "enable" | "disable", label: string) => {
-    setBusy(action);
-    onOptimistic(plan.id, action === "disable");
-    submitAction(() => planAction(name, plan.id, action),
-                 `${label} ${plan.label}`, onChanged)
-      .then((ok) => {
-        if (!ok) onOptimistic(plan.id, null);
-      })
-      .finally(() => setBusy(""));
-  };
-  return (
-    <span class="actions">
-      <button type="button"
-              class={busy === "select" ? "btn-primary busy" : "btn-primary"}
-              disabled={!!busy || plan.pinned}
-              onClick={() => act("select", "select plan")}>select</button>
-      {plan.disabled
-        ? <button type="button" class={busy === "enable" ? "busy" : undefined}
-                  disabled={!!busy}
-                  onClick={() => toggle("enable", "enable plan")}>enable</button>
-        : <button type="button" class={busy === "disable" ? "busy" : undefined}
-                  disabled={!!busy}
-                  onClick={() => toggle("disable", "disable plan")}>disable</button>}
-      <button type="button" class={busy === "test" ? "busy" : undefined}
-              disabled={!!busy}
-              onClick={() => act("test", "test plan")}>test</button>
-    </span>
-  );
-}
-
-function Plans({ name, revision, onChanged }: {
-  name: string; revision: number; onChanged: () => void;
-}) {
-  const [plans, setPlans] = useState<PlanRow[] | null>(null);
-  const [err, setErr] = useState("");
-  /* null restores the server's value: the un-happen path must not invert
-     the flag a second time, it has to forget the optimistic one. */
-  const [pretend, setPretend] = useState<Record<string, boolean>>({});
-  useEffect(() => {
-    fetchModelPlans(name)
-      .then((rows) => {
-        setPlans(rows);
-        // fresh truth outranks every optimistic guess still standing
-        setPretend({});
-      })
-      .catch((e) => setErr(String(e)));
-  }, [name, revision]);
-  const onOptimistic = (planId: string, disabled: boolean | null) =>
-    setPretend((p) => {
-      if (disabled === null) {
-        const { [planId]: _drop, ...rest } = p;
-        return rest;
-      }
-      return { ...p, [planId]: disabled };
-    });
-  const rows = plans?.map((p) => (
-    p.id in pretend ? { ...p, disabled: pretend[p.id] } : p));
-  return (
-    <div class="widget">
-      <div class="label">
-        <span>launch plans{" "}
-          <Info label="about plans">
-            Plans are recompiled deterministically from the profile and the
-            hardware snapshot — they are not stored. A measured tag means a
-            real benchmark of that exact plan; estimated numbers come from
-            the GGUF layout math. Measurements outrank estimates.
-          </Info>
-        </span>
-      </div>
-      {err && <p class="sub">plans unavailable: {err}</p>}
-      {!rows && !err && <p class="sub">compiling plans…</p>}
-      {rows && rows.length === 0 && <p class="sub">no plans could be compiled</p>}
-      {rows && rows.length > 0 && (
-        <table>
-          <thead>
-            <tr><th>plan</th><th>status</th><th class="num">tok/s</th>
-              <th class="num">load</th><th>numbers</th><th>actions{" "}
-                <Info label="about the plan actions">
-                  Select writes this plan's placement into the profile and
-                  resyncs. Disable takes it out of the ranked candidate
-                  set without deleting anything, and enable puts it back.
-                  Test launches a real server on this exact plan and
-                  records what it measures.
-                </Info></th></tr>
-          </thead>
-          <tbody>
-            {rows.map((p) => (
-              <tr key={p.id}>
-                <td>
-                  {p.label}
-                  {p.pinned && <span class="tag" style="margin-left:.4em">pinned</span>}
-                  {p.disabled && <span class="tag" style="margin-left:.4em">disabled</span>}
-                  {p.admission?.fits === false && (
-                    <span class="tag" style="margin-left:.4em;color:var(--warn)">
-                      won't fit this machine
-                    </span>
-                  )}
-                  {p.warnings.length > 0 && (
-                    <div class="sub" style="color:var(--warn)">
-                      {p.warnings.map((w) => <div key={w}>⚠ {w}</div>)}
-                    </div>
-                  )}
-                </td>
-                <td><span class="chip"><span class="dot"></span>{p.category_label}</span>
-                  {p.stale && <div class="sub">stale — machine changed since</div>}</td>
-                <td class="num">
-                  {p.measured?.generation_tps != null
-                    ? p.measured.generation_tps.toFixed(1)
-                    : "—"}
-                </td>
-                <td class="num">
-                  {p.measured?.load_seconds != null
-                    ? `${p.measured.load_seconds.toFixed(0)}s`
-                    : "—"}
-                </td>
-                <td>
-                  <MeasuredTag measured={!!p.measured} />
-                  {p.measured?.cache_state
-                    ? <span class="sub"> {p.measured.cache_state}</span> : null}
-                </td>
-                <td>
-                  <PlanActions name={name} plan={p} onChanged={onChanged}
-                               onOptimistic={onOptimistic} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
       )}
     </div>
   );
@@ -1241,8 +1091,20 @@ function fmtBudgetMap(v: unknown): string {
   return entries.map(([dev, b]) => `${dev} ${fmtGiB(b)} GiB`).join(" · ");
 }
 
-const TABS = ["overview", "plans", "history", "logs", "configure"] as const;
+const TABS = ["overview", "placement", "history", "logs", "configure"] as const;
 type Tab = (typeof TABS)[number];
+
+/* The tab id is the URL hash; the label is what an operator reads. They
+   differ for exactly one tab, and that is the point of this change: a
+   "plan" is a compiled artifact, not something anybody chooses from. An
+   old #plans bookmark is not in TABS and falls back to overview. */
+const TAB_LABEL: Record<Tab, string> = {
+  overview: "overview",
+  placement: "where it runs",
+  history: "history",
+  logs: "logs",
+  configure: "configure",
+};
 
 export function Model({ name }: { name: string }) {
   const { tick, stale, lastAt, retryIn } = useStream();
@@ -1297,7 +1159,7 @@ export function Model({ name }: { name: string }) {
       <div class="tabs" role="tablist" aria-label={`${name} sections`}>
         {TABS.map((t) => (
           <button key={t} type="button" role="tab" aria-selected={tab === t}
-                  onClick={() => pick(t)}>{t}</button>
+                  onClick={() => pick(t)}>{TAB_LABEL[t]}</button>
         ))}
       </div>
       {tab === "overview" && <>
@@ -1307,8 +1169,8 @@ export function Model({ name }: { name: string }) {
         <Measure name={name} />
         <TierApply name={name} revision={revision} onApplied={reload} />
       </>}
-      {tab === "plans" && <>
-        <Plans name={name} revision={revision} onChanged={reload} />
+      {tab === "placement" && <>
+        <WhereItRuns name={name} revision={revision} onChanged={reload} />
         <RuntimePolicyForm name={name} revision={revision} onSaved={reload} />
       </>}
       {tab === "history" && <History name={name} revision={revision} />}

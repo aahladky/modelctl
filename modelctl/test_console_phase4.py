@@ -481,6 +481,27 @@ class TestPlacementPreview(Phase4Base):
         self.assertEqual(body["analysis"], PLAN_SPILL["analysis"])
         self.assertTrue(body["admission"]["fits"])
 
+    def test_the_answer_carries_what_is_applied_right_now(self):
+        """The screen opens on what is set to run and needs to know when it
+        has drifted from it. Reconstructing that from the emitted -ot rules
+        would be a second reader of placement."""
+        applied = {"RAM": {"on": False}}
+        p = json.loads((self.profiles_dir / "m1.json").read_text())
+        p["planning"] = {"selection": applied}
+        (self.profiles_dir / "m1.json").write_text(json.dumps(p))
+        with self._planner():
+            body = self.client.get("/api/v2/models/m1/placement?on.SYCL0=1",
+                                   headers=self.auth).json()
+        self.assertEqual(body["applied_selection"], applied)
+        self.assertEqual(body["selection"], {"SYCL0": {"on": True}},
+                         "what was asked for stays distinct from what runs")
+
+    def test_a_model_that_was_never_placed_reports_no_applied_selection(self):
+        with self._planner():
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertEqual(body["applied_selection"], {})
+
     def test_an_unplannable_model_is_a_409_not_an_empty_screen(self):
         with mock.patch("modelctl_plans.plan_for_selection",
                         return_value=None):

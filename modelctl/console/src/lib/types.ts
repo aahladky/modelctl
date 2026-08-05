@@ -304,6 +304,56 @@ export interface Gate {
   requires_accept: boolean;
 }
 
+/* ---- placement ----
+   What the operator chose (which devices this model may use and how much
+   of each) and where the planner puts the weights as a result. The screen
+   renders these numbers; it never works out a split of its own, because a
+   screen that re-derives placement is a screen that can disagree with
+   what actually launches. */
+
+export interface DeviceChoice {
+  on?: boolean;
+  /* Bytes. null/absent is "as much as it needs" -- a ceiling only ever
+     takes room away, it can never grant more than the device has. */
+  ceiling_bytes?: number | null;
+}
+
+export type PlacementSelection = Record<string, DeviceChoice>;
+
+export interface PlacedDevice {
+  bytes: number;
+  backing: "VRAM" | "over RPC" | "RAM" | "SSD via mmap";
+  fits: boolean;
+  capacity_bytes?: number;
+  usable_bytes?: number;
+}
+
+export interface PlacementView {
+  name: string;
+  /* What was asked for on this request. */
+  selection: PlacementSelection;
+  /* What is set to run right now, from the last apply. Empty means this
+     model has never been placed by hand and is on automatic. */
+  applied_selection: PlacementSelection;
+  tier: number;
+  config: TierPlan["config"];
+  warnings: string[];
+  analysis: Record<string, unknown>;
+  admission: AdmissionRecord;
+  cache_budgets: Record<string, number> | null;
+  layout: { label: string; gib: number; detail: string }[];
+  /* Keyed by admission key -- the same key the fleet view gives each
+     device, and the same one the gate charges. */
+  devices: Record<string, PlacedDevice>;
+  /* Bytes with nowhere to go but the disk. Zero is the goal state. */
+  spill_bytes: number;
+}
+
+export interface PlacementApplyResult {
+  job_id: string;
+  gate: Gate;
+}
+
 export interface AdmissionPreview {
   plan: TierPlan | null;
   planning_inputs: Record<string, unknown> | null;
