@@ -2896,18 +2896,27 @@ def plan_tiers_for_profile(profile, refresh_inputs=False, inventory=None,
                            defaults=None, primary=None):
     """Tier plan for one profile from its resolved (stored-first) inputs.
 
+    Automatic placement IS the empty selection -- that is what an empty
+    selection has always meant -- so this delegates to plan_for_selection
+    rather than calling plan_tiers a second way. Not "produces the same
+    answer as": the same function, so the two cannot drift.
+
+    They had. This built its plan_tiers call by hand and never passed
+    remote_rungs, so every path resting on it planned as though the fleet
+    were not there: /tier/apply with its preview and its gate, the config
+    form's admission preview, and the CLI's place --tiers. Measured on the
+    live 122B 2026-08-05 -- automatic put 39.52 GiB on the CPU as SSD via
+    mmap while the same profile through an empty selection put 5.54 GiB in
+    RAM and 34 GiB across the two laptop nodes. The fleet-blind answer
+    also crossed that model's own storage floor, which forbids running
+    from disk.
+
     Returns (plan_or_None, inputs, source)."""
-    import modelctl_tiers
+    import modelctl_plans
     inputs, source = resolve_planning_inputs(
         profile, refresh=refresh_inputs, inventory=inventory,
         defaults=defaults, primary=primary)
-    plan = modelctl_tiers.plan_tiers(
-        profile, inputs["inventory"], inputs["vram_limit_pct"],
-        inputs["primary"],
-        ram_available=inputs["ram_available_bytes"],
-        cache_request=profile.get("moe_cache"),
-        capabilities=inputs.get("capabilities"),
-        hw_settings=inputs.get("hw_settings"))
+    plan = modelctl_plans.plan_for_selection(profile, {}, inputs=inputs)
     return plan, inputs, source
 
 

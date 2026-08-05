@@ -1117,3 +1117,59 @@ class TestPlacementInvariant(unittest.TestCase):
                         self._plan(n, r, rungs, sel)[0])]
         self.assertTrue(streamed, "no scenario spills -- the invariant "
                                   "cases are vacuous")
+
+
+class TestAutomaticPlacementSeesTheFleet(unittest.TestCase):
+    """plan_tiers_for_profile is "automatic placement", and an empty
+    selection already means exactly that -- so the two must be the same
+    computation, not two that happen to agree.
+
+    They did not. plan_tiers_for_profile never passed remote_rungs, so
+    every path built on it planned as though the fleet did not exist:
+    /tier/apply and its preview and its gate (app.py:288, :933), the
+    config form's admission preview (hub.py:263), and the CLI's
+    place --tiers. Measured on the live 122B 2026-08-05 -- automatic put
+    39.52 GiB on the CPU as SSD via mmap, while the same profile through
+    plan_for_selection({}) put 5.54 GiB in RAM and 34 GiB across the two
+    laptop nodes. The fleet-blind answer also crossed that model's own
+    storage floor, which forbids running from disk.
+    """
+
+    def _inputs(self, ram_gib=40):
+        return {"inventory": INVENTORY, "vram_limit_pct": 90,
+                "primary": "SYCL0", "ram_available_bytes": ram_gib * GIB}
+
+    def test_automatic_placement_offers_the_remote_rungs(self):
+        import modelctl
+        import modelctl_plans
+        with mock.patch.object(modelctl, "resolve_planning_inputs",
+                               return_value=(self._inputs(), "stored")), \
+             mock.patch.object(modelctl_plans, "_remote_rungs",
+                               return_value=[RUNG_GPU, RUNG_CPU]), \
+             mock.patch.object(modelctl_plans.modelctl_vram,
+                               "gguf_model_layout",
+                               return_value=moe_layout(60, 1.1,
+                                                       has_shexp=True)):
+            plan, _inputs, _source = modelctl.plan_tiers_for_profile(profile())
+        self.assertIn(RUNG_CPU["endpoint"], plan["config"]["extra"],
+                      "automatic placement planned as if the fleet were not "
+                      "there")
+
+    def test_automatic_placement_is_the_empty_selection(self):
+        """Not "produces the same answer as" -- IS. One function, so they
+        cannot drift apart the way they had."""
+        import modelctl
+        import modelctl_plans
+        with mock.patch.object(modelctl, "resolve_planning_inputs",
+                               return_value=(self._inputs(), "stored")), \
+             mock.patch.object(modelctl_plans, "_remote_rungs",
+                               return_value=[RUNG_GPU, RUNG_CPU]), \
+             mock.patch.object(modelctl_plans.modelctl_vram,
+                               "gguf_model_layout",
+                               return_value=moe_layout(60, 1.1,
+                                                       has_shexp=True)):
+            auto, inputs, _source = modelctl.plan_tiers_for_profile(profile())
+            chosen = modelctl_plans.plan_for_selection(profile(), {},
+                                                       inputs=inputs)
+        self.assertEqual(auto["config"], chosen["config"])
+        self.assertEqual(auto["layout"], chosen["layout"])
