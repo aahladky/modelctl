@@ -763,3 +763,125 @@ class TestRemoteRungs(unittest.TestCase):
             layout=moe_layout(60, 1.1), remote_rungs=[])
         self.assertEqual(_json.dumps(a, sort_keys=True, default=str),
                          _json.dumps(b, sort_keys=True, default=str))
+
+
+class TestPlacementInvariant(unittest.TestCase):
+    """No weight byte streams off the SSD while an enabled device still
+    has room to hold it.
+
+    The rule, in Aaron's words on 2026-08-04: the SSD is overflow of last
+    resort, never a default. It broke three separate ways that day and all
+    three were fixed, but it was only ever probed by hand -- this is the
+    standing form, so the next planner change cannot put it back quietly.
+
+    The slack is the planner's real granularity, not a fudge factor.
+    Experts move a whole layer at a time, so a device holding less than
+    one layer of headroom has nowhere to put another one. Everything else
+    -- the per-card compute reserve, the KV, the cache -- is already
+    charged inside demand_bytes, so what is compared here is genuinely
+    free space.
+
+    Ceilings need no special case: select_inputs applies them by shrinking
+    the device, so `usable_bytes` is already the room the OPERATOR left,
+    and a capped device that spills is obeying an instruction rather than
+    breaking the rule.
+    """
+
+    PER_LAYER_GIB = 1.1
+
+    # (name, n_layers, ram_gib, rungs, selection)
+    SCENARIOS = [
+        ("everything on, model fits", 20, 40, [RUNG_GPU, RUNG_CPU], {}),
+        ("big model, plenty of RAM", 60, 40, [RUNG_GPU, RUNG_CPU], {}),
+        ("big model, thin RAM", 60, 8, [RUNG_GPU, RUNG_CPU], {}),
+        ("big model, no laptop", 60, 8, [], {}),
+        ("huge model, no laptop", 120, 8, [], {}),
+        ("huge model, laptop on", 120, 8, [RUNG_GPU, RUNG_CPU], {}),
+        ("laptop switched off", 60, 8, [RUNG_GPU, RUNG_CPU],
+         {RUNG_GPU["name"]: {"on": False}, RUNG_CPU["name"]: {"on": False}}),
+        ("second card capped", 60, 8, [RUNG_GPU, RUNG_CPU],
+         {"SYCL1": {"ceiling_bytes": 2 * GIB}}),
+        ("host memory capped", 60, 40, [RUNG_GPU, RUNG_CPU],
+         {"RAM": {"ceiling_bytes": 2 * GIB}}),
+        ("host memory switched off", 60, 40, [RUNG_GPU, RUNG_CPU],
+         {"RAM": {"on": False}}),
+        ("one card only", 60, 8, [], {"SYCL1": {"on": False}}),
+    ]
+
+    def _plan(self, n_layers, ram_gib, rungs, selection):
+        import modelctl_plans
+        inputs = {"inventory": INVENTORY, "vram_limit_pct": 90,
+                  "primary": "SYCL0",
+                  "ram_available_bytes": int(ram_gib * GIB)}
+        plan = modelctl_plans.plan_for_selection(
+            profile(), selection, inputs=inputs, remote_rungs=rungs,
+            layout=moe_layout(n_layers, self.PER_LAYER_GIB, has_shexp=True))
+        # The rungs the planner was ALLOWED to use. Read back through the
+        # production filter rather than re-derived, so "enabled" means here
+        # exactly what it meant to the planner.
+        _inv, _ram, kept = modelctl_tiers.select_inputs(
+            INVENTORY, int(ram_gib * GIB), rungs, selection, 90)
+        return plan, kept
+
+    def _streaming_host_gib(self, plan):
+        """GiB the host holds off the SSD, or 0 when nothing streams.
+
+        --no-mmap is the whole difference: the planner decides it by fit,
+        so a tier-4 plan whose remainder fits is holding it resident.
+        """
+        if "--no-mmap" in plan["config"]["extra"].split():
+            return 0.0
+        for label, gib, _detail in plan["layout"]:
+            if label == "CPU":
+                return gib
+        return 0.0
+
+    def test_nothing_streams_while_an_enabled_device_has_room(self):
+        layer_bytes = self.PER_LAYER_GIB * GIB
+        for name, n_layers, ram_gib, rungs, selection in self.SCENARIOS:
+            with self.subTest(scenario=name):
+                plan, kept = self._plan(n_layers, ram_gib, rungs, selection)
+                spilled = self._streaming_host_gib(plan)
+                if not spilled:
+                    continue
+                for dev, row in plan["admission"]["devices"].items():
+                    free = row["usable_bytes"] - row["demand_bytes"]
+                    self.assertLess(
+                        free, layer_bytes,
+                        f"{name}: {spilled:.1f} GiB streams off the SSD while "
+                        f"{dev} still has {free / GIB:.2f} GiB free -- room "
+                        f"for another {self.PER_LAYER_GIB} GiB expert layer")
+                used = (plan["config"].get("rpc") or {}).get("admission", {})
+                for rung in kept:
+                    free = rung["budget_bytes"] - used.get(rung["name"], 0)
+                    self.assertLess(
+                        free, layer_bytes,
+                        f"{name}: {spilled:.1f} GiB streams off the SSD while "
+                        f"{rung['name']} still has {free / GIB:.2f} GiB of its "
+                        "declared budget unused")
+
+    def test_nothing_streams_while_the_host_could_have_held_it(self):
+        """The RAM leg of the same rule. Weights land on the SSD only
+        because memory could not take them -- never while it could."""
+        for name, n_layers, ram_gib, rungs, selection in self.SCENARIOS:
+            with self.subTest(scenario=name):
+                plan, _kept = self._plan(n_layers, ram_gib, rungs, selection)
+                spilled = self._streaming_host_gib(plan)
+                if not spilled:
+                    continue
+                budget = plan["analysis"]["ram_budget_gib"]
+                self.assertGreater(
+                    spilled, budget,
+                    f"{name}: {spilled:.1f} GiB streams off the SSD although "
+                    f"the RAM budget is {budget:.1f} GiB -- it should have "
+                    "been held resident")
+
+    def test_the_invariant_can_actually_fail(self):
+        """A guard that never fires is not a guard. At least one scenario
+        must reach the streaming branch, or both cases above would pass on
+        an empty loop no matter what the planner did."""
+        streamed = [name for name, n, r, rungs, sel in self.SCENARIOS
+                    if self._streaming_host_gib(
+                        self._plan(n, r, rungs, sel)[0])]
+        self.assertTrue(streamed, "no scenario spills -- the invariant "
+                                  "cases are vacuous")
