@@ -83,6 +83,17 @@ RAM_RESERVE_BYTES = 4 * (1 << 30)
 _PLACEMENT_FLAG_ARITY = {"-ot": 1, "-ngl": 1, "--fit": 1, "--device": 1,
                          "--no-mmap": 0}
 
+# Attached when the tier LABEL is computed (whole model vs GPU+RAM),
+# which is before the remote rungs take their share -- so the MoE spill
+# planner retracts it if the leftover CPU share turns out to fit in RAM
+# (hold_in_ram). One constant, both sites: emission and retraction must
+# not drift apart, or the screen prints "nothing on disk" beside
+# "streams from SSD" for one and the same plan (live, 2026-08-05).
+_TIER4_STREAM_WARNING = (
+    "model exceeds GPU+RAM: the CPU-resident portion streams "
+    "from SSD via mmap -- expect low single-digit tok/s on "
+    "cold cache.")
+
 
 # KV heuristic for QUANT SELECTION only. The vram module's 256 KiB/token is a
 # deliberate over-estimate for OOM guarding; using it here would penalize big
@@ -853,10 +864,7 @@ def plan_tiers(profile, inventory, limit_pct, primary, ram_available=None,
         # --- tiers 3/4: spill to CPU (RAM), maybe SSD streaming ----------
         tier = 3 if total <= combined + ram_budget else 4
         if tier == 4:
-            warnings.append(
-                "model exceeds GPU+RAM: the CPU-resident portion streams "
-                "from SSD via mmap -- expect low single-digit tok/s on "
-                "cold cache.")
+            warnings.append(_TIER4_STREAM_WARNING)
 
         if layout["is_moe"]:
             return _plan_moe_spill(
@@ -1348,6 +1356,14 @@ def _plan_moe_spill(tier, layout, devs, usable, primary, kv, ram_budget,
         tier == 3 or (cpu_layers and cpu_gib <= analysis["ram_budget_gib"]))
     if hold_in_ram:
         extra.append("--no-mmap")
+    if tier == 4 and (hold_in_ram or not cpu_layers):
+        # The label's warning promised SSD streaming and this plan
+        # falsified it -- through either door: the leftover share fits in
+        # RAM (hold_in_ram), or the rungs absorbed the whole tail and no
+        # CPU share exists to stream at all (review, 2026-08-05).
+        # Keep-list rather than remove-once so a doubled emission cannot
+        # survive either.
+        warnings[:] = [w for w in warnings if w != _TIER4_STREAM_WARNING]
     if other:
         extra.append(other)
 

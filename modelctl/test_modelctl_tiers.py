@@ -693,6 +693,40 @@ class TestRemoteRungs(unittest.TestCase):
         self.assertGreater(cpu_share, 2)
         self.assertNotIn("--no-mmap", plan["config"]["extra"])
 
+    def test_a_resident_cpu_share_retracts_the_streaming_warning(self):
+        """The tier-4 'streams from SSD' warning is attached when the
+        LABEL is computed, before the rungs take their share; a plan
+        that then holds its CPU share resident has falsified the
+        premise. Live on 2026-08-05 the placement screen printed
+        'nothing on disk' beside 'streams from SSD via mmap' for one
+        and the same plan."""
+        plan = self._plan(40, [RUNG_GPU, RUNG_CPU])
+        self.assertEqual(plan["tier"], 4)
+        self.assertIn("--no-mmap", plan["config"]["extra"])
+        self.assertFalse(
+            [w for w in plan["warnings"] if "SSD" in w],
+            plan["warnings"])
+
+    def test_a_streaming_cpu_share_keeps_the_warning(self):
+        plan = self._plan(2, [RUNG_GPU, RUNG_CPU])
+        self.assertEqual(plan["tier"], 4)
+        self.assertNotIn("--no-mmap", plan["config"]["extra"])
+        self.assertTrue([w for w in plan["warnings"] if "SSD" in w])
+
+    def test_rungs_absorbing_the_whole_tail_also_retract_the_warning(self):
+        """The second door to the same lie (review, 2026-08-05): the
+        rungs take everything the GPUs could not, so no CPU share exists
+        at all -- nothing streams, and the label's warning must not
+        survive on a plan with nothing left to stream."""
+        plan = modelctl_tiers.plan_tiers(
+            profile(), INVENTORY, 90, "SYCL0", ram_available=1 * GIB,
+            layout=moe_layout(24, 1.3, has_shexp=True),
+            remote_rungs=[RUNG_GPU, RUNG_CPU])
+        self.assertEqual(plan["tier"], 4)
+        self.assertFalse([r for r in plan["layout"] if r[0] == "CPU"])
+        self.assertFalse([w for w in plan["warnings"] if "SSD" in w],
+                         plan["warnings"])
+
     def test_tier4_offers_every_rung_before_ssd(self):
         layout = moe_layout(60, 1.1, has_shexp=True)
         plan = self._plan(8, [RUNG_GPU, RUNG_CPU])
