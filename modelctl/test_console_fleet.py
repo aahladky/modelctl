@@ -527,6 +527,80 @@ class TestFleetRoutes(ClientBase):
         self.assertFalse(self.presence_path.exists())
 
 
+class TestBusyNodesAreNotProbed(FleetConsoleBase):
+    """A node serving a model must not be probed.
+
+    ggml-rpc-server takes one client at a time behind listen(backlog=1).
+    While a model holds a node, a probe's connection cannot be accepted:
+    it times out, presence records unreachable, usable_nodes drops the
+    node, and the planner stops offering memory that is in use at that
+    exact moment -- weights to the SSD, by the route the presence
+    refresher was built to close. The abandoned connection then sits in
+    CLOSE-WAIT eating the backlog, so each probe makes the next one
+    likelier to fail. Observed on ph16-71, 2026-08-04.
+    """
+
+    def _busy(self, *endpoints):
+        return lambda: set(endpoints)
+
+    def test_a_node_in_use_is_not_probed_at_all(self):
+        node = cpu_node()
+        fleet.save_presence([probe(node.name)])
+        with mock.patch.object(fleet, "probe_node") as pr:
+            fleet.probe_and_record([node], busy_fn=self._busy(node.endpoint))
+        self.assertFalse(pr.called, "probing a busy server can only time "
+                                    "out and leave a CLOSE-WAIT behind")
+
+    def test_being_connected_keeps_the_node_fresh(self):
+        """The point of not probing: the node must not age out while it is
+        working. Its last handshake stands, with the clock moved on."""
+        node = cpu_node()
+        old = probe(node.name)
+        fleet.save_presence([old])
+        with mock.patch.object(fleet, "probe_node"):
+            fleet.probe_and_record([node], busy_fn=self._busy(node.endpoint))
+        now = fleet.load_presence()[node.name]
+        self.assertGreater(now.probed_at, old.probed_at)
+        self.assertTrue(now.reachable)
+        self.assertIn("in use", now.detail)
+
+    def test_the_handshake_facts_are_not_invented(self):
+        """Only the clock moves. Nobody verified the protocol or the pin
+        just now, so neither may be written as if they had been."""
+        node = cpu_node()
+        old = probe(node.name)
+        fleet.save_presence([old])
+        with mock.patch.object(fleet, "probe_node"):
+            fleet.probe_and_record([node], busy_fn=self._busy(node.endpoint))
+        now = fleet.load_presence()[node.name]
+        self.assertEqual(now.protocol, old.protocol)
+        self.assertEqual(now.pin, old.pin)
+        self.assertEqual(now.pin_agrees, old.pin_agrees)
+
+    def test_a_busy_node_never_probed_is_left_alone(self):
+        """No prior handshake means nothing truthful to write."""
+        node = cpu_node()
+        with mock.patch.object(fleet, "probe_node") as pr:
+            fleet.probe_and_record([node], busy_fn=self._busy(node.endpoint))
+        self.assertFalse(pr.called)
+        self.assertEqual(fleet.load_presence(), {})
+
+    def test_a_free_node_is_still_probed(self):
+        node = cpu_node()
+        with mock.patch.object(fleet, "probe_node",
+                               side_effect=lambda n, **kw: probe(n.name)) as pr:
+            fleet.probe_and_record([node], busy_fn=self._busy("10.0.0.9:1"))
+        self.assertTrue(pr.called)
+        self.assertIn(node.name, fleet.load_presence())
+
+    def test_no_busy_fn_is_the_old_behaviour(self):
+        node = cpu_node()
+        with mock.patch.object(fleet, "probe_node",
+                               side_effect=lambda n, **kw: probe(n.name)) as pr:
+            fleet.probe_and_record([node])
+        self.assertTrue(pr.called)
+
+
 class TestPresenceRefresherStarts(FleetConsoleBase):
     """The live half of the scratch rule.
 

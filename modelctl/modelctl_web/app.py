@@ -167,16 +167,11 @@ def create_app(store=None, runner=None, collector=None,
     # across the LAN just by being opened, and write the results into the
     # presence record the live console plans from -- the two things a
     # scratch instance exists not to do.
+    # Started at the very end of create_app, not here: its first sweep
+    # runs the moment the thread starts, and it needs _busy_endpoints,
+    # which is not bound until this function has finished defining its
+    # routes.
     app.state.presence_poller = None
-    try:
-        import modelctl_fleet
-        if modelctl_fleet.load_fleet() and not scratch_safe_mode():
-            app.state.presence_poller = modelctl_fleet.PresencePoller()
-            app.state.presence_poller.start()
-    except Exception:
-        # A refresher that cannot start must not take the console with
-        # it; presence then ages exactly as it did before.
-        app.state.presence_poller = None
 
     @app.exception_handler(modelctl_errors.ProfileNotFoundError)
     async def profile_not_found(request: Request, exc):
@@ -1217,6 +1212,31 @@ def create_app(store=None, runner=None, collector=None,
         from . import fleet as fleet_view
         return fleet_view.fleet_view()
 
+    def _busy_endpoints():
+        """RPC endpoints a model running on this machine already holds.
+
+        A busy ggml-rpc-server cannot accept a probe (one client, backlog
+        of 1), so probing one reports it absent while it is demonstrably
+        working. Being connected to it is the better evidence, and this is
+        where that evidence lives -- the runtime state says what is
+        loaded, the profile says which endpoints it was launched with.
+        Degrades to "nothing is busy", which is only the old behaviour.
+        """
+        try:
+            running = [n for n, rt in _runtime_state().items()
+                       if rt.get("running")]
+        except Exception:
+            return set()
+        out = set()
+        for name in running:
+            try:
+                cfg = modelctl.load_profile(name).get("config", {})
+            except Exception:
+                continue
+            for ep in (cfg.get("rpc") or {}).get("endpoints", []):
+                out.add(str(ep))
+        return out
+
     def _probe_and_record(nodes):
         """Probe `nodes` and merge the results into the presence record.
 
@@ -1225,7 +1245,8 @@ def create_app(store=None, runner=None, collector=None,
         "record what we just learned" is two ways to erase a node.
         """
         import modelctl_fleet
-        return modelctl_fleet.probe_and_record(nodes)
+        return modelctl_fleet.probe_and_record(nodes,
+                                               busy_fn=_busy_endpoints)
 
     @app.post("/api/v2/fleet/probe")
     def api_v2_fleet_probe():
@@ -1984,6 +2005,17 @@ def create_app(store=None, runner=None, collector=None,
         if path and inside and candidate.is_file():
             return FileResponse(candidate)
         return FileResponse(CONSOLE_DIST / "index.html")
+
+    try:
+        import modelctl_fleet
+        if modelctl_fleet.load_fleet() and not scratch_safe_mode():
+            app.state.presence_poller = modelctl_fleet.PresencePoller(
+                busy_fn=_busy_endpoints)
+            app.state.presence_poller.start()
+    except Exception:
+        # A refresher that cannot start must not take the console with
+        # it; presence then ages exactly as it did before.
+        app.state.presence_poller = None
 
     return app
 

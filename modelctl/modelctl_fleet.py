@@ -432,17 +432,39 @@ def ensure_fresh_presence(nodes=None, now=None, ttl=PRESENCE_TTL_SECONDS,
     return usable_nodes(enabled, presence=presence, now=now, ttl=ttl)
 
 
-def probe_and_record(nodes, probe_fn=None) -> list:
+def probe_and_record(nodes, probe_fn=None, busy_fn=None) -> list:
     """Probe `nodes` and merge the results into the presence record.
 
     Merge, not replace: save_presence writes the whole file, so a partial
     refresh that forgot this would erase what is known about every node
     it did not probe -- deleting their capacity from planning, which is
     the exact failure a refresh exists to prevent.
+
+    `busy_fn` names the endpoints something on this machine is already
+    talking to, and those are NOT probed. ggml-rpc-server serves one
+    client at a time behind listen(backlog=1), so while a model holds a
+    node, a probe's connection cannot be accepted: it times out, the node
+    is recorded unreachable, usable_nodes drops it, and the planner stops
+    offering memory that is in use at that very moment. Worse, the busy
+    server never closes the abandoned connection, so each probe parks a
+    CLOSE-WAIT socket in the backlog and makes the next probe likelier to
+    fail. Observed on ph16-71 2026-08-04: two live sessions, four
+    CLOSE-WAIT, accept queue over-full.
+
+    Being connected to a node is stronger evidence than a handshake, so
+    an in-use node keeps its last probe and only has its clock refreshed
+    -- enough to stop it ageing out, without inventing a protocol version
+    or a pin nobody just verified. A node in use with no prior record is
+    left alone: there is nothing truthful to write.
     """
     fn = probe_fn or probe_node
+    busy = set(busy_fn() or ()) if busy_fn else set()
     probes = []
+    held = []
     for n in nodes:
+        if n.endpoint in busy:
+            held.append(n)
+            continue
         try:
             probes.append(fn(n))
         except Exception:
@@ -450,6 +472,16 @@ def probe_and_record(nodes, probe_fn=None) -> list:
             # node its freshness -- usable_nodes ages it out and planning
             # proceeds without it -- not the whole sweep.
             continue
+    if held:
+        now = time.time()
+        known = load_presence()
+        for n in held:
+            prior = known.get(n.name)
+            if prior is None:
+                continue
+            probes.append(replace(
+                prior, probed_at=now,
+                detail="in use by a model on this machine"))
     if not probes:
         return []
     with modelctl_fsutil.state_lock():
@@ -478,7 +510,7 @@ class PresencePoller:
     """
 
     def __init__(self, interval=None, probe_fn=None, nodes_fn=None,
-                 presence_fn=None, clock=time.time):
+                 presence_fn=None, clock=time.time, busy_fn=None):
         # Resolved here rather than as a default argument so the module
         # constant can be lowered for tests.
         self._interval = (PRESENCE_REFRESH_SECONDS if interval is None
@@ -487,6 +519,10 @@ class PresencePoller:
         self._nodes_fn = nodes_fn or enabled_nodes
         self._presence_fn = presence_fn or load_presence
         self._clock = clock
+        # Endpoints a model on this machine already holds; those are not
+        # probed, because a busy rpc-server cannot accept the connection
+        # and the timeout would read as absence.
+        self._busy_fn = busy_fn
         self._stop = threading.Event()
         self._thread = None
 
@@ -543,7 +579,8 @@ class PresencePoller:
         due = self.due()
         if not due:
             return []
-        return probe_and_record(due, probe_fn=self._probe_fn)
+        return probe_and_record(due, probe_fn=self._probe_fn,
+                                busy_fn=self._busy_fn)
 
 
 def usable_nodes(nodes=None, presence=None, now=None,
