@@ -547,6 +547,15 @@ button.busy { opacity: .6; cursor: progress; }
    GPU. */
 .dev-absent .dev-track { opacity: .55; }
 
+/* Home's read-only bars: room the planner may still spend, drawn beside
+   what is held. A wash, not a fill -- free is an offer, held is a fact,
+   and they must not read as the same substance. */
+.stack-free {
+  position: absolute; top: 0; bottom: 0;
+  background: var(--accent-wash);
+  border-right: 1px solid var(--faint);
+}
+
 /* ---- where the model lives, as one bar -------------------------------
    The per-device rows say how full each device is. This says where the
    MODEL is, which is the question the screen exists for -- five separate

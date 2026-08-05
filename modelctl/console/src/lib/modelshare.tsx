@@ -43,8 +43,13 @@ export function totalBytes(shares: Share[]): number {
   return shares.reduce((sum, s) => sum + Math.max(0, s.bytes), 0);
 }
 
+/* spill is tri-state: bytes when the caller knows (the placement answer
+   computes it exactly), null when it does not (home draws from live
+   holdings, and streamed bytes are precisely the ones nothing holds).
+   Null renders NO badge -- "nothing on disk" on no evidence is the kind
+   of cheerful lie this console is being rebuilt to stop telling. */
 export function ModelShare({ shares, spill }:
-                           { shares: Share[]; spill: number }) {
+                           { shares: Share[]; spill: number | null }) {
   const ordered = orderShares(shares);
   const total = totalBytes(ordered);
   const streaming = ordered.filter((s) => rankOf(s.backing) === 3);
@@ -56,11 +61,13 @@ export function ModelShare({ shares, spill }:
         <span class="sub">
           across {ordered.length} device{ordered.length === 1 ? "" : "s"}
         </span>
-        {spill > 0
-          ? <span class="share-spill">
-              {fmtGiB(spill)} GiB streaming from disk
-            </span>
-          : <span class="share-ok">nothing on disk</span>}
+        {spill == null
+          ? null
+          : spill > 0
+            ? <span class="share-spill">
+                {fmtGiB(spill)} GiB streaming from disk
+              </span>
+            : <span class="share-ok">nothing on disk</span>}
       </div>
 
       <div class="share-bar">
