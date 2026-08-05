@@ -310,9 +310,12 @@ export function WhereItRuns({ name, revision, onChanged }: {
   const bytesOn = (key: string) => place.devices[key]?.bytes ?? 0;
   const spill = place.spill_bytes;
   const hit = measured.get(placedKey(place));
-  const tight = slots.filter(
-    (s) => on[s.key] && s.present && bytesOn(s.key) > 0
-           && s.budget - bytesOn(s.key) < GIB);
+  /* Worst first, so the banner names the device in most trouble rather
+     than whichever one happens to be listed earliest. */
+  const tight = slots
+    .filter((s) => on[s.key] && s.present && bytesOn(s.key) > 0
+                   && s.budget - bytesOn(s.key) < GIB)
+    .sort((a, b) => (a.budget - bytesOn(a.key)) - (b.budget - bytesOn(b.key)));
   const dirty = appliedKey !== null && selKey !== appliedKey;
   const anyOn = slots.some((s) => on[s.key] && s.present);
 
@@ -378,8 +381,19 @@ export function WhereItRuns({ name, revision, onChanged }: {
                     </span>
                     <span class="bar">
                       <i style={{ width: `${isOn ? pct : 0}%` }} />
-                      {isOn && s.editable && (
-                        /* step 0.1 GiB: on a coarser step a capacity like
+                      {isOn && (
+                        /* Every device the model may use gets a ceiling,
+                           the rig's included. `editable` is a FLEET flag
+                           -- it says whether this device's declared budget
+                           can be written from the fleet page, and the
+                           rig's cannot because it is derived from the
+                           settings VRAM limit. A ceiling here writes no
+                           budget: it is a per-model planner input, and
+                           select_inputs applies it to any device key. An
+                           earlier draft dragged the node budget, which is
+                           where that gate came from.
+
+                           step 0.1 GiB: on a coarser step a capacity like
                            24.7 never lands on a boundary, so the far right
                            -- and with it "no ceiling" -- is unreachable by
                            dragging. */
@@ -410,13 +424,29 @@ export function WhereItRuns({ name, revision, onChanged }: {
                           ? <span class="dnote warnnote">
                               streamed from disk
                             </span>
-                          : used > 0 && spare < GIB
-                            ? <span class="dnote warnnote">
-                                {fmtGiB(spare)} GB spare
+                          : used > 0 && spare < 0
+                            ? (
+                              /* The planner put more here than this device
+                                 is currently offering. Printing that as
+                                 "-1.4 GB spare" is arithmetic, not an
+                                 answer: say what it means. The two numbers
+                                 come from different clocks -- the planner
+                                 spends the recorded machine snapshot, the
+                                 row shows what the device offers right now
+                                 -- so this is exactly the disagreement
+                                 worth surfacing rather than smoothing. */
+                              <span class="dnote warnnote">
+                                {fmtGiB(-spare)} GB more than this device
+                                {" "}is offering now
                               </span>
-                            : !s.editable
-                              ? <span class="dnote">{s.editNote}</span>
-                              : null}
+                            )
+                            : used > 0 && spare < GIB
+                              ? <span class="dnote warnnote">
+                                  {fmtGiB(spare)} GB spare
+                                </span>
+                              : !s.editable
+                                ? <span class="dnote">{s.editNote}</span>
+                                : null}
                   </span>
                 </div>
               );
