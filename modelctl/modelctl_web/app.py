@@ -961,7 +961,14 @@ def create_app(store=None, runner=None, collector=None,
         # ?fresh=1 re-reads the machine instead of the profile's recorded
         # snapshot. A read, not a write -- only an apply records.
         fresh = (params.get("fresh") or "").strip().lower() in _TRUE
-        answer = hub.placement_preview(p, selection, refresh=fresh)
+        try:
+            answer = hub.placement_preview(p, selection, refresh=fresh)
+        except hub.UnknownDevices as e:
+            # 422, like every other unreadable term of the query: the
+            # device universe is an enum the machine already knows, so a
+            # key outside it is a malformed request rather than a
+            # placement that happens to have no effect.
+            return JSONResponse({"error": str(e)}, status_code=422)
         if answer is None:
             return JSONResponse(
                 {"error": f"couldn't analyze model layout for '{name}' -- "
@@ -999,6 +1006,13 @@ def create_app(store=None, runner=None, collector=None,
         import modelctl_plans
         import modelctl_tiers
         inputs, _source = modelctl.resolve_planning_inputs(p, refresh=fresh)
+        # Refused here as well as on the read, and for a stronger reason:
+        # the apply RECORDS the selection at profile.planning.selection,
+        # so an unknown key would persist as a stored intent naming a
+        # device that does not exist.
+        bad = hub.refuse_unknown_devices(selection, inputs)
+        if bad:
+            return JSONResponse({"error": str(bad)}, status_code=422)
         plan = modelctl_plans.plan_for_selection(p, selection, inputs=inputs)
         if plan is None:
             return JSONResponse(

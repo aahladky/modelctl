@@ -568,6 +568,24 @@ def system_ram_available():
     return 0
 
 
+def system_ram_total():
+    """MemTotal from /proc/meminfo in bytes; 0 when unreadable.
+
+    Installed memory, not free memory. Read live even by paths that spend
+    a recorded machine snapshot: how much RAM is fitted does not drift
+    with load, so unlike MemAvailable it cannot put two clocks on one
+    screen. It is the outer bound a memory bar is drawn against.
+    """
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
 def _fmt_gib(n):
     return f"{n / (1 << 30):.2f}GiB"
 

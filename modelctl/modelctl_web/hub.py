@@ -298,15 +298,217 @@ def _host_share(plan):
     return 0, True
 
 
-def _placement_devices(plan):
+class UnknownDevices(ValueError):
+    """A selection naming devices this machine does not have.
+
+    modelctl_tiers.select_inputs only ever looks up keys it already knows
+    -- inventory devices, RAM, remote rungs -- so a key nothing knows was
+    accepted and then never read, and the answer described a placement the
+    operator did not ask for. That is the same silent no-op the query
+    parser already refuses for an unreadable ceiling, so it gets the same
+    422 rather than a quietly different layout.
+    """
+
+    def __init__(self, unknown, known):
+        self.unknown = sorted(unknown)
+        self.known = sorted(known)
+        verb = "is not a device" if len(self.unknown) == 1 else "are not devices"
+        super().__init__(
+            f"{', '.join(self.unknown)} {verb} on this machine -- "
+            f"known devices: {', '.join(self.known) or 'none'}")
+
+
+def known_devices(inputs):
+    """Every admission key a selection may name.
+
+    The remote half comes from the recorded fleet budgets, which are
+    presence-independent on purpose (modelctl_fleet.budget_input): a
+    device must not stop being a valid choice because a laptop is closed.
+    Whether it can be reached is its state, reported per device, and not
+    a reason to refuse the key.
+    """
+    known = {d.get("device") for d in (inputs.get("inventory") or [])}
+    known.discard(None)
+    known.add(HOST_KEY)
+    known.update(inputs.get("fleet_budgets") or {})
+    # Plus every device the fleet registry currently declares. A node
+    # enrolled since this profile's inputs were recorded is a device the
+    # planner will happily place on, so refusing to let the operator name
+    # it would make the valid set narrower than the planner's.
+    known.update(_device_states(inputs))
+    return known
+
+
+def refuse_unknown_devices(selection, inputs):
+    """The UnknownDevices this selection earns, or None.
+
+    One derivation and one message for both the read and the apply: the
+    two must not be able to disagree about which keys are legal, or the
+    screen would preview a placement the apply then refuses.
+    """
+    known = known_devices(inputs)
+    unknown = set(selection or {}) - known
+    return UnknownDevices(unknown, known) if unknown else None
+
+
+def _device_states(inputs):
+    """{admission key: {"state", "detail"}} for every device a selection
+    may name.
+
+    Presence belongs on the device, not in the decision about whether the
+    device exists. A remote key used to vanish from the answer when its
+    node could not be reached, so ticking one produced a response
+    byte-identical to the baseline and the screen could not tell a request
+    that was honoured from one that was quietly dropped.
+
+    The states are the fleet page's own -- PRESENT / STALE /
+    PIN_MISMATCH, tri-state because a pin-mismatched node is *up* and must
+    never look available. Derived by calling that page's presence_state
+    rather than re-reading the rule here: two derivations of "is this
+    machine usable" is how the two surfaces come to disagree.
+
+    Nothing here probes. This reads what was last recorded, so drawing a
+    placement is not a network event.
+    """
+    import time
+
+    import modelctl_fleet
+
+    from . import fleet as fleet_view
+
+    states = {d.get("device"): {"state": fleet_view.PRESENT, "detail": ""}
+              for d in (inputs.get("inventory") or []) if d.get("device")}
+    # The rig's own memory is present by construction, like its cards.
+    states[HOST_KEY] = {"state": fleet_view.PRESENT, "detail": ""}
+    try:
+        nodes = modelctl_fleet.load_fleet()
+        presence = modelctl_fleet.load_presence()
+    except Exception:
+        nodes, presence = [], {}
+    now = time.time()
+    for node in nodes:
+        state, detail = fleet_view.presence_state(presence.get(node.name),
+                                                  now=now)
+        for device in node.devices:
+            # Every device the registry declares, not only those the
+            # recorded snapshot named. A plan can place weights on a node
+            # enrolled after its inputs were recorded -- the live 122B
+            # does exactly that -- and such a device arrived with no
+            # bound and no state, which is the hole this whole task is
+            # about.
+            states[modelctl_fleet.admission_key(node.name, device.name)] = {
+                "state": state,
+                "detail": detail,
+                # total_bytes is the only place the remote hardware's own
+                # size is known; without it a remote bar would claim
+                # capacity == budget, saying a card is exactly as big as
+                # the ceiling set on it.
+                "total_bytes": int(getattr(device, "total_bytes", 0) or 0),
+                "budget_bytes": int(getattr(device, "budget_bytes", 0) or 0),
+            }
+    # A budget recorded against a node the registry no longer lists. The
+    # key stays valid -- it is in the snapshot this plan was built from --
+    # but nothing can vouch for the machine behind it.
+    for key in set(inputs.get("fleet_budgets") or {}) - set(states):
+        states[key] = {"state": fleet_view.STALE,
+                       "detail": "no longer in the fleet registry"}
+    return states
+
+
+_STORAGE_TIER_LABEL = {1: "GPU only", 2: "GPU + RAM"}
+
+
+def _storage_floor(profile, host_bytes, resident):
+    """Whether this layout crosses the model's own storage limit.
+
+    `maximum_storage_tier` (1=gpu, 2=gpu+ram, 3=gpu+ram+storage) is a hard
+    constraint on the ranked path -- modelctl_plans:1697 drops any plan
+    whose claim is storage_mode "mmap" when the tier is below 3. The
+    placement path never read it, so the screen offered layouts the
+    profile forbids: live on 2026-08-04, qwen3-5-122b-a10b-ud is set to
+    tier 2 and previewed 39.52 GiB of SSD streaming.
+
+    A host share that is not resident is exactly that claim's "mmap" --
+    bytes addressed off the disk rather than held in memory.
+
+    This reports; it does not choose. There is one plan for a selection,
+    not a ranked list, so there is nothing here to fall back to -- picking
+    a different layout is the degradation ladder's job, and a preview that
+    quietly substituted one would be answering for a selection nobody
+    made.
+    """
+    tier = (profile.get("runtime") or {}).get("maximum_storage_tier", 3)
+    try:
+        tier = int(tier)
+    except (TypeError, ValueError):
+        tier = 3
+    crossed = bool(host_bytes) and not resident and tier < 3
+    detail = ""
+    if crossed:
+        detail = (f"this layout streams {host_bytes / float(1 << 30):.1f} GiB "
+                  f"from the SSD, and this model's storage limit is "
+                  f"{_STORAGE_TIER_LABEL.get(tier, tier)}")
+    return {"maximum_storage_tier": tier, "crossed": crossed,
+            "detail": detail}
+
+
+def _placement_devices(plan, inputs=None):
     """Bytes per device for one plan, keyed by admission key.
 
-    Every entry is the planner's own number: GPUs from the admission
+    Every byte count is the planner's own number: GPUs from the admission
     report's demand, remote devices from the RPC admission the config
     carries, the host from its layout row. Nothing here re-derives a split
     -- a second implementation of placement is exactly the failure this
     endpoint exists to prevent.
+
+    Every row also carries the bound it is measured against, because the
+    control this feeds is a bar with a ceiling you can drag, and a bar
+    needs a maximum. GPUs get theirs from the admission report. The other
+    two rows came back with neither, so the host row held 39.5 GiB against
+    a capacity of zero and the screen had nothing to draw for the one
+    device the spill actually lands on:
+
+      usable   -- what the planner was allowed to spend, taken from the
+                  SAME inputs the plan was built from, so the bound agrees
+                  with planned_against rather than with a fresher reading.
+                  Remote ceilings come from the recorded fleet budgets,
+                  presence-independent on purpose: a closed laptop must
+                  not collapse the bar its device draws.
+      capacity -- the hardware's own limit. For memory that is installed
+                  RAM, read live because how much is fitted does not drift
+                  with load; see modelctl_vram.system_ram_total.
+
+    `fits` answers whether the bytes are inside the bound, on every row.
+    It was hardcoded True on the remote and host rows, which put
+    "fits: True" beside a host share streaming off the SSD -- the backing
+    field telling the truth while the boolean next to it said otherwise.
     """
+    import modelctl_vram
+
+    inputs = inputs or {}
+    states = _device_states(inputs)
+
+    def remote_usable(key):
+        """The room a remote device offers.
+
+        The recorded snapshot first, because that is what the plan was
+        built against. A device the snapshot never named -- a node
+        enrolled since -- falls back to the ceiling the registry declares
+        for it now, which is better than the zero it used to report while
+        holding real bytes.
+        """
+        recorded = int((inputs.get("fleet_budgets") or {}).get(key, 0) or 0)
+        return recorded or int((states.get(key) or {}).get("budget_bytes") or 0)
+
+    def remote_capacity(key, ceiling):
+        """A remote device's own size, falling back to its ceiling.
+
+        A registry that no longer lists the node leaves nothing to read,
+        and a bar drawn to its ceiling is the honest degradation: it
+        understates headroom rather than inventing it.
+        """
+        return int((states.get(key) or {}).get("total_bytes") or 0) or ceiling
+
     devices = {}
     report = (plan.get("admission") or {}).get("devices") or {}
     for dev, row in report.items():
@@ -319,12 +521,58 @@ def _placement_devices(plan):
         }
     rpc = ((plan.get("config") or {}).get("rpc") or {}).get("admission") or {}
     for key, byte_count in rpc.items():
-        devices[key] = {"bytes": int(byte_count), "backing": "over RPC",
-                        "fits": True}
+        held = int(byte_count)
+        ceiling = remote_usable(key)
+        devices[key] = {
+            "bytes": held,
+            "backing": "over RPC",
+            # A node the registry no longer declares leaves no ceiling to
+            # judge against; say so with False rather than assert a fit
+            # that nothing backs.
+            "fits": bool(ceiling) and held <= ceiling,
+            "capacity_bytes": remote_capacity(key, ceiling),
+            "usable_bytes": ceiling,
+        }
     host_bytes, resident = _host_share(plan)
     if host_bytes:
-        devices[HOST_KEY] = {"bytes": host_bytes, "fits": True,
-                             "backing": "RAM" if resident else "SSD via mmap"}
+        devices[HOST_KEY] = {
+            "bytes": host_bytes,
+            "backing": "RAM" if resident else "SSD via mmap",
+            # Held in memory is the only way a host share fits: a share
+            # that streams is by definition bytes memory had no room for.
+            "fits": resident,
+            "capacity_bytes": modelctl_vram.system_ram_total(),
+            "usable_bytes": int(inputs.get("ram_available_bytes") or 0),
+        }
+    # Every device the machine has, whether or not this layout used it: a
+    # console where placement means ticking devices cannot offer a tick
+    # for a device it never draws. An unused device is an empty bar, not
+    # an absent one.
+    frac = (inputs.get("vram_limit_pct") or 100) / 100.0
+    local_totals = {d.get("device"): int(d.get("total_bytes", 0) or 0)
+                    for d in (inputs.get("inventory") or []) if d.get("device")}
+    for key in known_devices(inputs):
+        if key in devices:
+            continue
+        if key == HOST_KEY:
+            capacity = modelctl_vram.system_ram_total()
+            usable = int(inputs.get("ram_available_bytes") or 0)
+        elif key in local_totals:
+            # The same arithmetic select_inputs spends: limit_pct of the
+            # card's total is what plan_tiers is allowed to place on it.
+            capacity = local_totals[key]
+            usable = int(capacity * frac)
+        else:
+            usable = remote_usable(key)
+            capacity = remote_capacity(key, usable)
+        devices[key] = {"bytes": 0, "backing": "", "fits": True,
+                        "capacity_bytes": capacity, "usable_bytes": usable}
+    for key, row in devices.items():
+        found = states.get(key) or {}
+        # state and detail only: total_bytes is how capacity was worked
+        # out, not a field the answer carries.
+        row["state"] = found.get("state", "")
+        row["detail"] = found.get("detail", "")
     return devices
 
 
@@ -353,15 +601,38 @@ def placement_preview(profile, selection, refresh=False):
     import modelctl_plans
     inputs, source = modelctl.resolve_planning_inputs(profile,
                                                       refresh=refresh)
+    bad = refuse_unknown_devices(selection, inputs)
+    if bad:
+        raise bad
     plan = modelctl_plans.plan_for_selection(profile, selection,
                                              inputs=inputs)
     if plan is None:
         return None
-    devices = _placement_devices(plan)
+    devices = _placement_devices(plan, inputs)
     # Asked of the plan again rather than read back off the rendered row:
     # deriving the headline number from a display string means a reworded
     # backing label silently reports "nothing spills".
     host_bytes, resident = _host_share(plan)
+    floor = _storage_floor(profile, host_bytes, resident)
+    # The crossing rides the plan's own warnings channel as well as its
+    # own field: _apply_tier_plan logs plan["warnings"] on every apply, so
+    # a layout that breaks the profile's storage limit cannot be written
+    # without the job having said so.
+    warnings = list(plan.get("warnings") or ())
+    if floor["crossed"]:
+        warnings.append(floor["detail"])
+    # Turning on a device nothing can reach must not read as success. The
+    # planner will not place weights there, so without this the answer is
+    # the one the operator would have got by not asking at all.
+    for key, choice in (selection or {}).items():
+        if not (choice or {}).get("on"):
+            continue
+        row = devices.get(key) or {}
+        if row.get("state") and row["state"] != "PRESENT":
+            detail = row.get("detail") or "not reachable"
+            warnings.append(f"{key} was turned on but its machine is "
+                            f"{row['state']} ({detail}), so the planner "
+                            f"placed nothing there")
     return {
         "name": profile.get("name", ""),
         "selection": dict(selection or {}),
@@ -383,7 +654,11 @@ def placement_preview(profile, selection, refresh=False):
         },
         "tier": plan.get("tier"),
         "config": plan.get("config"),
-        "warnings": list(plan.get("warnings") or ()),
+        "warnings": warnings,
+        # The profile's own ceiling on how far down the memory tiers a
+        # layout may reach. Reported, not enforced here -- see
+        # _storage_floor.
+        "storage_floor": floor,
         "analysis": plan.get("analysis"),
         "admission": plan.get("admission"),
         "cache_budgets": plan.get("cache_budgets"),

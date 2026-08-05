@@ -14,6 +14,7 @@ test__hermeticity's bootstrap.
 import contextlib
 import json
 import os
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -349,6 +350,37 @@ PLAN_SPILL = {
 }
 
 
+class _StubProbe:
+    """The attributes presence_state actually reads."""
+
+    def __init__(self, reachable=True, pin_agrees=True, detail="", age=0.0):
+        self.reachable = reachable
+        self.pin_agrees = pin_agrees
+        self.detail = detail
+        self.protocol = "hello"
+        self.probed_at = time.time() - age
+
+
+class _StubDevice:
+    def __init__(self, name, total_bytes=0):
+        self.name = name
+        self.total_bytes = total_bytes
+
+
+class _StubNode:
+    def __init__(self, name, devices):
+        self.name = name
+        self.devices = [_StubDevice(*d) if isinstance(d, tuple)
+                        else _StubDevice(d) for d in devices]
+
+
+# The fleet these tests plan against. Stubbed rather than read: Phase4Base
+# does not redirect FLEET_PATH/PRESENCE_PATH, so a real read would make a
+# single-file run depend on whether the laptop happens to be awake.
+FLEET_NODE = "ph16-71-cuda0"
+FLEET_KEY = f"RPC:{FLEET_NODE}:CUDA0"
+
+
 def _plan_variant(**over):
     plan = json.loads(json.dumps(PLAN_SPILL))
     plan["layout"] = [tuple(r) for r in plan["layout"]]
@@ -366,15 +398,37 @@ class TestPlacementPreview(Phase4Base):
     relocated into the browser. So every number here is read off a plan.
     """
 
-    INPUTS = {"inventory": [], "vram_limit_pct": 90, "primary": "SYCL0",
-              "ram_available_bytes": 31 * GIB}
+    INPUTS = {"inventory": [{"device": "SYCL0", "name": "Arc A",
+                             "total_bytes": 24 * GIB},
+                            {"device": "SYCL1", "name": "Arc B",
+                             "total_bytes": 12 * GIB}],
+              "vram_limit_pct": 90, "primary": "SYCL0",
+              "ram_available_bytes": 31 * GIB,
+              # Declared remote ceilings, recorded in the snapshot and
+              # deliberately presence-independent (modelctl_fleet.
+              # budget_input): a closed laptop must not collapse the bar
+              # its device draws.
+              "fleet_budgets": {"RPC:ph16-71-cuda0:CUDA0": 10 * GIB}}
 
-    def _planner(self, plan=None, source="stored"):
+    # Installed memory, distinct from the 31 GiB the planner spent, so a
+    # test cannot pass by confusing capacity with usable.
+    RAM_TOTAL = 64 * GIB
+
+    def _planner(self, plan=None, source="stored", probe=None):
         planner = mock.patch("modelctl_plans.plan_for_selection",
                              return_value=plan or _plan_variant())
         inputs = mock.patch.object(modelctl, "resolve_planning_inputs",
                                    return_value=(self.INPUTS, source))
-        return _both(planner, inputs)
+        ram = mock.patch("modelctl_vram.system_ram_total",
+                         return_value=self.RAM_TOTAL)
+        nodes = mock.patch(
+            "modelctl_fleet.load_fleet",
+            return_value=[_StubNode(FLEET_NODE, [("CUDA0", 12 * GIB)])])
+        presence = mock.patch(
+            "modelctl_fleet.load_presence",
+            return_value={FLEET_NODE: probe if probe is not None
+                          else _StubProbe()})
+        return _both(planner, inputs, ram, nodes, presence)
 
     def _selection_seen(self, query=""):
         with self._planner() as p:
@@ -468,7 +522,9 @@ class TestPlacementPreview(Phase4Base):
         with self._planner(whole):
             body = self.client.get("/api/v2/models/m1/placement",
                                    headers=self.auth).json()
-        self.assertNotIn("RAM", body["devices"])
+        # The row is present and empty rather than absent: memory is a
+        # device you can tick, so it has to be on screen to be ticked.
+        self.assertEqual(body["devices"]["RAM"]["bytes"], 0)
         self.assertEqual(body["spill_bytes"], 0)
 
     def test_remote_devices_report_under_their_admission_key(self):
@@ -482,6 +538,268 @@ class TestPlacementPreview(Phase4Base):
                                    headers=self.auth).json()
         self.assertEqual(body["devices"][key]["bytes"], 5 * GIB)
         self.assertEqual(body["devices"][key]["backing"], "over RPC")
+
+    # --- every row is a bar that can be drawn ---------------------------
+
+    def test_the_host_row_carries_the_memory_it_is_measured_against(self):
+        """A bar with no bound cannot be drawn.
+
+        The host row shipped bytes against capacity 0 and usable 0, so the
+        one control this screen exists for -- committed against a ceiling
+        you can move -- had nothing to render for the device the spill
+        actually lands on.
+        """
+        with self._planner():
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        ram = body["devices"]["RAM"]
+        self.assertEqual(ram["usable_bytes"], 31 * GIB,
+                         "usable is the memory the planner spent, so it "
+                         "agrees with planned_against instead of with free "
+                         "memory re-read at render time")
+        self.assertEqual(ram["capacity_bytes"], self.RAM_TOTAL,
+                         "capacity is installed memory -- a physical "
+                         "constant, so reading it live adds no second clock")
+
+    def test_a_remote_rows_capacity_is_the_hardware_not_the_ceiling(self):
+        """capacity == usable would say a card is exactly as big as the
+        ceiling someone set on it, so a remote bar could never show the
+        headroom a ceiling is currently withholding."""
+        with self._planner():
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        row = body["devices"][FLEET_KEY]
+        self.assertEqual(row["capacity_bytes"], 12 * GIB, "the device total")
+        self.assertEqual(row["usable_bytes"], 10 * GIB, "the declared budget")
+
+    def test_a_remote_row_falls_back_to_its_ceiling_when_the_node_is_gone(self):
+        """Understating headroom beats inventing it."""
+        with self._planner(), mock.patch("modelctl_fleet.load_fleet",
+                                         return_value=[]):
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        row = body["devices"][FLEET_KEY]
+        self.assertEqual(row["capacity_bytes"], 10 * GIB)
+        self.assertEqual(row["state"], "STALE")
+
+    def test_a_remote_row_carries_the_ceiling_it_was_planned_against(self):
+        """The recorded fleet budget, not a live probe: presence belongs to
+        the device's state, never to the bound its bar is drawn against."""
+        key = "RPC:ph16-71-cuda0:CUDA0"
+        remote = _plan_variant(config={
+            **PLAN_SPILL["config"],
+            "rpc": {"endpoints": ["10.0.0.9:50052"], "placements": [],
+                    "admission": {key: 5 * GIB}}})
+        with self._planner(remote):
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertEqual(body["devices"][key]["usable_bytes"], 10 * GIB)
+
+    def test_no_device_row_reports_bytes_against_a_zero_capacity(self):
+        """Asserted over every row rather than over the host row by name, so
+        a backing type added later cannot reintroduce the gap quietly."""
+        key = "RPC:ph16-71-cuda0:CUDA0"
+        everything = _plan_variant(config={
+            **PLAN_SPILL["config"],
+            "rpc": {"endpoints": ["10.0.0.9:50052"], "placements": [],
+                    "admission": {key: 5 * GIB}}})
+        with self._planner(everything):
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        for name, row in body["devices"].items():
+            if row["bytes"] <= 0:
+                continue
+            self.assertGreater(row["usable_bytes"], 0,
+                               f"{name} holds bytes with no bound to draw "
+                               f"them against")
+
+    # --- fits answers the question a person reads it as -----------------
+
+    def test_a_host_share_that_streams_is_not_reported_as_fitting(self):
+        """fits: True beside 30 GiB streaming off the SSD is exactly the
+        reassurance this screen exists to remove -- the backing field told
+        the truth while the boolean next to it said the opposite."""
+        with self._planner():
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertEqual(body["devices"]["RAM"]["backing"], "SSD via mmap")
+        self.assertFalse(body["devices"]["RAM"]["fits"])
+
+    def test_a_host_share_held_in_memory_does_fit(self):
+        resident = _plan_variant(config={
+            **PLAN_SPILL["config"],
+            "extra": "--fit off -ngl 99 --device SYCL0,SYCL1 --no-mmap"})
+        with self._planner(resident):
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertTrue(body["devices"]["RAM"]["fits"])
+
+    def test_a_remote_device_over_its_declared_ceiling_does_not_fit(self):
+        key = "RPC:ph16-71-cuda0:CUDA0"
+        over = _plan_variant(config={
+            **PLAN_SPILL["config"],
+            "rpc": {"endpoints": ["10.0.0.9:50052"], "placements": [],
+                    "admission": {key: 12 * GIB}}})
+        with self._planner(over):
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertFalse(body["devices"][key]["fits"],
+                         "12 GiB against a declared 10 GiB ceiling")
+
+    # --- presence is a state, not a filter -------------------------------
+
+    def test_a_device_the_layout_does_not_use_still_gets_a_row(self):
+        """You cannot tick on a device that is not on screen. A remote key
+        the current layout ignores was absent from the answer entirely,
+        which is why ticking one looked inert -- there was nothing to
+        render a tick against."""
+        with self._planner():
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertIn(FLEET_KEY, body["devices"])
+        self.assertEqual(body["devices"][FLEET_KEY]["bytes"], 0)
+        self.assertEqual(body["devices"][FLEET_KEY]["usable_bytes"], 10 * GIB,
+                         "an unused device still shows the room it offers")
+
+    def test_local_devices_are_present_by_construction(self):
+        with self._planner():
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        for key in ("SYCL0", "RAM"):
+            self.assertEqual(body["devices"][key]["state"], "PRESENT")
+
+    def test_a_remote_device_carries_its_nodes_presence(self):
+        with self._planner():
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertEqual(body["devices"][FLEET_KEY]["state"], "PRESENT")
+
+    def test_an_unreachable_node_makes_its_device_stale_not_absent(self):
+        """The device keeps its row and its ceiling; only the state moves.
+        Deleting it would make the tick list flicker with the network."""
+        with self._planner(probe=_StubProbe(reachable=False,
+                                            detail="connection refused")):
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        row = body["devices"][FLEET_KEY]
+        self.assertEqual(row["state"], "STALE")
+        self.assertIn("connection refused", row["detail"])
+        self.assertEqual(row["usable_bytes"], 10 * GIB)
+
+    def test_a_node_on_another_commit_is_never_merely_present(self):
+        """PIN_MISMATCH is up but unusable -- placing a graph across two
+        ggml builds gives wrong numbers rather than an error."""
+        with self._planner(probe=_StubProbe(pin_agrees=False)):
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertEqual(body["devices"][FLEET_KEY]["state"], "PIN_MISMATCH")
+
+    def test_ticking_on_a_device_that_is_not_present_says_so(self):
+        """The probe that started this: ?on.<remote>=1 answered
+        byte-identically to the baseline, so the screen could not tell a
+        request that was honoured from one that was quietly dropped."""
+        with self._planner(probe=_StubProbe(reachable=False,
+                                            detail="connection refused")):
+            body = self.client.get(
+                f"/api/v2/models/m1/placement?on.{FLEET_KEY}=1",
+                headers=self.auth).json()
+        self.assertTrue(
+            any(FLEET_KEY in w for w in body["warnings"]),
+            "turning on a device nothing can reach must not read as success")
+
+    def test_ticking_on_a_present_device_warns_about_nothing(self):
+        with self._planner():
+            body = self.client.get(
+                f"/api/v2/models/m1/placement?on.{FLEET_KEY}=1",
+                headers=self.auth).json()
+        self.assertFalse([w for w in body["warnings"] if FLEET_KEY in w])
+
+    # --- a key the machine does not have ---------------------------------
+
+    def test_a_device_the_machine_does_not_have_is_refused(self):
+        """select_inputs only ever looks up keys it already knows, so an
+        unknown one was accepted and then never read: the answer described
+        a selection nobody made. Same silent-no-op class as a dropped
+        ceiling, which this endpoint already refuses."""
+        with self._planner():
+            r = self.client.get("/api/v2/models/m1/placement?on.NOPE0=1",
+                                headers=self.auth)
+        self.assertEqual(r.status_code, 422)
+        self.assertIn("NOPE0", r.json()["error"])
+
+    def test_the_refusal_names_the_devices_that_do_exist(self):
+        """A refusal that does not say what the valid keys are leaves the
+        caller guessing at an enum the machine already knows."""
+        with self._planner():
+            r = self.client.get("/api/v2/models/m1/placement?ceiling.GPU9=1",
+                                headers=self.auth)
+        self.assertEqual(r.status_code, 422)
+        error = r.json()["error"]
+        for known in ("SYCL0", "SYCL1", "RAM", "RPC:ph16-71-cuda0:CUDA0"):
+            self.assertIn(known, error)
+
+    def test_the_keys_the_machine_does_have_are_accepted(self):
+        for key in ("SYCL0", "SYCL1", "RAM", "RPC:ph16-71-cuda0:CUDA0"):
+            with self.subTest(key=key), self._planner():
+                r = self.client.get(
+                    f"/api/v2/models/m1/placement?on.{key}=1",
+                    headers=self.auth)
+            self.assertEqual(r.status_code, 200, r.text)
+
+    def test_a_remote_key_stays_valid_while_its_node_is_unreachable(self):
+        """fleet_budgets is presence-independent by design. Refusing a key
+        because a laptop is closed would make the valid device set flicker
+        with the network."""
+        with self._planner():
+            r = self.client.get(
+                "/api/v2/models/m1/placement?ceiling.RPC:ph16-71-cuda0:CUDA0="
+                f"{4 * GIB}", headers=self.auth)
+        self.assertEqual(r.status_code, 200, r.text)
+
+    # --- the storage floor reaches this path too -------------------------
+
+    def _with_runtime(self, **runtime):
+        p = json.loads((self.profiles_dir / "m1.json").read_text())
+        p["runtime"] = {**(p.get("runtime") or {}), **runtime}
+        (self.profiles_dir / "m1.json").write_text(json.dumps(p))
+
+    def test_a_layout_that_streams_names_the_floor_it_crosses(self):
+        """maximum_storage_tier is a real filter on the ranked path
+        (plans.py:1697 drops mmap plans below tier 3) and was invisible
+        here, so the screen offered layouts the model's own policy
+        forbids -- live, the 122B is set to tier 2 and previewed 39.52 GiB
+        of SSD streaming anyway."""
+        self._with_runtime(maximum_storage_tier=2)
+        with self._planner():
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        floor = body["storage_floor"]
+        self.assertEqual(floor["maximum_storage_tier"], 2)
+        self.assertTrue(floor["crossed"])
+        self.assertIn("30.0 GiB", floor["detail"],
+                      "the shortfall is named in the units the row shows")
+        self.assertTrue(any("storage" in w for w in body["warnings"]),
+                        "the crossing rides the warnings channel the apply "
+                        "job already logs, so it cannot be applied silently")
+
+    def test_a_layout_held_in_memory_clears_the_floor(self):
+        self._with_runtime(maximum_storage_tier=2)
+        resident = _plan_variant(config={
+            **PLAN_SPILL["config"],
+            "extra": "--fit off -ngl 99 --device SYCL0,SYCL1 --no-mmap"})
+        with self._planner(resident):
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertFalse(body["storage_floor"]["crossed"])
+
+    def test_a_profile_that_permits_storage_reports_no_crossing(self):
+        """Tier 3 is the default and means SSD streaming is allowed. A
+        spilling layout is then a choice, not a violation."""
+        with self._planner():
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertEqual(body["storage_floor"]["maximum_storage_tier"], 3)
+        self.assertFalse(body["storage_floor"]["crossed"])
 
     def test_the_layout_rows_survive_as_named_fields(self):
         """The planner's rows are tuples; JSON would hand the screen
@@ -581,8 +899,13 @@ class TestPlacementPreview(Phase4Base):
 class TestPlacementApply(Phase4Base):
     """POST /api/v2/models/{name}/placement -- run the model this way."""
 
-    INPUTS = {"inventory": [], "vram_limit_pct": 90, "primary": "SYCL0",
-              "ram_available_bytes": 31 * GIB}
+    INPUTS = {"inventory": [{"device": "SYCL0", "name": "Arc A",
+                             "total_bytes": 24 * GIB},
+                            {"device": "SYCL1", "name": "Arc B",
+                             "total_bytes": 12 * GIB}],
+              "vram_limit_pct": 90, "primary": "SYCL0",
+              "ram_available_bytes": 31 * GIB,
+              "fleet_budgets": {"RPC:ph16-71-cuda0:CUDA0": 10 * GIB}}
 
     def _planner(self, plan=None):
         return _both(
@@ -598,6 +921,29 @@ class TestPlacementApply(Phase4Base):
             return_value={"kind": "structural" if requires else "none",
                           "changes": ["tier 3 -> 4"] if requires else [],
                           "requires_accept": requires})
+
+    def test_applying_a_device_the_machine_does_not_have_is_refused(self):
+        """Worse here than on the read: submit_placement_apply RECORDS the
+        selection at profile.planning.selection, so an unknown key would
+        persist as a stored intent naming a device that does not exist."""
+        with self._planner(), self._gate(False), \
+                mock.patch("modelctl_web.mutate.submit_placement_apply") as sub:
+            r = self.client.post("/api/v2/models/m1/placement",
+                                 headers=self.auth,
+                                 json={"selection": {"NOPE0": {"on": True}}})
+        self.assertEqual(r.status_code, 422)
+        self.assertIn("NOPE0", r.json()["error"])
+        self.assertFalse(sub.called, "nothing may be recorded for a device "
+                                     "the machine does not have")
+
+    def test_applying_a_key_the_machine_does_have_is_not_refused(self):
+        with self._planner(), self._gate(False), \
+                mock.patch("modelctl_web.mutate.submit_placement_apply",
+                           return_value="job1"):
+            r = self.client.post(
+                "/api/v2/models/m1/placement", headers=self.auth,
+                json={"selection": {"RPC:ph16-71-cuda0:CUDA0": {"on": True}}})
+        self.assertEqual(r.status_code, 200, r.text)
 
     def test_a_gated_placement_is_refused_until_confirmed(self):
         with self._planner(), self._gate(True), \
