@@ -661,6 +661,42 @@ def _placement_devices(plan, inputs=None):
     return devices
 
 
+def _annotate_holdings(devices, profile_name):
+    """held_bytes / held_by_this_model_bytes on every placement row.
+
+    The host row's usable is available memory, which already has a
+    running model subtracted -- so a model that is running looks like it
+    has no room precisely BECAUSE it is running, and no surface could
+    tell "no room" from "no room because this model already holds it"
+    (open-items 2026-08-04, the entry blocking every memory view).
+    These two fields are the missing fact: what live models hold on the
+    device, and how much of that is the model being placed.
+
+    Display only; admission reads neither. Returns None on success, or
+    a warning string when the runtime DB cannot be read -- in which case
+    the fields stay ABSENT, because a zero would claim "nothing is held"
+    on the strength of not having been able to look.
+    """
+    import modelctl_runtime
+    try:
+        holdings = modelctl_runtime.RuntimeDB().live_holdings()
+    except Exception as e:
+        return (f"live holdings could not be read ({e}); the rows cannot "
+                f"say what is held by running models")
+    for row in devices.values():
+        row["held_bytes"] = 0
+        row["held_by_this_model_bytes"] = 0
+    for holding in holdings:
+        for key, held in holding["devices"].items():
+            row = devices.get(key)
+            if row is None:
+                continue
+            row["held_bytes"] += int(held)
+            if holding["profile"] == profile_name:
+                row["held_by_this_model_bytes"] += int(held)
+    return None
+
+
 def placement_preview(profile, selection, refresh=False):
     """Where this model's weights land for a chosen set of devices.
 
@@ -706,6 +742,9 @@ def placement_preview(profile, selection, refresh=False):
     warnings = list(plan.get("warnings") or ())
     if floor["crossed"]:
         warnings.append(floor["detail"])
+    holdings_warning = _annotate_holdings(devices, profile.get("name", ""))
+    if holdings_warning:
+        warnings.append(holdings_warning)
     # Turning on a device nothing can reach must not read as success. The
     # planner will not place weights there, so without this the answer is
     # the one the operator would have got by not asking at all.

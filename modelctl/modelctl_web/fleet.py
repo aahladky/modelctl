@@ -194,6 +194,35 @@ def _local_node(errors):
     }
 
 
+def _attach_holdings(nodes):
+    """What live models hold, written onto the device rows holding it.
+
+    Display only -- budgets are untouched and admission never reads
+    these fields. The RAM row's budget is free-minus-reserve, which is
+    admission truth but cannot say whether the missing gigabytes are the
+    desktop's or a served model's own weights; `held` names the holder,
+    so "no room" and "no room because a model already holds it" stop
+    rendering identically. Remote rows get the same treatment: an
+    active model's rungs show up on the laptop device they occupy.
+
+    Raises on a runtime DB it cannot read; fleet_view catches and files
+    it under errors["holdings"], leaving the fields ABSENT -- a zero
+    here would claim "nothing is held" on the strength of not having
+    been able to look.
+    """
+    import modelctl_runtime
+    per_key = {}
+    for holding in modelctl_runtime.RuntimeDB().live_holdings():
+        for key, held in holding["devices"].items():
+            per_key.setdefault(key, []).append(
+                {"profile": holding["profile"], "bytes": int(held)})
+    for node in nodes:
+        for row in node.get("devices") or []:
+            held = per_key.get(row.get("admission_key")) or []
+            row["held"] = held
+            row["held_bytes"] = sum(h["bytes"] for h in held)
+
+
 def night_lane_rows():
     """The night-lane jobs that need a fleet node, READ-ONLY.
 
@@ -246,6 +275,12 @@ def fleet_view(now=None):
                 _remote_node(node, presence, now, view["local_pin"]))
     except Exception as e:
         errors["nodes"] = str(e) or "the fleet registry could not be read"
+    try:
+        # After every node is assembled, so a holding lands on remote
+        # rows too. On failure the fields stay absent, not zero.
+        _attach_holdings(view["nodes"])
+    except Exception as e:
+        errors["holdings"] = str(e) or "live holdings could not be read"
     try:
         view["night_lane"] = night_lane_rows()
     except Exception as e:

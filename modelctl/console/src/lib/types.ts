@@ -326,6 +326,13 @@ export interface PlacedDevice {
   fits: boolean;
   capacity_bytes?: number;
   usable_bytes?: number;
+  /* What live models hold on this device right now, and this model's own
+     share of it. The RAM row's usable is free memory, which already has a
+     running model subtracted -- without these a running model reads as
+     having no room BECAUSE it is running. Absent (never zero) when the
+     runtime DB could not be read; a warning says so. */
+  held_bytes?: number;
+  held_by_this_model_bytes?: number;
 }
 
 export interface PlacementView {
@@ -707,6 +714,11 @@ export interface FleetDeviceRow {
   admission_key: string;
   editable: boolean;
   edit_note: string;
+  /* Live models holding this device, each named with its bytes. Absent
+     (never zero) when the runtime DB was unreadable -- the view carries
+     errors.holdings saying so. */
+  held?: { profile: string; bytes: number }[];
+  held_bytes?: number;
 }
 
 export interface FleetNodeRow {

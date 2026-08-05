@@ -417,6 +417,58 @@ class RuntimeDB:
             ).fetchall()
         return _fold_live_claims(rows, exclude_pid)[0]
 
+    def live_holdings(self, exclude_pid=None):
+        """Who holds memory right now, for display:
+        [{profile, state, devices: {resource: bytes}}].
+
+        NOT the admission fold. `charged_bytes` answers "what would the
+        gate count", and deliberately charges an ACTIVE row's `RPC:`
+        keys only -- local free bytes already have a running model
+        subtracted, so counting it again would refuse a launch that
+        fits. That subtraction is also why no memory view could ever say
+        WHO holds the RAM: free shrinks with no holder named, and "no
+        room" renders exactly like "no room because this model already
+        holds it". This fold answers that second question: every live
+        row contributes everything it holds, local devices and RAM
+        included, attributed to the profile holding it.
+
+        Same hygiene as `_fold_live_claims`: rows owned by `exclude_pid`
+        or a dead process, claims that do not decode, and unpriceable
+        byte counts contribute nothing. Advisory and read-only --
+        admission never reads this.
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM reservations "
+                "WHERE state IN ('pending', 'starting', 'active')"
+            ).fetchall()
+        holdings = []
+        for row in rows:
+            if (row["owner_pid"] == exclude_pid
+                    or not _pid_alive(row["owner_pid"])):
+                continue
+            try:
+                claim = json.loads(row["claim_json"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(claim, dict):
+                continue
+            vram = claim.get("vram_bytes")
+            vram = vram if isinstance(vram, dict) else {}
+            # Strictly positive, unlike the gate's >= 0: a zero-byte
+            # entry charges nothing there, but here it would name a
+            # profile as a holder of nothing.
+            devices = {dev: int(b) for dev, b in vram.items()
+                       if isinstance(b, (int, float)) and b > 0}
+            ram = claim.get("ram_bytes", 0)
+            if isinstance(ram, (int, float)) and ram > 0:
+                devices["RAM"] = devices.get("RAM", 0) + int(ram)
+            if not devices:
+                continue
+            holdings.append({"profile": row["profile_name"],
+                             "state": row["state"], "devices": devices})
+        return holdings
+
     def pending_claims(self, exclude_pid=None):
         """Pending/starting claims from live processes, excluding one PID.
 
