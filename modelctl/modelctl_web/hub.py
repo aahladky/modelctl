@@ -415,6 +415,82 @@ def _device_states(inputs):
     return states
 
 
+def legacy_pin(profile):
+    """The pinned plan still deciding this profile's launch, or None.
+
+    A pin names a compiled artifact; this surface owns intent. The two
+    cannot be reconciled here, so it reports the pin rather than drawing
+    an automatic placement that is not what runs -- which is exactly how
+    qwen3-5-122b-a10b-ud came to read as "on automatic" while a
+    four-device ladder plan was launching.
+
+    A profile with a selection is unaffected: the launcher stops reading
+    the pin once a selection exists, so going on reporting it would be
+    the same lie in the other direction.
+    """
+    runtime = profile.get("runtime") or {}
+    pin = runtime.get("pinned_plan_id")
+    if not pin or (profile.get("planning") or {}).get("selection"):
+        return None
+    return {"plan_id": pin, "mode": runtime.get("mode") or ""}
+
+
+class NoPinToAdopt(ValueError):
+    """Nothing for this profile to adopt, with the reason."""
+
+
+def pin_adoption_preview(profile):
+    """The selection that would use the devices the pinned plan uses,
+    together with the layout it produces.
+
+    Offered, never installed. Adopting is the operator sending this
+    selection to the ordinary apply -- the same write every other
+    placement takes -- so nothing here writes: a derivation that
+    installed itself would be a fifth writer winning quietly, which is
+    the thing this whole alignment removes.
+
+    Device on/off only. A compiled plan does not record the ceiling that
+    produced it, so inventing one would be a number nobody chose. That
+    makes the derived selection an approximation, and the caveat and the
+    previewed layout beside it are how the operator sees what adopting
+    actually costs before accepting it.
+
+    Compiled on request rather than on every placement read: finding the
+    pin means compiling the candidate set, which probes the machine.
+    """
+    import modelctl_plans
+
+    pin = legacy_pin(profile)
+    if not pin:
+        raise NoPinToAdopt("this model is not running a pinned plan")
+    plan = next((p for p in modelctl_plans.compile_launch_plans(profile)
+                 if p.id == pin["plan_id"]), None)
+    if plan is None:
+        # Plan ids hash the compiled config, so a planner improvement can
+        # strand a pin -- the 122B's moved cf4274bf -> 2b426a8f after the
+        # --no-mmap fix. Say that, rather than offering a selection
+        # derived from some other plan.
+        raise NoPinToAdopt(
+            f"pinned plan {pin['plan_id']} is not among the plans this "
+            f"machine compiles today -- the planner has changed since it "
+            f"was pinned, so there is no layout left to copy")
+    used = set(plan.claim.vram_admission_bytes() or {})
+    if plan.claim.ram_admission_bytes():
+        used.add(HOST_KEY)
+    inputs, _source = modelctl.resolve_planning_inputs(profile)
+    # Every known device gets an explicit answer: an absent key means "as
+    # the machine offers", which is not what copying a fixed layout means.
+    selection = {key: {"on": key in used} for key in known_devices(inputs)}
+    return {
+        "pinned": {**pin, "label": getattr(plan, "label", "")},
+        "selection": selection,
+        "placement": placement_preview(profile, selection),
+        "caveat": ("this copies which devices the pinned plan uses, not the "
+                   "ceilings that produced it -- compare the layout below "
+                   "against what is running before accepting"),
+    }
+
+
 _STORAGE_TIER_LABEL = {1: "GPU only", 2: "GPU + RAM"}
 
 
@@ -659,6 +735,10 @@ def placement_preview(profile, selection, refresh=False):
         # layout may reach. Reported, not enforced here -- see
         # _storage_floor.
         "storage_floor": floor,
+        # Set when a pinned plan id, not this selection, is still what
+        # decides the launch. The screen must say so rather than render
+        # an automatic placement that is not running.
+        "legacy_pin": legacy_pin(profile),
         "analysis": plan.get("analysis"),
         "admission": plan.get("admission"),
         "cache_budgets": plan.get("cache_budgets"),

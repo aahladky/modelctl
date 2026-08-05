@@ -1571,3 +1571,121 @@ class TestScratchSafeCoversPhase4(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLegacyPin(Phase4Base):
+    """Phase 3.1: a profile still launched by a pinned plan id says so.
+
+    The placement surface owns intent; a pin names a compiled artifact.
+    The two cannot be reconciled by this screen, so it reports the pin
+    rather than rendering an automatic placement that is not what runs --
+    which is exactly how qwen3-5-122b-a10b-ud came to read as "on
+    automatic" while a four-device ladder plan was launching.
+    """
+
+    INPUTS = TestPlacementPreview.INPUTS
+    RAM_TOTAL = TestPlacementPreview.RAM_TOTAL
+    _planner = TestPlacementPreview._planner
+
+    def _profile(self, **over):
+        p = json.loads((self.profiles_dir / "m1.json").read_text())
+        p.update(over)
+        (self.profiles_dir / "m1.json").write_text(json.dumps(p))
+        return p
+
+    def test_a_profile_on_a_pinned_plan_says_so(self):
+        self._profile(runtime={"mode": "managed", "pinned_plan_id": "abc123"})
+        with self._planner():
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertEqual(body["legacy_pin"]["plan_id"], "abc123")
+
+    def test_a_selection_supersedes_the_pin(self):
+        """The launcher ignores the pin once a selection exists, so the
+        screen must not go on reporting it as what decides the launch."""
+        self._profile(runtime={"mode": "managed", "pinned_plan_id": "abc123"},
+                      planning={"selection": {"SYCL0": {"on": True}}})
+        with self._planner():
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertIsNone(body["legacy_pin"])
+
+    def test_a_profile_with_no_pin_reports_none(self):
+        with self._planner():
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertIsNone(body["legacy_pin"])
+
+
+class TestAdoptingAPin(Phase4Base):
+    """Phase 3.1: the equivalent selection is offered, never installed."""
+
+    INPUTS = TestPlacementPreview.INPUTS
+    RAM_TOTAL = TestPlacementPreview.RAM_TOTAL
+    _planner = TestPlacementPreview._planner
+
+    def _pinned(self, devices=("SYCL0",), ram=0):
+        claim = mock.Mock()
+        claim.vram_admission_bytes.return_value = {d: 4 * GIB
+                                                   for d in devices}
+        claim.ram_admission_bytes.return_value = ram
+        return mock.Mock(id="abc123", label="tier 4 plan", claim=claim)
+
+    def _with_pin(self):
+        p = json.loads((self.profiles_dir / "m1.json").read_text())
+        p["runtime"] = {"mode": "managed", "pinned_plan_id": "abc123"}
+        (self.profiles_dir / "m1.json").write_text(json.dumps(p))
+
+    def test_the_offered_selection_names_the_devices_the_pin_uses(self):
+        self._with_pin()
+        with self._planner(), mock.patch(
+                "modelctl_plans.compile_launch_plans",
+                return_value=[self._pinned(devices=("SYCL0",))]):
+            body = self.client.get("/api/v2/models/m1/placement/adopt-pin",
+                                   headers=self.auth).json()
+        self.assertTrue(body["selection"]["SYCL0"]["on"])
+        self.assertFalse(body["selection"]["SYCL1"]["on"],
+                         "a device the pinned plan does not use is off, not "
+                         "absent -- absent means 'as the machine offers'")
+
+    def test_the_offer_comes_with_the_layout_it_would_produce(self):
+        """One click to preview, not one click to apply. The operator sees
+        what adopting costs before anything is written."""
+        self._with_pin()
+        with self._planner(), mock.patch(
+                "modelctl_plans.compile_launch_plans",
+                return_value=[self._pinned()]):
+            body = self.client.get("/api/v2/models/m1/placement/adopt-pin",
+                                   headers=self.auth).json()
+        self.assertIn("devices", body["placement"])
+        self.assertIn("caveat", body)
+
+    def test_nothing_is_written_by_the_offer(self):
+        """A derivation that installed itself would be a fifth writer
+        winning quietly, which is what this whole alignment removes."""
+        self._with_pin()
+        before = (self.profiles_dir / "m1.json").read_text()
+        with self._planner(), mock.patch(
+                "modelctl_plans.compile_launch_plans",
+                return_value=[self._pinned()]):
+            self.client.get("/api/v2/models/m1/placement/adopt-pin",
+                            headers=self.auth)
+        self.assertEqual((self.profiles_dir / "m1.json").read_text(), before)
+
+    def test_a_profile_with_no_pin_has_nothing_to_adopt(self):
+        with self._planner():
+            r = self.client.get("/api/v2/models/m1/placement/adopt-pin",
+                                headers=self.auth)
+        self.assertEqual(r.status_code, 409)
+
+    def test_a_pin_that_no_longer_compiles_says_so(self):
+        """Plan ids hash the compiled config, so a planner improvement can
+        strand a pin -- the 122B's moved cf4274bf -> 2b426a8f. That is the
+        case adoption most needs to handle honestly."""
+        self._with_pin()
+        with self._planner(), mock.patch(
+                "modelctl_plans.compile_launch_plans", return_value=[]):
+            r = self.client.get("/api/v2/models/m1/placement/adopt-pin",
+                                headers=self.auth)
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("abc123", r.json()["error"])

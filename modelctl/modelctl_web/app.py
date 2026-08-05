@@ -975,6 +975,21 @@ def create_app(store=None, runner=None, collector=None,
                           "there is no placement to show"}, status_code=409)
         return answer
 
+    @app.get("/api/v2/models/{name}/placement/adopt-pin")
+    def api_v2_placement_adopt_pin(name: str):
+        """What adopting this profile's pinned plan would select.
+
+        A read. Accepting is the operator sending the returned selection
+        to POST /placement, which is the same write every other placement
+        takes -- there is deliberately no adopt-and-apply, so nothing can
+        install a derived selection on the operator's behalf.
+        """
+        p = modelctl.load_profile(name)
+        try:
+            return hub.pin_adoption_preview(p)
+        except hub.NoPinToAdopt as e:
+            return JSONResponse({"error": str(e)}, status_code=409)
+
     @app.post("/api/v2/models/{name}/placement")
     async def api_v2_model_placement_apply(request: Request, name: str):
         """Run the model on this selection.
