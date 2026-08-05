@@ -270,6 +270,102 @@ def admission_preview(name, ctx=None, budgets_bytes=None, moe_mode=None):
             "planning_inputs_source": source, "gate": gate}
 
 
+# ---- placement ----------------------------------------------------------
+
+# The admission key for the rig's own memory. The planner calls this share
+# "CPU" in its layout rows; the fleet surface lists it as a device named
+# RAM, and the selection the operator sends back is keyed the fleet's way.
+HOST_KEY = "RAM"
+_HOST_ROW_LABEL = "CPU"
+
+
+def _host_share(plan):
+    """(bytes, resident) for the part of the model the host holds.
+
+    Read off the emitted plan, not off planner intermediates, for the same
+    reason _admission_report is: only the emitted config describes what
+    llama.cpp will actually do. `--no-mmap` is the whole difference between
+    a host share that lives in memory and one that streams off the SSD --
+    the planner decides it by fit, so the flag is the answer, not the tier.
+
+    Bytes come back through the layout row's GiB, so they carry that row's
+    display precision (~0.1%). This number is shown, never charged.
+    """
+    extra = ((plan.get("config") or {}).get("extra") or "").split()
+    for label, gib, _detail in plan.get("layout") or []:
+        if label == _HOST_ROW_LABEL:
+            return int(gib * (1 << 30)), "--no-mmap" in extra
+    return 0, True
+
+
+def _placement_devices(plan):
+    """Bytes per device for one plan, keyed by admission key.
+
+    Every entry is the planner's own number: GPUs from the admission
+    report's demand, remote devices from the RPC admission the config
+    carries, the host from its layout row. Nothing here re-derives a split
+    -- a second implementation of placement is exactly the failure this
+    endpoint exists to prevent.
+    """
+    devices = {}
+    report = (plan.get("admission") or {}).get("devices") or {}
+    for dev, row in report.items():
+        devices[dev] = {
+            "bytes": int(row.get("demand_bytes", 0)),
+            "backing": "VRAM",
+            "fits": bool(row.get("fits", True)),
+            "capacity_bytes": int(row.get("capacity_bytes", 0)),
+            "usable_bytes": int(row.get("usable_bytes", 0)),
+        }
+    rpc = ((plan.get("config") or {}).get("rpc") or {}).get("admission") or {}
+    for key, byte_count in rpc.items():
+        devices[key] = {"bytes": int(byte_count), "backing": "over RPC",
+                        "fits": True}
+    host_bytes, resident = _host_share(plan)
+    if host_bytes:
+        devices[HOST_KEY] = {"bytes": host_bytes, "fits": True,
+                             "backing": "RAM" if resident else "SSD via mmap"}
+    return devices
+
+
+def placement_preview(profile, selection):
+    """Where this model's weights land for a chosen set of devices.
+
+    The one read the placement screen needs. `selection` maps an admission
+    key to {"on", "ceiling_bytes"}; an empty selection is the automatic
+    placement, which is what the operator sees before touching anything.
+
+    Returns None when the model's layout cannot be analyzed, so the caller
+    can say so rather than render an empty machine.
+    """
+    import modelctl_plans
+    plan = modelctl_plans.plan_for_selection(profile, selection)
+    if plan is None:
+        return None
+    devices = _placement_devices(plan)
+    # Asked of the plan again rather than read back off the rendered row:
+    # deriving the headline number from a display string means a reworded
+    # backing label silently reports "nothing spills".
+    host_bytes, resident = _host_share(plan)
+    return {
+        "name": profile.get("name", ""),
+        "selection": dict(selection or {}),
+        "tier": plan.get("tier"),
+        "config": plan.get("config"),
+        "warnings": list(plan.get("warnings") or ()),
+        "analysis": plan.get("analysis"),
+        "admission": plan.get("admission"),
+        "cache_budgets": plan.get("cache_budgets"),
+        "layout": [{"label": label, "gib": gib, "detail": detail}
+                   for label, gib, detail in plan.get("layout") or []],
+        "devices": devices,
+        # The headline number: bytes with nowhere to go but the SSD. The
+        # invariant this screen enforces is that this stays 0 while any
+        # enabled device still has room.
+        "spill_bytes": 0 if resident else host_bytes,
+    }
+
+
 def classify_config_save(profile, updates, budgets_bytes=None,
                          moe_mode=None):
     """The configure form's structural-change gate.

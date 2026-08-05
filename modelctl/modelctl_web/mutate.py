@@ -67,6 +67,63 @@ def submit_edit(runner, name, updates):
                          lane="mutation")
 
 
+def _apply_tier_plan(ctx, profile, plan, inputs, source, accept_tier_change):
+    """Write one planner layout onto a profile, gate first.
+
+    Shared by every apply path -- the automatic replan and the operator's
+    device selection -- because they differ only in how the plan was
+    computed. Two copies of this would be two answers to "what did the
+    console just do to my profile".
+
+    The caller owns the in-memory profile and may stage its own fields on
+    it beforehand; a gated refusal returns without saving, so anything
+    staged is discarded with it.
+    """
+    import time
+
+    import modelctl_tiers
+
+    ctx.log(f"machine snapshot: {source}")
+    for w in plan["warnings"]:
+        ctx.log(f"WARNING: {w}")
+    gate = modelctl_tiers.tier_change_gate(profile, plan)
+    if gate["requires_accept"] and not accept_tier_change:
+        ctx.log("NOT APPLIED: this recalculation changes level, split, or "
+                "placement beyond pins:")
+        for c in gate["changes"]:
+            ctx.log(f"  {c}")
+        ctx.log("re-apply with 'accept placement change' checked; the "
+                "profile is untouched.")
+        return {"applied": False, "requires_accept_tier_change": True,
+                "changes": gate["changes"], "tier": plan["tier"],
+                "warnings": plan["warnings"]}
+    if modelctl_tiers.record_planning_inputs(
+            profile, inputs, recorded_at=time.strftime("%Y-%m-%dT%H:%M:%S")):
+        ctx.log(f"machine snapshot recorded ({source})")
+    modelctl_tiers.apply_plan_cache_budgets(profile, plan, log=ctx.log)
+    cfg = profile.get("config", {})
+    cfg.update(plan["config"])
+    profile["config"] = cfg
+    if not profile.get("env"):
+        env = modelctl._env_from_scripts()
+        if env:
+            profile["env"] = env
+            ctx.log("populated env from env script")
+    modelctl.save_profile(profile)
+    modelctl.generate_artifacts(profile)
+    reloaded = _sync_backends(ctx)
+    for label, gib, desc in plan["layout"]:
+        ctx.log(f"{label}: {gib:.1f} GiB  {desc}")
+    warnings = list(plan["warnings"])
+    if not reloaded:
+        warnings.append("the router was not reloaded -- the previous "
+                        "placement is still serving")
+    return {"applied": True, "tier": plan["tier"],
+            "config": plan["config"], "warnings": warnings,
+            "router_reloaded": reloaded,
+            "admission": plan.get("admission")}
+
+
 def submit_tier_apply(runner, name, accept_tier_change=False):
     """Compute the tier plan for one profile and apply it.
 
@@ -74,57 +131,49 @@ def submit_tier_apply(runner, name, accept_tier_change=False):
     replan that changes tier, split, or placement beyond P5 pins is NOT
     applied unless accept_tier_change is set -- the job reports the diff
     and leaves the profile untouched."""
-    import time
-
-    import modelctl_tiers
-
     def fn(ctx):
         profile = modelctl.load_profile(name)
         plan, inputs, source = modelctl.plan_tiers_for_profile(profile)
         if plan is None:
             raise RuntimeError(f"couldn't analyze model layout for '{name}'")
-        ctx.log(f"machine snapshot: {source}")
-        for w in plan["warnings"]:
-            ctx.log(f"WARNING: {w}")
-        gate = modelctl_tiers.tier_change_gate(profile, plan)
-        if gate["requires_accept"] and not accept_tier_change:
-            ctx.log("NOT APPLIED: this recalculation changes level, split, or "
-                    "placement beyond pins:")
-            for c in gate["changes"]:
-                ctx.log(f"  {c}")
-            ctx.log("re-apply with 'accept placement change' checked; the "
-                    "profile is untouched.")
-            return {"applied": False, "requires_accept_tier_change": True,
-                    "changes": gate["changes"], "tier": plan["tier"],
-                    "warnings": plan["warnings"]}
-        if modelctl_tiers.record_planning_inputs(
-                profile, inputs,
-                recorded_at=time.strftime("%Y-%m-%dT%H:%M:%S")):
-            ctx.log(f"machine snapshot recorded ({source})")
-        modelctl_tiers.apply_plan_cache_budgets(profile, plan, log=ctx.log)
-        cfg = profile.get("config", {})
-        cfg.update(plan["config"])
-        profile["config"] = cfg
-        if not profile.get("env"):
-            env = modelctl._env_from_scripts()
-            if env:
-                profile["env"] = env
-                ctx.log("populated env from env script")
-        modelctl.save_profile(profile)
-        modelctl.generate_artifacts(profile)
-        reloaded = _sync_backends(ctx)
-        for label, gib, desc in plan["layout"]:
-            ctx.log(f"{label}: {gib:.1f} GiB  {desc}")
-        warnings = list(plan["warnings"])
-        if not reloaded:
-            warnings.append("the router was not reloaded -- the previous "
-                            "placement is still serving")
-        return {"applied": True, "tier": plan["tier"],
-                "config": plan["config"], "warnings": warnings,
-                "router_reloaded": reloaded,
-                "admission": plan.get("admission")}
+        return _apply_tier_plan(ctx, profile, plan, inputs, source,
+                                accept_tier_change)
     return runner.submit("tier-apply", f"auto-place {name}", fn,
                          payload={"name": name,
+                                  "accept_tier_change": accept_tier_change},
+                         lane="mutation")
+
+
+def submit_placement_apply(runner, name, selection, accept_tier_change=False):
+    """Apply the placement the operator chose: which devices this model may
+    use, and how much of each.
+
+    The same job as submit_tier_apply, planned through the selection
+    instead of through the machine as it stands, plus one addition: the
+    selection is recorded on the profile. Reopening the placement screen
+    has to show what is set to run, and reconstructing that from the
+    emitted -ot rules would be a second reader of placement beside the
+    planner -- the failure this whole path exists to avoid.
+
+    The recorded PLANNING inputs stay unfiltered on purpose. They are the
+    machine snapshot; writing the operator's ceilings into them would make
+    every later automatic replan believe it is running on a smaller
+    computer than it is.
+    """
+    import modelctl_plans
+
+    def fn(ctx):
+        profile = modelctl.load_profile(name)
+        inputs, source = modelctl.resolve_planning_inputs(profile)
+        plan = modelctl_plans.plan_for_selection(profile, selection,
+                                                 inputs=inputs)
+        if plan is None:
+            raise RuntimeError(f"couldn't analyze model layout for '{name}'")
+        profile.setdefault("planning", {})["selection"] = dict(selection or {})
+        return _apply_tier_plan(ctx, profile, plan, inputs, source,
+                                accept_tier_change)
+    return runner.submit("placement-apply", f"place {name}", fn,
+                         payload={"name": name, "selection": selection,
                                   "accept_tier_change": accept_tier_change},
                          lane="mutation")
 

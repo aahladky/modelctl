@@ -51,6 +51,7 @@ PHASE4_WRITES = [
     ("/api/v2/models/m1/plans/p1/enable", {}),
     ("/api/v2/models/m1/plans/p1/test", {}),
     ("/api/v2/models/m1/tier/apply", {"accept_tier_change": True}),
+    ("/api/v2/models/m1/placement", {"selection": {}}),
     ("/api/v2/models/m1/runtime-policy", {"mode": "fixed"}),
     ("/api/v2/models/m1/delete", {}),
     ("/api/v2/models/m1/bench", {"max_tokens": 64, "runs": 1}),
@@ -305,6 +306,364 @@ class TestTierApply(Phase4Base):
                                            headers=self.auth).json()
         self.assertEqual(preview["plan"]["tier"], self.PLAN["tier"])
         self.assertEqual(applied["gate"]["requires_accept"], False)
+
+
+GIB = 1 << 30
+
+# What the planner answers for a selection that spills. Shaped like a real
+# plan_tiers result -- the derived view is only trustworthy if it is read
+# off the same keys production produces.
+PLAN_SPILL = {
+    "tier": 4,
+    "config": {"device": "", "split_mode": "layer", "tensor_split": "24,12",
+               "extra": "--fit off -ngl 99 --device SYCL0,SYCL1"},
+    "layout": [("all GPUs (fixed)", 6.0, "attention/embeddings/KV"),
+               ("SYCL0", 12.0, "experts layers 0-10 (11)"),
+               ("CPU", 30.0, "experts layers 40-59 (20), SSD via mmap")],
+    "warnings": ["the CPU share is bigger than the RAM budget"],
+    "analysis": {"weights_gib": 60.0, "ram_budget_gib": 19.6},
+    "cache_budgets": None,
+    "admission": {
+        "fits": True,
+        "devices": {
+            "SYCL0": {"demand_bytes": 19 * GIB, "usable_bytes": 20 * GIB,
+                      "capacity_bytes": 24 * GIB, "fits": True},
+            "SYCL1": {"demand_bytes": 10 * GIB, "usable_bytes": 11 * GIB,
+                      "capacity_bytes": 12 * GIB, "fits": True}}},
+}
+
+
+def _plan_variant(**over):
+    plan = json.loads(json.dumps(PLAN_SPILL))
+    plan["layout"] = [tuple(r) for r in plan["layout"]]
+    plan.update(over)
+    return plan
+
+
+class TestPlacementPreview(Phase4Base):
+    """GET /api/v2/models/{name}/placement -- where the planner puts the
+    weights for a chosen set of devices.
+
+    The screen this feeds must never work the split out for itself: the
+    moment it disagrees with the planner the console lies about where the
+    weights went, which is the same failure as silent SSD streaming
+    relocated into the browser. So every number here is read off a plan.
+    """
+
+    def _planner(self, plan=None):
+        return mock.patch("modelctl_plans.plan_for_selection",
+                          return_value=plan or _plan_variant())
+
+    def _selection_seen(self, query=""):
+        with self._planner() as p:
+            r = self.client.get(f"/api/v2/models/m1/placement{query}",
+                                headers=self.auth)
+        self.assertEqual(r.status_code, 200, r.text)
+        return p.call_args[0][1]
+
+    # --- the query is the operator's choice -----------------------------
+
+    def test_no_query_is_the_automatic_placement(self):
+        """What the machine would do on its own -- what the operator sees
+        before touching anything."""
+        self.assertEqual(self._selection_seen(), {})
+
+    def test_a_device_switched_off_reaches_the_planner_as_off(self):
+        self.assertEqual(self._selection_seen("?on.RAM=0"),
+                         {"RAM": {"on": False}})
+
+    def test_a_ceiling_reaches_the_planner_in_bytes(self):
+        self.assertEqual(self._selection_seen(f"?ceiling.SYCL0={8 * GIB}"),
+                         {"SYCL0": {"ceiling_bytes": 8 * GIB}})
+
+    def test_a_remote_device_keeps_its_admission_key(self):
+        """RPC keys carry colons; they must survive the query intact or the
+        selection silently addresses a device that does not exist."""
+        key = "RPC:ph16-71-cuda0:CUDA0"
+        self.assertEqual(self._selection_seen(f"?on.{key}=1"),
+                         {key: {"on": True}})
+
+    def test_a_switch_and_a_ceiling_for_one_device_are_one_entry(self):
+        self.assertEqual(
+            self._selection_seen(f"?on.SYCL0=1&ceiling.SYCL0={4 * GIB}"),
+            {"SYCL0": {"on": True, "ceiling_bytes": 4 * GIB}})
+
+    def test_a_ceiling_that_is_not_a_number_is_refused(self):
+        """Dropping it would answer for a layout the operator did not ask
+        for, which is worse than saying no."""
+        with self._planner() as p:
+            r = self.client.get(
+                "/api/v2/models/m1/placement?ceiling.SYCL0=lots",
+                headers=self.auth)
+        self.assertEqual(r.status_code, 422)
+        self.assertFalse(p.called)
+
+    def test_a_negative_ceiling_is_refused(self):
+        r = self.client.get("/api/v2/models/m1/placement?ceiling.SYCL0=-1",
+                            headers=self.auth)
+        self.assertEqual(r.status_code, 422)
+
+    def test_an_unreadable_switch_is_refused(self):
+        r = self.client.get("/api/v2/models/m1/placement?on.SYCL0=maybe",
+                            headers=self.auth)
+        self.assertEqual(r.status_code, 422)
+
+    # --- the answer the screen renders ----------------------------------
+
+    def test_every_gpu_reports_the_bytes_the_planner_charged_it(self):
+        with self._planner():
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertEqual(body["devices"]["SYCL0"]["bytes"], 19 * GIB)
+        self.assertEqual(body["devices"]["SYCL1"]["bytes"], 10 * GIB)
+        self.assertEqual(body["devices"]["SYCL0"]["backing"], "VRAM")
+
+    def test_the_host_share_says_ssd_when_the_plan_streams_it(self):
+        with self._planner():
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertEqual(body["devices"]["RAM"]["backing"], "SSD via mmap")
+        self.assertEqual(body["devices"]["RAM"]["bytes"], 30 * GIB)
+        self.assertEqual(body["spill_bytes"], 30 * GIB,
+                         "the bytes with nowhere to go are the headline "
+                         "number on this screen")
+
+    def test_the_host_share_says_ram_when_the_plan_holds_it_resident(self):
+        """--no-mmap in the emitted config is the whole difference between
+        30 GiB living in memory and 30 GiB streaming off the SSD."""
+        resident = _plan_variant(config={
+            **PLAN_SPILL["config"],
+            "extra": "--fit off -ngl 99 --device SYCL0,SYCL1 --no-mmap"})
+        with self._planner(resident):
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertEqual(body["devices"]["RAM"]["backing"], "RAM")
+        self.assertEqual(body["spill_bytes"], 0)
+
+    def test_a_plan_with_no_host_share_reports_no_spill(self):
+        whole = _plan_variant(layout=[("SYCL0 (whole model)", 18.0,
+                                       "weights + KV + overhead")])
+        with self._planner(whole):
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertNotIn("RAM", body["devices"])
+        self.assertEqual(body["spill_bytes"], 0)
+
+    def test_remote_devices_report_under_their_admission_key(self):
+        key = "RPC:ph16-71-cuda0:CUDA0"
+        remote = _plan_variant(config={
+            **PLAN_SPILL["config"],
+            "rpc": {"endpoints": ["10.0.0.9:50052"], "placements": [],
+                    "admission": {key: 5 * GIB}}})
+        with self._planner(remote):
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertEqual(body["devices"][key]["bytes"], 5 * GIB)
+        self.assertEqual(body["devices"][key]["backing"], "over RPC")
+
+    def test_the_layout_rows_survive_as_named_fields(self):
+        """The planner's rows are tuples; JSON would hand the screen
+        positional arrays to index into."""
+        with self._planner():
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertEqual(body["layout"][0]["label"], "all GPUs (fixed)")
+        self.assertEqual(body["layout"][2]["label"], "CPU")
+        self.assertEqual(body["layout"][2]["gib"], 30.0)
+
+    def test_the_plan_arrives_whole(self):
+        with self._planner():
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertEqual(body["tier"], 4)
+        self.assertEqual(body["config"], PLAN_SPILL["config"])
+        self.assertEqual(body["warnings"], PLAN_SPILL["warnings"])
+        self.assertEqual(body["analysis"], PLAN_SPILL["analysis"])
+        self.assertTrue(body["admission"]["fits"])
+
+    def test_an_unplannable_model_is_a_409_not_an_empty_screen(self):
+        with mock.patch("modelctl_plans.plan_for_selection",
+                        return_value=None):
+            r = self.client.get("/api/v2/models/m1/placement",
+                                headers=self.auth)
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("couldn't analyze", r.json()["error"])
+
+
+class TestPlacementApply(Phase4Base):
+    """POST /api/v2/models/{name}/placement -- run the model this way."""
+
+    def _planner(self, plan=None):
+        return mock.patch("modelctl_plans.plan_for_selection",
+                          return_value=plan or _plan_variant())
+
+    def _gate(self, requires):
+        import modelctl_tiers
+        return mock.patch.object(
+            modelctl_tiers, "tier_change_gate",
+            return_value={"kind": "structural" if requires else "none",
+                          "changes": ["tier 3 -> 4"] if requires else [],
+                          "requires_accept": requires})
+
+    def test_a_gated_placement_is_refused_until_confirmed(self):
+        with self._planner(), self._gate(True), \
+                mock.patch("modelctl_web.mutate.submit_placement_apply") as sub:
+            r = self.client.post("/api/v2/models/m1/placement",
+                                 headers=self.auth, json={"selection": {}})
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.json()["gate"]["changes"], ["tier 3 -> 4"])
+        self.assertFalse(sub.called, "the gate must stop the submission, not "
+                                     "just decorate it")
+
+    def test_the_confirm_carries_the_selection_into_the_job(self):
+        selection = {"RAM": {"on": False}, "SYCL0": {"ceiling_bytes": 4 * GIB}}
+        with self._planner(), self._gate(True), \
+                mock.patch("modelctl_web.mutate.submit_placement_apply",
+                           return_value="job-p") as sub:
+            r = self.client.post(
+                "/api/v2/models/m1/placement", headers=self.auth,
+                json={"selection": selection, "accept_tier_change": True})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["job_id"], "job-p")
+        self.assertEqual(sub.call_args[0][2], selection)
+        self.assertTrue(sub.call_args[1]["accept_tier_change"])
+
+    def test_an_ungated_placement_applies_without_a_confirm(self):
+        with self._planner(), self._gate(False), \
+                mock.patch("modelctl_web.mutate.submit_placement_apply",
+                           return_value="job-p") as sub:
+            r = self.client.post("/api/v2/models/m1/placement",
+                                 headers=self.auth, json={"selection": {}})
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(sub.call_args[1]["accept_tier_change"])
+
+    def test_the_gate_is_read_against_the_selected_plan(self):
+        """Not against the automatic one. A confirm shown for a placement
+        the operator did not choose is a confirm for the wrong change."""
+        plan = _plan_variant()
+        import modelctl_tiers
+        with self._planner(plan), \
+                mock.patch.object(
+                    modelctl_tiers, "tier_change_gate",
+                    return_value={"kind": "none", "changes": [],
+                                  "requires_accept": False}) as g, \
+                mock.patch("modelctl_web.mutate.submit_placement_apply",
+                           return_value="job-p"):
+            self.client.post("/api/v2/models/m1/placement", headers=self.auth,
+                             json={"selection": {"RAM": {"on": False}}})
+        self.assertEqual(g.call_args[0][1], plan)
+
+    def test_a_selection_that_is_not_an_object_is_refused(self):
+        """Including an empty one. A list is a malformed selection whether
+        or not it happens to be empty, and reading [] as "automatic" would
+        place the model somewhere the caller never asked for."""
+        for bad in (["SYCL0"], [], "SYCL0", 0):
+            with self.subTest(selection=bad), \
+                    mock.patch("modelctl_web.mutate."
+                               "submit_placement_apply") as sub:
+                r = self.client.post("/api/v2/models/m1/placement",
+                                     headers=self.auth,
+                                     json={"selection": bad})
+                self.assertEqual(r.status_code, 422)
+                self.assertFalse(sub.called)
+
+    def test_a_missing_selection_is_the_automatic_placement(self):
+        with self._planner(), self._gate(False), \
+                mock.patch("modelctl_web.mutate.submit_placement_apply",
+                           return_value="job-p") as sub:
+            r = self.client.post("/api/v2/models/m1/placement",
+                                 headers=self.auth, json={})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(sub.call_args[0][2], {})
+
+    def test_an_unplannable_model_is_a_409_not_a_job_that_will_fail(self):
+        with mock.patch("modelctl_plans.plan_for_selection",
+                        return_value=None):
+            r = self.client.post("/api/v2/models/m1/placement",
+                                 headers=self.auth, json={"selection": {}})
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("couldn't analyze", r.json()["error"])
+
+    def test_the_preview_and_the_apply_plan_the_same_selection(self):
+        """The button sits under the preview; if the two planned different
+        selections the operator would confirm one layout and get another."""
+        selection = {"RAM": {"on": False}}
+        with self._planner() as p, self._gate(False), \
+                mock.patch("modelctl_web.mutate.submit_placement_apply",
+                           return_value="job-p"):
+            self.client.get("/api/v2/models/m1/placement?on.RAM=0",
+                            headers=self.auth)
+            previewed = p.call_args[0][1]
+            self.client.post("/api/v2/models/m1/placement", headers=self.auth,
+                             json={"selection": selection})
+            applied = p.call_args[0][1]
+        self.assertEqual(previewed, selection)
+        self.assertEqual(applied, selection)
+
+
+class TestPlacementApplyJob(Phase4Base):
+    """The work submit_placement_apply does inside the lane."""
+
+    def _run(self, selection, accept=True):
+        from modelctl_web import mutate
+        runner = mock.Mock()
+        inputs = {"inventory": [{"device": "SYCL0", "total_bytes": 24 * GIB}],
+                  "ram_available_bytes": 20 * GIB, "vram_limit_pct": 90,
+                  "primary": "SYCL0"}
+        with mock.patch("modelctl_plans.plan_for_selection",
+                        return_value=_plan_variant()), \
+                mock.patch.object(modelctl, "resolve_planning_inputs",
+                                  return_value=(inputs, "stored")), \
+                mock.patch.object(modelctl, "generate_artifacts"), \
+                mock.patch("modelctl_web.mutate._sync_backends",
+                           return_value=True):
+            mutate.submit_placement_apply(runner, "m1", selection,
+                                          accept_tier_change=accept)
+            fn = runner.submit.call_args[0][2]
+            result = fn(mock.Mock())
+        saved = json.loads((self.profiles_dir / "m1.json").read_text())
+        return result, saved, inputs
+
+    def test_the_applied_selection_is_recorded_on_the_profile(self):
+        """Reopening the screen has to show what is set to run, and the
+        only honest source for that is what was applied."""
+        selection = {"RAM": {"on": False}}
+        _result, saved, _inputs = self._run(selection)
+        self.assertEqual(saved["planning"]["selection"], selection)
+
+    def test_the_recorded_inputs_are_the_machine_not_the_selection(self):
+        """Planning inputs are the machine snapshot. Recording the FILTERED
+        inputs would make the operator's ceiling look like a smaller
+        computer, and every later automatic replan would inherit it."""
+        _result, saved, inputs = self._run({"RAM": {"on": False}})
+        self.assertEqual(saved["planning"]["inputs"], inputs)
+
+    def test_the_plan_config_lands_on_the_profile(self):
+        result, saved, _inputs = self._run({})
+        self.assertTrue(result["applied"])
+        self.assertEqual(saved["config"]["tensor_split"], "24,12")
+
+    def test_a_gated_change_without_the_confirm_leaves_the_profile_alone(self):
+        import modelctl_tiers
+        before = (self.profiles_dir / "m1.json").read_text()
+        with mock.patch.object(
+                modelctl_tiers, "tier_change_gate",
+                return_value={"kind": "structural", "changes": ["tier 3 -> 4"],
+                              "requires_accept": True}):
+            result, _saved, _inputs = self._run({}, accept=False)
+        self.assertFalse(result["applied"])
+        self.assertEqual((self.profiles_dir / "m1.json").read_text(), before)
+
+    def test_an_unplannable_model_fails_the_job_loudly(self):
+        from modelctl_web import mutate
+        runner = mock.Mock()
+        with mock.patch("modelctl_plans.plan_for_selection",
+                        return_value=None):
+            mutate.submit_placement_apply(runner, "m1", {})
+            fn = runner.submit.call_args[0][2]
+            with self.assertRaises(RuntimeError) as caught:
+                fn(mock.Mock())
+        self.assertIn("couldn't analyze", str(caught.exception))
 
 
 class TestRuntimePolicy(Phase4Base):
@@ -723,6 +1082,7 @@ class TestScratchSafeCoversPhase4(unittest.TestCase):
             "/api/v2/models/{name}/plans/{plan_id}/enable",
             "/api/v2/models/{name}/plans/{plan_id}/test",
             "/api/v2/models/{name}/tier/apply",
+            "/api/v2/models/{name}/placement",
             "/api/v2/models/{name}/runtime-policy",
             "/api/v2/models/{name}/delete",
             "/api/v2/models/{name}/bench",

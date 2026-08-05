@@ -94,6 +94,49 @@ def _scratch_refusal(request):
     return PlainTextResponse(reason + "\n", status_code=405)
 
 
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off"}
+
+
+def _selection_from_query(params):
+    """(selection, None) or (None, 422 response) for a placement query.
+
+    The operator's choice rides as ?on.<key>=0&ceiling.<key>=<bytes>, one
+    pair of params per device, keyed by admission key (which for a fleet
+    device contains colons and survives verbatim).
+
+    A value that cannot be read is refused rather than dropped: a silently
+    ignored ceiling answers for a layout the operator did not ask for, and
+    this endpoint's whole purpose is that the screen and the planner agree.
+    """
+    selection = {}
+    for key, val in params.items():
+        if key.startswith("on."):
+            dev, flag = key[3:], val.strip().lower()
+            if flag in _TRUE:
+                selection.setdefault(dev, {})["on"] = True
+            elif flag in _FALSE:
+                selection.setdefault(dev, {})["on"] = False
+            else:
+                return None, JSONResponse(
+                    {"error": f"on.{dev} must be 0 or 1, not {val!r}"},
+                    status_code=422)
+        elif key.startswith("ceiling."):
+            dev = key[8:]
+            try:
+                ceiling = int(val)
+            except (TypeError, ValueError):
+                return None, JSONResponse(
+                    {"error": f"ceiling.{dev} must be a byte count, not "
+                              f"{val!r}"}, status_code=422)
+            if ceiling < 0:
+                return None, JSONResponse(
+                    {"error": f"ceiling.{dev} cannot be negative"},
+                    status_code=422)
+            selection.setdefault(dev, {})["ceiling_bytes"] = ceiling
+    return selection, None
+
+
 def create_app(store=None, runner=None, collector=None,
                tick_interval=2.0, tick_max_seconds=3600):
     store = store or JobStore()
@@ -904,6 +947,67 @@ def create_app(store=None, runner=None, collector=None,
                           "beyond pins", "gate": gate}, status_code=409)
         return {"job_id": mutate.submit_tier_apply(
             runner, name, accept_tier_change=accept), "gate": gate}
+
+    # ---- placement: the device selection, previewed and applied ----------
+    # You place a model by choosing which devices it may use and how much
+    # of each; the planner emits the split, the device list and the -ot
+    # rules from that. Both routes go through modelctl_plans.
+    # plan_for_selection, so the layout the screen shows is the layout the
+    # apply computes -- and neither is a second implementation of
+    # placement sitting beside the planner that launches.
+
+    @app.get("/api/v2/models/{name}/placement")
+    def api_v2_model_placement(request: Request, name: str):
+        p = modelctl.load_profile(name)
+        selection, bad = _selection_from_query(request.query_params)
+        if bad:
+            return bad
+        answer = hub.placement_preview(p, selection)
+        if answer is None:
+            return JSONResponse(
+                {"error": f"couldn't analyze model layout for '{name}' -- "
+                          "there is no placement to show"}, status_code=409)
+        return answer
+
+    @app.post("/api/v2/models/{name}/placement")
+    async def api_v2_model_placement_apply(request: Request, name: str):
+        """Run the model on this selection.
+
+        Gated exactly like tier/apply: a placement change answers 409 with
+        its own changes list until the caller re-sends
+        accept_tier_change, and the job re-checks the gate inside the
+        lane. The gate is read against the SELECTED plan -- a confirm
+        shown for a layout the operator did not choose is a confirm for
+        the wrong change.
+        """
+        p = modelctl.load_profile(name)
+        body = {}
+        if await request.body():
+            body, bad = await _json_body(request)
+            if bad:
+                return bad
+        selection = body.get("selection")
+        if selection is None:
+            selection = {}
+        if not isinstance(selection, dict):
+            return JSONResponse(
+                {"error": "selection must map a device key to "
+                          "{on, ceiling_bytes}"}, status_code=422)
+        accept = bool(body.get("accept_tier_change"))
+        import modelctl_plans
+        import modelctl_tiers
+        plan = modelctl_plans.plan_for_selection(p, selection)
+        if plan is None:
+            return JSONResponse(
+                {"error": f"couldn't analyze model layout for '{name}' -- "
+                          "there is no placement to apply"}, status_code=409)
+        gate = modelctl_tiers.tier_change_gate(p, plan)
+        if gate["requires_accept"] and not accept:
+            return JSONResponse(
+                {"error": "this placement changes tier, split, or placement "
+                          "beyond pins", "gate": gate}, status_code=409)
+        return {"job_id": mutate.submit_placement_apply(
+            runner, name, selection, accept_tier_change=accept), "gate": gate}
 
     # ---- placement mode (typed form) -------------------------------------
     # The GET survived the cutover; this is the write it never had on the
