@@ -161,6 +161,32 @@ else
     fail "console build -- see $LOGS/ci-console.log"
 fi
 
+# The console half of the suite. Zero dependencies on purpose: Node 24
+# strips the types itself, so this needs nothing vendored beyond node.
+# The console shipped with 2102 backend tests and no JS runner at all,
+# which is why every visible defect of 2026-08-04 landed in the untested
+# half of the codebase.
+section "console checks"
+if ! command -v node >/dev/null; then
+    fail "node not found"
+else
+    if (cd "$CONSOLE" && npm test > "$LOGS/ci-console-test.log" 2>&1); then
+        pass "console logic tests"
+    else
+        fail "console logic tests -- see $LOGS/ci-console-test.log"
+    fi
+    # A class name nothing defines renders unstyled, which is how the
+    # wizard's error messages once shipped invisible. No test framework
+    # catches that: a component test asserts the class is on the element,
+    # not that the class means anything.
+    if (cd "$CONSOLE" && npm run --silent check:classes \
+            > "$LOGS/ci-console-classes.log" 2>&1); then
+        pass "every class name resolves in tokens.css"
+    else
+        fail "undefined class names -- see $LOGS/ci-console-classes.log"
+    fi
+fi
+
 # --- 4. CPU-only build and capability truthfulness --------------------
 # One non-negotiable: "CPU-only capability truthfulness must
 # be enforced on every push". A CPU-only build claiming a SYCL feature

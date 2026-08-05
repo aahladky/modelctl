@@ -13,5 +13,7 @@
     "skipLibCheck": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"]
   },
-  "include": ["src"]
+  "include": ["src"],
+  "//": "Test files are run by `node --test`, not built by vite, and they import node: builtins that would need @types/node vendored. Zero new dependencies was the deliberate choice for the console's test story, so they sit outside the build's type gate -- running them is what checks them.",
+  "exclude": ["src/**/*.test.ts"]
 }
