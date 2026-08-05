@@ -774,7 +774,12 @@ class TestPlacementPreview(Phase4Base):
             body = self.client.get("/api/v2/models/m1/placement",
                                    headers=self.auth).json()
         floor = body["storage_floor"]
-        self.assertEqual(floor["maximum_storage_tier"], 2)
+        self.assertFalse(floor["allows_disk"],
+                         "the surface says whether disk streaming is "
+                         "allowed, not which ladder rung permits it")
+        self.assertNotIn("maximum_storage_tier", floor,
+                         "tiers are the planner's vocabulary, not a user "
+                         "decision (Aaron 2026-08-05)")
         self.assertTrue(floor["crossed"])
         self.assertIn("30.0 GiB", floor["detail"],
                       "the shortfall is named in the units the row shows")
@@ -798,7 +803,7 @@ class TestPlacementPreview(Phase4Base):
         with self._planner():
             body = self.client.get("/api/v2/models/m1/placement",
                                    headers=self.auth).json()
-        self.assertEqual(body["storage_floor"]["maximum_storage_tier"], 3)
+        self.assertTrue(body["storage_floor"]["allows_disk"])
         self.assertFalse(body["storage_floor"]["crossed"])
 
     def test_the_layout_rows_survive_as_named_fields(self):
@@ -1153,6 +1158,9 @@ class TestRuntimePolicy(Phase4Base):
                           "update_runtime_policy reads as 'drop the section'")
 
     def test_managed_builds_the_whole_policy_dict(self):
+        # objective is sent and deliberately not honoured: dead policy
+        # since 2026-08-05, stored as the default so the legacy ranker
+        # still has a value to read.
         body = {"mode": "managed", "objective": "fastest_load",
                 "pinned_plan_id": "p9", "allow_fallback": False,
                 "allow_untested": True, "minimum_context": 16384,
@@ -1164,30 +1172,24 @@ class TestRuntimePolicy(Phase4Base):
                                  headers=self.auth, json=body)
         self.assertEqual(r.status_code, 200)
         self.assertEqual(sub.call_args[0][2], {
-            "mode": "managed", "objective": "fastest_load",
+            "mode": "managed", "objective": "balanced",
             "pinned_plan_id": "p9", "allow_fallback": False,
             "allow_untested": True, "minimum_context": 16384,
             "maximum_cpu_bytes": 8 << 30, "maximum_storage_tier": 2,
             "disabled_plan_ids": ["p1", "p2"]})
 
-    def test_the_form_offers_exactly_the_objectives_the_write_accepts(self):
-        """The phase-3 settings rule, applied to an enum: a select that
-        offers what the endpoint rejects is a dead control, and one that
-        hides what it accepts makes the JSON file the only way in. The old
-        template's list was hand-maintained and had drifted -- it omitted
-        interactive_latency and lowest_storage."""
+    def test_the_form_offers_no_objective_to_pick(self):
+        """Was: "offers exactly the objectives the write accepts", the
+        phase-3 rule that a select must not offer what the endpoint
+        rejects. Retired 2026-08-05 -- an objective ranked a candidate
+        set and a selection fixes the device space, so the honest number
+        of choices is none. The rule still holds; it now has nothing to
+        police here."""
         with mock.patch.object(hub, "plan_rows", return_value=[]):
-            offered = self.client.get("/api/v2/models/m1/runtime-policy",
-                                      headers=self.auth).json()["objectives"]
-        self.assertEqual(set(offered), set(hub.RUNTIME_OBJECTIVES))
-        for objective in offered:
-            with self.subTest(objective=objective):
-                with mock.patch("modelctl_web.mutate.submit_runtime_policy",
-                                return_value="j"):
-                    r = self.client.post(
-                        "/api/v2/models/m1/runtime-policy", headers=self.auth,
-                        json={"mode": "managed", "objective": objective})
-                self.assertEqual(r.status_code, 200, objective)
+            body = self.client.get("/api/v2/models/m1/runtime-policy",
+                                   headers=self.auth).json()
+        self.assertNotIn("objectives", body)
+        self.assertIn("allows_disk_streaming", body)
 
     def test_every_offered_objective_is_one_the_ranker_scores(self):
         """Guards the other direction: an objective in the list that the
@@ -1204,10 +1206,8 @@ class TestRuntimePolicy(Phase4Base):
     def test_rejections_name_what_was_wrong(self):
         for body, expect in (
                 ({"mode": "sideways"}, "mode must be"),
-                ({"mode": "managed", "objective": "go_faster"},
-                 "unknown objective"),
                 ({"mode": "managed", "maximum_storage_tier": 9},
-                 "maximum_storage_tier is 1"),
+                 "allow_disk_streaming"),
                 ({"mode": "managed", "minimum_context": "lots"},
                  "must be integers"),
                 ({"mode": "managed", "disabled_plan_ids": "p1"},
@@ -1239,7 +1239,7 @@ class TestRuntimePolicy(Phase4Base):
                                 headers=self.auth)
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["plans"], [])
-        self.assertTrue(r.json()["objectives"])
+        self.assertNotIn("objectives", r.json())
 
 
 class TestRunCommandPreview(Phase4Base):
@@ -1689,3 +1689,59 @@ class TestAdoptingAPin(Phase4Base):
                                 headers=self.auth)
         self.assertEqual(r.status_code, 409)
         self.assertIn("abc123", r.json()["error"])
+
+
+class TestTiersAreNotAUserDecision(Phase4Base):
+    """Aaron 2026-08-05: "objective is dead policy, i don't see tiers as
+    being a user decision".
+
+    Same judgement as "plans is not a user concept". A tier is a rung on
+    the planner's memory ladder; asking someone to pick one is exposing
+    the compiler's vocabulary. The two rungs that carried real intent
+    translate without it: tier 1 ("GPU only") is already sayable by
+    ticking RAM off in a selection, and tier 2 ("GPU + RAM") just means
+    the spill must be zero.
+    """
+
+    def _policy(self, body):
+        """The policy dict the write submits, which is where it lands --
+        the route queues a job rather than writing the profile inline."""
+        with mock.patch("modelctl_web.mutate.submit_runtime_policy",
+                        return_value="job-rp") as sub:
+            r = self.client.post("/api/v2/models/m1/runtime-policy",
+                                 headers=self.auth, json=body)
+        self.assertEqual(r.status_code, 200, r.text)
+        return sub.call_args[0][2]
+
+    def test_the_write_surface_takes_a_switch_not_a_rung(self):
+        saved = self._policy({"mode": "managed",
+                              "allow_disk_streaming": False})
+        self.assertEqual(saved["maximum_storage_tier"], 2,
+                         "the stored mechanism keeps the ladder; only the "
+                         "surface stops speaking in rungs")
+
+    def test_allowing_disk_is_the_default_and_the_permissive_end(self):
+        saved = self._policy({"mode": "managed",
+                              "allow_disk_streaming": True})
+        self.assertEqual(saved["maximum_storage_tier"], 3)
+
+    def test_a_stored_tier_still_reads_back(self):
+        """Profiles already carry maximum_storage_tier; retiring the
+        vocabulary must not orphan what is on disk."""
+        saved = self._policy({"mode": "managed",
+                              "maximum_storage_tier": 2})
+        self.assertEqual(saved["maximum_storage_tier"], 2)
+
+    def test_objective_is_no_longer_offered_as_a_choice(self):
+        """Dead policy: with a selection fixing the device space there is
+        no candidate set left for an objective to rank."""
+        body = self.client.get("/api/v2/models/m1/runtime-policy",
+                               headers=self.auth).json()
+        self.assertNotIn("objectives", body)
+
+    def test_an_objective_in_the_body_is_ignored_rather_than_refused(self):
+        """An old client sending one must not get a 422 for a field that
+        no longer decides anything."""
+        saved = self._policy({"mode": "managed",
+                              "objective": "fastest_generation"})
+        self.assertEqual(saved["objective"], "balanced")

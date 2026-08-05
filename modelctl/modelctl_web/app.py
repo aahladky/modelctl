@@ -1059,8 +1059,11 @@ def create_app(store=None, runner=None, collector=None,
             # The pinned-plan picker degrades to a free-text id rather
             # than taking the whole form down with it.
             plans = []
+        # No "objectives" list: it is dead policy (Aaron 2026-08-05) and
+        # offering an enum nothing ranks would put a dead control on the
+        # next surface built against this.
         return {"policy": p.get("runtime") or None,
-                "objectives": list(hub.RUNTIME_OBJECTIVES),
+                "allows_disk_streaming": hub.allows_disk_streaming(p),
                 "plans": plans}
 
     @app.post("/api/v2/models/{name}/runtime-policy")
@@ -1087,11 +1090,13 @@ def create_app(store=None, runner=None, collector=None,
             # a backend that cannot be resolved cannot do that, and the
             # old handler refused the save for the same reason.
             return JSONResponse({"error": str(e)}, status_code=400)
-        objective = body.get("objective") or "balanced"
-        if objective not in hub.RUNTIME_OBJECTIVES:
-            return JSONResponse(
-                {"error": f"unknown objective {objective!r}",
-                 "objectives": list(hub.RUNTIME_OBJECTIVES)}, status_code=422)
+        # Dead policy (Aaron 2026-08-05). An objective ranked a candidate
+        # set; a selection fixes the device space, so there is no set left
+        # for it to rank. Ignored rather than refused -- an old client
+        # sending one should not get a 422 for a field that no longer
+        # decides anything -- and stored as the default so the legacy
+        # compile/rank path keeps a value it can read.
+        objective = "balanced"
 
         def _opt_int(key):
             val = body.get(key)
@@ -1108,12 +1113,21 @@ def create_app(store=None, runner=None, collector=None,
                 {"error": "minimum_context, maximum_cpu_bytes and "
                           "maximum_storage_tier must be integers"},
                 status_code=422)
+        # A tier is a rung on the planner's memory ladder, not a user
+        # decision (Aaron 2026-08-05). The surface takes the one thing
+        # that rung meant -- may this model stream from disk -- and the
+        # other rung it could express, "GPU only", is already sayable by
+        # ticking RAM off in a selection. The stored field keeps the
+        # ladder so nothing already on disk is orphaned.
+        allow_disk = body.get("allow_disk_streaming")
+        if allow_disk is not None:
+            tier = 3 if bool(allow_disk) else 2
         if tier is None:
             tier = 3
         if tier not in (1, 2, 3):
             return JSONResponse(
-                {"error": "maximum_storage_tier is 1 (GPU), 2 (GPU+RAM) or "
-                          "3 (GPU+RAM+SSD)"}, status_code=422)
+                {"error": "allow_disk_streaming must be true or false"},
+                status_code=422)
         disabled = body.get("disabled_plan_ids") or []
         if not isinstance(disabled, list) or any(not isinstance(d, str)
                                                  for d in disabled):

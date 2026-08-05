@@ -491,20 +491,34 @@ def pin_adoption_preview(profile):
     }
 
 
-_STORAGE_TIER_LABEL = {1: "GPU only", 2: "GPU + RAM"}
+def allows_disk_streaming(profile):
+    """Whether this model may solve a shortfall by streaming from disk.
+
+    Stored as `maximum_storage_tier` (1=gpu, 2=gpu+ram, 3=gpu+ram+storage)
+    because that is the rung the planner filters on, but a tier is not a
+    user decision (Aaron 2026-08-05, the same judgement as "plans is not a
+    user concept"). The two rungs that carried real intent survive without
+    the vocabulary: tier 1 is already sayable by ticking RAM off in a
+    selection, and everything below 3 means the same single thing here --
+    weights must not stream from the SSD.
+    """
+    tier = (profile.get("runtime") or {}).get("maximum_storage_tier", 3)
+    try:
+        return int(tier) >= 3
+    except (TypeError, ValueError):
+        return True
 
 
 def _storage_floor(profile, host_bytes, resident):
-    """Whether this layout crosses the model's own storage limit.
+    """Whether this layout streams from disk when the model forbids it.
 
-    `maximum_storage_tier` (1=gpu, 2=gpu+ram, 3=gpu+ram+storage) is a hard
-    constraint on the ranked path -- modelctl_plans:1697 drops any plan
-    whose claim is storage_mode "mmap" when the tier is below 3. The
-    placement path never read it, so the screen offered layouts the
-    profile forbids: live on 2026-08-04, qwen3-5-122b-a10b-ud is set to
-    tier 2 and previewed 39.52 GiB of SSD streaming.
+    A hard constraint on the ranked path -- modelctl_plans:1697 drops any
+    plan whose claim is storage_mode "mmap" below tier 3 -- that the
+    placement path never read, so the screen offered layouts the profile
+    forbids: live on 2026-08-04 the 122B forbade disk and was shown 39.52
+    GiB of SSD streaming anyway.
 
-    A host share that is not resident is exactly that claim's "mmap" --
+    A host share that is not resident is exactly that claim's "mmap":
     bytes addressed off the disk rather than held in memory.
 
     This reports; it does not choose. There is one plan for a selection,
@@ -513,19 +527,14 @@ def _storage_floor(profile, host_bytes, resident):
     quietly substituted one would be answering for a selection nobody
     made.
     """
-    tier = (profile.get("runtime") or {}).get("maximum_storage_tier", 3)
-    try:
-        tier = int(tier)
-    except (TypeError, ValueError):
-        tier = 3
-    crossed = bool(host_bytes) and not resident and tier < 3
+    allows = allows_disk_streaming(profile)
+    crossed = bool(host_bytes) and not resident and not allows
     detail = ""
     if crossed:
         detail = (f"this layout streams {host_bytes / float(1 << 30):.1f} GiB "
-                  f"from the SSD, and this model's storage limit is "
-                  f"{_STORAGE_TIER_LABEL.get(tier, tier)}")
-    return {"maximum_storage_tier": tier, "crossed": crossed,
-            "detail": detail}
+                  f"from the SSD, and this model is set never to run from "
+                  f"storage")
+    return {"allows_disk": allows, "crossed": crossed, "detail": detail}
 
 
 def _placement_devices(plan, inputs=None):
