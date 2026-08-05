@@ -347,6 +347,16 @@ export interface PlacementView {
   devices: Record<string, PlacedDevice>;
   /* Bytes with nowhere to go but the disk. Zero is the goal state. */
   spill_bytes: number;
+  /* Which picture of the machine these numbers came from. "stored" is the
+     profile's recorded snapshot -- deliberate, so a layout does not drift
+     with free memory -- and recorded_at says how old it is. The screen
+     shows this beside live device readings, so without it a stale
+     snapshot reads as a broken layout. */
+  planned_against: {
+    source: "stored" | "live";
+    recorded_at: string | null;
+    ram_available_bytes: number;
+  };
 }
 
 export interface PlacementApplyResult {

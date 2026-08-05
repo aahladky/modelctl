@@ -187,6 +187,18 @@ function selectionOf(slots: Slot[], on: Record<string, boolean> | null,
   return out;
 }
 
+/* "2026-08-01T17:57:49" -> "1 Aug, 17:57". The planner spends a recorded
+   picture of the machine while the rows above show it as it is now; how
+   old that picture is decides whether a disagreement between them is a
+   problem or just an old snapshot. */
+function snapshotWhen(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, {
+    day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+  });
+}
+
 /* The tick/ceiling state that means "what is set to run right now". Used
    both to open the screen and to reset it, so those two can never drift
    apart. */
@@ -217,6 +229,11 @@ export function WhereItRuns({ name, revision, onChanged }: {
   const [replanning, setReplanning] = useState(false);
   const [gate, setGate] = useState<Gate | null>(null);
   const [busy, setBusy] = useState(false);
+  /* Sticky once set: a re-read is a statement that the recorded snapshot
+     is out of date, and every replan after it -- and the apply -- must be
+     against the machine as it now is, or the screen would show one
+     machine and save another. */
+  const [fresh, setFresh] = useState(false);
 
   useEffect(() => {
     setErr("");
@@ -267,13 +284,13 @@ export function WhereItRuns({ name, revision, onChanged }: {
     let live = true;
     setReplanning(true);
     const timer = setTimeout(() => {
-      fetchPlacement(name, selection)
+      fetchPlacement(name, selection, fresh)
         .then((p) => { if (live) { setPlace(p); setPlaceErr(""); } })
         .catch((e) => { if (live) setPlaceErr(String(e)); })
         .finally(() => { if (live) setReplanning(false); });
     }, REPLAN_DEBOUNCE_MS);
     return () => { live = false; clearTimeout(timer); };
-  }, [name, revision, selKey, slots.length, on === null]);
+  }, [name, revision, selKey, slots.length, on === null, fresh]);
 
   /* Every layout that has ever been RUN on this machine, by device set.
      Everything else is honestly unknown until it is measured. */
@@ -318,12 +335,27 @@ export function WhereItRuns({ name, revision, onChanged }: {
     .sort((a, b) => (a.budget - bytesOn(a.key)) - (b.budget - bytesOn(b.key)));
   const dirty = appliedKey !== null && selKey !== appliedKey;
   const anyOn = slots.some((s) => on[s.key] && s.present);
+  /* An empty selection IS automatic placement -- it is what the planner
+     does when nobody has told it otherwise. So "automatic" needs no widget
+     of its own, only a way back to it. */
+  const isAutomatic = selKey === "{}";
+  const appliedAutomatic =
+    Object.keys(place.applied_selection ?? {}).length === 0;
+  const snapshot = place.planned_against;
+
+  const toAutomatic = () => {
+    const next: Record<string, boolean> = {};
+    for (const s of slots) next[s.key] = s.present;
+    setOn(next);
+    setCap({});
+    setGate(null);
+  };
 
   const apply = async (accept: boolean) => {
     setBusy(true);
     setGate(null);
     try {
-      const r = await applyPlacement(name, selection, accept);
+      const r = await applyPlacement(name, selection, accept, fresh);
       toast("ok", `placing ${name}`,
             `job ${r.job_id} · watch it on the jobs page`);
       onChanged();
@@ -455,6 +487,39 @@ export function WhereItRuns({ name, revision, onChanged }: {
         ))}
       </div>
 
+      {/* Two clocks meet here. The bars above show each device as it is
+          right now; the fill in them is what the planner intends, computed
+          from a recorded picture of this machine. Saying which picture is
+          the difference between "this layout is broken" and "that snapshot
+          is three days old". */}
+      <div class="placeline">
+        <span>
+          {appliedAutomatic
+            ? "Placed automatically."
+            : "Placed by hand."}
+          {dirty && <span class="sub"> · unsaved changes</span>}
+        </span>
+        <span class="rgrow" />
+        <span class="sub">
+          {fresh
+            ? "Reading this machine as it is now."
+            : snapshot.recorded_at
+              ? `Planned against this machine as it was on `
+                + `${snapshotWhen(snapshot.recorded_at)}.`
+              : "Planned against this machine as it is now."}
+        </span>
+        {!fresh && snapshot.source === "stored" && (
+          <button type="button" onClick={() => setFresh(true)}>
+            Re-read the machine
+          </button>
+        )}
+        {fresh && (
+          <button type="button" onClick={() => setFresh(false)}>
+            Use the saved snapshot
+          </button>
+        )}
+      </div>
+
       {spill > 0.05 * GIB && (
         <div class="spill">
           <span>⚠</span>
@@ -516,6 +581,11 @@ export function WhereItRuns({ name, revision, onChanged }: {
                 : "This combination has never been run. Apply it, then "
                   + "measure it on the overview tab to find out."}
         </span>
+        <button type="button" onClick={toAutomatic}
+                disabled={busy || isAutomatic}
+                title="Let the planner use every device it can">
+          Automatic
+        </button>
         <button type="button" onClick={reset}
                 disabled={busy || !dirty}>Reset</button>
         <button type="button" class="btn-primary" onClick={() => apply(false)}

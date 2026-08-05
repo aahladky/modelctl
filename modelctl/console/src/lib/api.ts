@@ -145,14 +145,20 @@ export function placementQuery(selection: PlacementSelection): string {
   return s ? `?${s}` : "";
 }
 
-export const fetchPlacement = (name: string, selection: PlacementSelection) =>
+/* fresh re-reads the machine instead of the profile's recorded snapshot.
+   On the GET it changes nothing on disk; on the POST it is what makes the
+   apply record the machine the operator was just shown. */
+export const fetchPlacement = (name: string, selection: PlacementSelection,
+                               fresh = false) =>
   get<PlacementView>(
-    `/api/v2/models/${enc(name)}/placement${placementQuery(selection)}`);
+    `/api/v2/models/${enc(name)}/placement${placementQuery(selection)}`
+    + (fresh ? (placementQuery(selection) ? "&" : "?") + "fresh=1" : ""));
 
 export const applyPlacement = (name: string, selection: PlacementSelection,
-                               accept: boolean) =>
+                               accept: boolean, fresh = false) =>
   postJson<PlacementApplyResult>(`/api/v2/models/${enc(name)}/placement`,
-                                 { selection, accept_tier_change: accept });
+                                 { selection, accept_tier_change: accept,
+                                   fresh });
 
 export const fetchRuntimePolicy = (name: string) =>
   get<RuntimePolicyView>(`/api/v2/models/${enc(name)}/runtime-policy`);

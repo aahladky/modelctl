@@ -959,10 +959,14 @@ def create_app(store=None, runner=None, collector=None,
     @app.get("/api/v2/models/{name}/placement")
     def api_v2_model_placement(request: Request, name: str):
         p = modelctl.load_profile(name)
-        selection, bad = _selection_from_query(request.query_params)
+        params = request.query_params
+        selection, bad = _selection_from_query(params)
         if bad:
             return bad
-        answer = hub.placement_preview(p, selection)
+        # ?fresh=1 re-reads the machine instead of the profile's recorded
+        # snapshot. A read, not a write -- only an apply records.
+        fresh = (params.get("fresh") or "").strip().lower() in _TRUE
+        answer = hub.placement_preview(p, selection, refresh=fresh)
         if answer is None:
             return JSONResponse(
                 {"error": f"couldn't analyze model layout for '{name}' -- "
@@ -994,9 +998,13 @@ def create_app(store=None, runner=None, collector=None,
                 {"error": "selection must map a device key to "
                           "{on, ceiling_bytes}"}, status_code=422)
         accept = bool(body.get("accept_tier_change"))
+        # The gate must be read against the plan the operator was looking
+        # at, so a fresh preview has to gate against fresh inputs too.
+        fresh = bool(body.get("fresh"))
         import modelctl_plans
         import modelctl_tiers
-        plan = modelctl_plans.plan_for_selection(p, selection)
+        inputs, _source = modelctl.resolve_planning_inputs(p, refresh=fresh)
+        plan = modelctl_plans.plan_for_selection(p, selection, inputs=inputs)
         if plan is None:
             return JSONResponse(
                 {"error": f"couldn't analyze model layout for '{name}' -- "
@@ -1007,7 +1015,8 @@ def create_app(store=None, runner=None, collector=None,
                 {"error": "this placement changes tier, split, or placement "
                           "beyond pins", "gate": gate}, status_code=409)
         return {"job_id": mutate.submit_placement_apply(
-            runner, name, selection, accept_tier_change=accept), "gate": gate}
+            runner, name, selection, accept_tier_change=accept,
+            refresh=fresh), "gate": gate}
 
     # ---- placement mode (typed form) -------------------------------------
     # The GET survived the cutover; this is the write it never had on the

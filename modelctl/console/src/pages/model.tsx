@@ -14,7 +14,7 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { useStream } from "../lib/stream";
 import {
-  ApiError, applyTier, autotuneModel, benchModel, deleteModel,
+  ApiError, autotuneModel, benchModel, deleteModel,
   fetchAdmission, fetchLogTail, fetchModelDetail, fetchModelHistory,
   fetchRunCommand, fetchRuntimePolicy, fmtAgo, fmtClock,
   fmtGiB, resetModelCache, restartModel, saveModelConfig,
@@ -251,128 +251,6 @@ function DangerZone({ d, onChanged }: {
               .finally(() => setBusy(false));
           }} />
       </div>
-    </div>
-  );
-}
-
-/* ---- auto-place ------------------------------------------------------ */
-
-function TierApply({ name, revision, onApplied }: {
-  name: string; revision: number; onApplied: () => void;
-}) {
-  const [preview, setPreview] = useState<AdmissionPreview | null>(null);
-  const [err, setErr] = useState("");
-  const [gate, setGate] = useState<Gate | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    setErr("");
-    /* No draft arguments: this is the planner's answer for the profile
-       exactly as saved, which is what apply would compute. The same
-       endpoint the configure form drafts against. */
-    fetchAdmission(name).then(setPreview).catch((e) => setErr(String(e)));
-  }, [name, revision]);
-
-  const apply = (accept: boolean) => {
-    setBusy(true);
-    setGate(null);
-    applyTier(name, accept)
-      .then((r) => {
-        toast("ok", `auto-place ${name} submitted`,
-              `job ${r.job_id} · watch it on the jobs page`);
-        onApplied();
-      })
-      .catch((e) => {
-        if (e instanceof ApiError && e.status === 409 && e.body.gate) {
-          setGate(e.body.gate as Gate);
-        } else if (e instanceof ApiError && e.status === 405) {
-          toast("err", "✗ auto-place refused",
-                String(e.body.reason ?? e.message), 9000);
-        } else if (e instanceof ApiError) {
-          toast("err", `✗ auto-place ${name} failed`,
-                String(e.body.error ?? e.message), 9000);
-        } else {
-          toast("err", `✗ auto-place ${name} failed`, String(e), 9000);
-        }
-      })
-      .finally(() => setBusy(false));
-  };
-
-  const plan = preview?.plan ?? null;
-  const admission = plan?.admission ?? null;
-  return (
-    <div class="widget">
-      <div class="label"><span>memory fit{" "}
-        <Info label="about the memory fit">
-          The planner works out where this model's pieces should live:
-          fit level 1 is all-GPU (fastest), 2 spills into RAM, 3 leans on
-          storage. Applying writes that layout into the model and pushes
-          it to the router — the same plan the CLI's auto-place uses.
-        </Info></span>
-      </div>
-      {err && <p class="sub">planner unavailable: {err}</p>}
-      {!preview && !err && <p class="sub">asking the planner…</p>}
-      {preview && !plan && (
-        <p class="sub">the planner could not analyze this model's layout
-          {preview.error ? ` — ${preview.error}` : ""} — nothing to apply</p>
-      )}
-      {plan && (
-        <>
-          <div class="sub">
-            fit level {plan.tier} · machine facts: {preview?.planning_inputs_source}
-            {admission && (admission.fits
-              ? " · fits as chosen"
-              : " · does not fit even degraded")}
-          </div>
-          <table>
-            <tbody>
-              {plan.layout.map(([label, gib, desc], i) => (
-                <tr key={i}>
-                  <td class="sub">{label}</td>
-                  <td class="num">{gib.toFixed(1)} GiB</td>
-                  <td class="sub">{desc}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {plan.warnings.map((w) => (
-            <div class="msg warning" key={w}>⚠ {w}</div>
-          ))}
-          {preview?.gate && preview.gate.changes.length > 0 && (
-            <div class="sub" style="margin-top:.4rem">
-              this new fit differs from what's saved now:
-              {preview.gate.changes.map((c) => (
-                <div class="sub" key={c}>· {c}</div>
-              ))}
-            </div>
-          )}
-          {gate && (
-            <fieldset style="border-color:var(--warn);margin-top:.6rem">
-              <legend style="color:var(--warn)">
-                bigger change — confirm required
-              </legend>
-              <p class="sub">This new fit changes how the model is placed,
-                not just fine-tuning:</p>
-              {gate.changes.map((c) => (
-                <div class="msg warning" key={c}>⚠ {c}</div>
-              ))}
-              <div class="actions">
-                <button type="button" onClick={() => setGate(null)}>cancel</button>
-                <button type="button" class="btn-danger" disabled={busy}
-                        onClick={() => apply(true)}>
-                  yes, apply it
-                </button>
-              </div>
-            </fieldset>
-          )}
-          <div class="actions" style="justify-content:flex-end;margin-top:.6rem">
-            <button type="button" class={busy ? "busy" : undefined}
-                    disabled={busy} onClick={() => apply(false)}>
-              apply this fit
-            </button>
-          </div>
-        </>
-      )}
     </div>
   );
 }
@@ -837,7 +715,7 @@ export function Configure({ d, onSaved }:
   );
 }
 
-/* ---- placement mode (typed form) ------------------------------------- */
+/* ---- what happens at launch (typed form) ----------------------------- */
 
 function RuntimePolicyForm({ name, revision, onSaved }: {
   name: string; revision: number; onSaved: () => void;
@@ -893,18 +771,19 @@ function RuntimePolicyForm({ name, revision, onSaved }: {
         }
       : { mode: "fixed" };
     submitAction(() => saveRuntimePolicy(name, body),
-                 `placement mode for ${name}`, onSaved)
+                 `launch behaviour for ${name}`, onSaved)
       .finally(() => setBusy(false));
   };
 
   return (
     <div class="widget" style="max-width:880px">
-      <h2>placement mode{" "}
-        <Info label="about placement mode">
-          Fixed renders one command from the saved config, forever.
-          Managed lets the planner rank the compiled plans at launch and
-          pick the best one for what you optimize for — it can only pick plans it
-          has evidence for unless untested plans are allowed.
+      <h2>when this model starts{" "}
+        <Info label="about what happens at launch">
+          Where it runs is settled above. This is what the router does with
+          that answer when the model is actually launched. Fixed uses the
+          saved layout exactly, every time. Managed lets the planner choose
+          at launch for what you optimize for, and it can only choose
+          layouts it has evidence for unless untested ones are allowed.
         </Info>
       </h2>
       {err && <p class="sub">policy unavailable: {err}</p>}
@@ -915,7 +794,7 @@ function RuntimePolicyForm({ name, revision, onSaved }: {
             <legend>mode</legend>
             <div class="frow">
               <div class="field" style="max-width:260px">
-                <label for="rp-mode">placement</label>
+                <label for="rp-mode">at launch</label>
                 <select id="rp-mode" value={managed ? "managed" : "fixed"}
                         onChange={(e) => setManaged(
                           (e.target as HTMLSelectElement).value === "managed")}>
@@ -1167,7 +1046,6 @@ export function Model({ name }: { name: string }) {
                   retryIn={retryIn} />
         <RuntimeActions d={detail} live={live} onChanged={reload} />
         <Measure name={name} />
-        <TierApply name={name} revision={revision} onApplied={reload} />
       </>}
       {tab === "placement" && <>
         <WhereItRuns name={name} revision={revision} onChanged={reload} />

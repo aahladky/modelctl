@@ -534,3 +534,11 @@ button.busy { opacity: .6; cursor: progress; }
 .rspeed .u { font-size: .68rem; line-height: 1.1; color: var(--muted); }
 .rgrow { flex: 1 1 auto; }
 .rnote { font-size: .8rem; color: var(--muted); }
+
+/* The line between the machines and the consequence: how this model is
+   placed, and which picture of the machine the fills above came from.
+   Quiet by default -- it is orientation, not an alarm. */
+.placeline {
+  display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
+  padding: .45rem .2rem .7rem; font-size: .82rem;
+}

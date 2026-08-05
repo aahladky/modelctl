@@ -144,7 +144,8 @@ def submit_tier_apply(runner, name, accept_tier_change=False):
                          lane="mutation")
 
 
-def submit_placement_apply(runner, name, selection, accept_tier_change=False):
+def submit_placement_apply(runner, name, selection, accept_tier_change=False,
+                           refresh=False):
     """Apply the placement the operator chose: which devices this model may
     use, and how much of each.
 
@@ -159,12 +160,17 @@ def submit_placement_apply(runner, name, selection, accept_tier_change=False):
     machine snapshot; writing the operator's ceilings into them would make
     every later automatic replan believe it is running on a smaller
     computer than it is.
+
+    refresh=True re-reads the machine first, so applying what a re-read
+    previewed records THAT machine. Without it the screen would show
+    today's layout and save yesterday's snapshot underneath it.
     """
     import modelctl_plans
 
     def fn(ctx):
         profile = modelctl.load_profile(name)
-        inputs, source = modelctl.resolve_planning_inputs(profile)
+        inputs, source = modelctl.resolve_planning_inputs(profile,
+                                                          refresh=refresh)
         plan = modelctl_plans.plan_for_selection(profile, selection,
                                                  inputs=inputs)
         if plan is None:
@@ -174,7 +180,8 @@ def submit_placement_apply(runner, name, selection, accept_tier_change=False):
                                 accept_tier_change)
     return runner.submit("placement-apply", f"place {name}", fn,
                          payload={"name": name, "selection": selection,
-                                  "accept_tier_change": accept_tier_change},
+                                  "accept_tier_change": accept_tier_change,
+                                  "refresh": refresh},
                          lane="mutation")
 
 

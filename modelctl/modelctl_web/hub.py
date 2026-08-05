@@ -328,18 +328,33 @@ def _placement_devices(plan):
     return devices
 
 
-def placement_preview(profile, selection):
+def placement_preview(profile, selection, refresh=False):
     """Where this model's weights land for a chosen set of devices.
 
     The one read the placement screen needs. `selection` maps an admission
     key to {"on", "ceiling_bytes"}; an empty selection is the automatic
     placement, which is what the operator sees before touching anything.
 
+    Planner inputs are resolved HERE rather than left to
+    plan_for_selection, for two reasons. The answer has to say which
+    machine snapshot it planned against -- the screen puts the planner's
+    numbers beside live free memory, and without the snapshot's date a
+    three-day-old picture reads as a broken layout instead of a stale one.
+    And resolving once means the snapshot named is provably the snapshot
+    spent.
+
+    refresh=True re-reads the machine instead of the profile's record: the
+    "that was then" escape hatch, for when the recorded snapshot no longer
+    describes the computer. It writes nothing; only an apply records.
+
     Returns None when the model's layout cannot be analyzed, so the caller
     can say so rather than render an empty machine.
     """
     import modelctl_plans
-    plan = modelctl_plans.plan_for_selection(profile, selection)
+    inputs, source = modelctl.resolve_planning_inputs(profile,
+                                                      refresh=refresh)
+    plan = modelctl_plans.plan_for_selection(profile, selection,
+                                             inputs=inputs)
     if plan is None:
         return None
     devices = _placement_devices(plan)
@@ -357,6 +372,15 @@ def placement_preview(profile, selection):
         # second reader of placement this endpoint exists to remove.
         "applied_selection": (profile.get("planning") or {})
                              .get("selection") or {},
+        # Which picture of the machine these numbers were computed from.
+        # "stored" means the profile's record -- deliberate, so a layout
+        # does not drift every time free memory moves -- and recorded_at
+        # is how old that picture is. "live" means the machine as it is.
+        "planned_against": {
+            "source": source,
+            "recorded_at": (profile.get("planning") or {}).get("recorded_at"),
+            "ram_available_bytes": int(inputs.get("ram_available_bytes") or 0),
+        },
         "tier": plan.get("tier"),
         "config": plan.get("config"),
         "warnings": list(plan.get("warnings") or ()),

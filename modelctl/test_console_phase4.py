@@ -11,6 +11,7 @@ Carries its own isolation (tmp state, patched dirs) so single-file runs
 never touch real state; the full suite additionally rides
 test__hermeticity's bootstrap.
 """
+import contextlib
 import json
 import os
 import unittest
@@ -310,6 +311,21 @@ class TestTierApply(Phase4Base):
 
 GIB = 1 << 30
 
+
+@contextlib.contextmanager
+def _both(*patches):
+    """Enter several patches together, yielding the FIRST one's mock.
+
+    The placement reads now touch two seams -- the planner and the machine
+    snapshot -- and every call site here wants to inspect the planner."""
+    mocks = [p.start() for p in patches]
+    try:
+        yield mocks[0]
+    finally:
+        for p in reversed(patches):
+            p.stop()
+
+
 # What the planner answers for a selection that spills. Shaped like a real
 # plan_tiers result -- the derived view is only trustworthy if it is read
 # off the same keys production produces.
@@ -350,9 +366,15 @@ class TestPlacementPreview(Phase4Base):
     relocated into the browser. So every number here is read off a plan.
     """
 
-    def _planner(self, plan=None):
-        return mock.patch("modelctl_plans.plan_for_selection",
-                          return_value=plan or _plan_variant())
+    INPUTS = {"inventory": [], "vram_limit_pct": 90, "primary": "SYCL0",
+              "ram_available_bytes": 31 * GIB}
+
+    def _planner(self, plan=None, source="stored"):
+        planner = mock.patch("modelctl_plans.plan_for_selection",
+                             return_value=plan or _plan_variant())
+        inputs = mock.patch.object(modelctl, "resolve_planning_inputs",
+                                   return_value=(self.INPUTS, source))
+        return _both(planner, inputs)
 
     def _selection_seen(self, query=""):
         with self._planner() as p:
@@ -502,6 +524,51 @@ class TestPlacementPreview(Phase4Base):
                                    headers=self.auth).json()
         self.assertEqual(body["applied_selection"], {})
 
+    def test_the_answer_says_which_snapshot_it_planned_against(self):
+        """The row shows free memory as it is now; the planner spends a
+        recorded snapshot. Printing both without saying so is what made a
+        three-day-old picture read as a broken layout."""
+        p = json.loads((self.profiles_dir / "m1.json").read_text())
+        p["planning"] = {"recorded_at": "2026-08-01T17:57:49"}
+        (self.profiles_dir / "m1.json").write_text(json.dumps(p))
+        with self._planner():
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertEqual(body["planned_against"]["source"], "stored")
+        self.assertEqual(body["planned_against"]["recorded_at"],
+                         "2026-08-01T17:57:49")
+        self.assertEqual(body["planned_against"]["ram_available_bytes"],
+                         31 * GIB)
+
+    def test_a_machine_never_planned_against_says_live(self):
+        with self._planner(source="live"):
+            body = self.client.get("/api/v2/models/m1/placement",
+                                   headers=self.auth).json()
+        self.assertEqual(body["planned_against"]["source"], "live")
+        self.assertIsNone(body["planned_against"]["recorded_at"])
+
+    def test_fresh_reads_the_machine_instead_of_the_record(self):
+        with self._planner() as _p:
+            self.client.get("/api/v2/models/m1/placement?fresh=1",
+                            headers=self.auth)
+            refreshed = modelctl.resolve_planning_inputs.call_args[1]["refresh"]
+        self.assertTrue(refreshed, "?fresh=1 is the re-read: without it the "
+                                   "screen can only ever show the snapshot")
+
+    def test_the_default_read_does_not_disturb_the_record(self):
+        with self._planner():
+            self.client.get("/api/v2/models/m1/placement", headers=self.auth)
+            refreshed = modelctl.resolve_planning_inputs.call_args[1]["refresh"]
+        self.assertFalse(refreshed)
+
+    def test_the_planner_is_handed_the_resolved_inputs(self):
+        """Preview and the annotation must describe the same snapshot. If
+        plan_for_selection resolved its own, the screen could name one
+        machine and plan against another."""
+        with self._planner() as p:
+            self.client.get("/api/v2/models/m1/placement", headers=self.auth)
+        self.assertEqual(p.call_args[1]["inputs"], self.INPUTS)
+
     def test_an_unplannable_model_is_a_409_not_an_empty_screen(self):
         with mock.patch("modelctl_plans.plan_for_selection",
                         return_value=None):
@@ -514,9 +581,15 @@ class TestPlacementPreview(Phase4Base):
 class TestPlacementApply(Phase4Base):
     """POST /api/v2/models/{name}/placement -- run the model this way."""
 
+    INPUTS = {"inventory": [], "vram_limit_pct": 90, "primary": "SYCL0",
+              "ram_available_bytes": 31 * GIB}
+
     def _planner(self, plan=None):
-        return mock.patch("modelctl_plans.plan_for_selection",
-                          return_value=plan or _plan_variant())
+        return _both(
+            mock.patch("modelctl_plans.plan_for_selection",
+                       return_value=plan or _plan_variant()),
+            mock.patch.object(modelctl, "resolve_planning_inputs",
+                              return_value=(self.INPUTS, "stored")))
 
     def _gate(self, requires):
         import modelctl_tiers
@@ -605,6 +678,27 @@ class TestPlacementApply(Phase4Base):
         self.assertEqual(r.status_code, 409)
         self.assertIn("couldn't analyze", r.json()["error"])
 
+    def test_a_fresh_apply_carries_the_re_read_into_the_job(self):
+        """Applying what a re-read showed must record THAT machine. Without
+        this the screen would show today's layout and save yesterday's
+        snapshot underneath it."""
+        with self._planner(), self._gate(False), \
+                mock.patch("modelctl_web.mutate.submit_placement_apply",
+                           return_value="job-p") as sub:
+            r = self.client.post("/api/v2/models/m1/placement",
+                                 headers=self.auth,
+                                 json={"selection": {}, "fresh": True})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(sub.call_args[1]["refresh"])
+
+    def test_an_ordinary_apply_leaves_the_snapshot_alone(self):
+        with self._planner(), self._gate(False), \
+                mock.patch("modelctl_web.mutate.submit_placement_apply",
+                           return_value="job-p") as sub:
+            self.client.post("/api/v2/models/m1/placement",
+                             headers=self.auth, json={"selection": {}})
+        self.assertFalse(sub.call_args[1]["refresh"])
+
     def test_the_preview_and_the_apply_plan_the_same_selection(self):
         """The button sits under the preview; if the two planned different
         selections the operator would confirm one layout and get another."""
@@ -625,21 +719,23 @@ class TestPlacementApply(Phase4Base):
 class TestPlacementApplyJob(Phase4Base):
     """The work submit_placement_apply does inside the lane."""
 
-    def _run(self, selection, accept=True):
+    def _run(self, selection, accept=True, refresh=False):
         from modelctl_web import mutate
         runner = mock.Mock()
         inputs = {"inventory": [{"device": "SYCL0", "total_bytes": 24 * GIB}],
                   "ram_available_bytes": 20 * GIB, "vram_limit_pct": 90,
                   "primary": "SYCL0"}
+        self.resolved = mock.Mock(return_value=(inputs, "stored"))
         with mock.patch("modelctl_plans.plan_for_selection",
                         return_value=_plan_variant()), \
                 mock.patch.object(modelctl, "resolve_planning_inputs",
-                                  return_value=(inputs, "stored")), \
+                                  self.resolved), \
                 mock.patch.object(modelctl, "generate_artifacts"), \
                 mock.patch("modelctl_web.mutate._sync_backends",
                            return_value=True):
             mutate.submit_placement_apply(runner, "m1", selection,
-                                          accept_tier_change=accept)
+                                          accept_tier_change=accept,
+                                          refresh=refresh)
             fn = runner.submit.call_args[0][2]
             result = fn(mock.Mock())
         saved = json.loads((self.profiles_dir / "m1.json").read_text())
@@ -674,6 +770,17 @@ class TestPlacementApplyJob(Phase4Base):
             result, _saved, _inputs = self._run({}, accept=False)
         self.assertFalse(result["applied"])
         self.assertEqual((self.profiles_dir / "m1.json").read_text(), before)
+
+    def test_a_fresh_apply_re_reads_the_machine_before_planning(self):
+        """The job resolves inputs itself, so the refresh has to reach it --
+        a screen that showed a re-read and then saved the old snapshot
+        would be the same lie in the other direction."""
+        self._run({}, refresh=True)
+        self.assertTrue(self.resolved.call_args[1]["refresh"])
+
+    def test_an_ordinary_apply_keeps_the_recorded_snapshot(self):
+        self._run({})
+        self.assertFalse(self.resolved.call_args[1]["refresh"])
 
     def test_an_unplannable_model_fails_the_job_loudly(self):
         from modelctl_web import mutate
