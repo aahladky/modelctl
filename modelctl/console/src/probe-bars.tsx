@@ -12,6 +12,7 @@
 import { useState } from "preact/hooks";
 
 import { DeviceRow } from "./lib/devicebar";
+import { ModelShare } from "./lib/modelshare";
 
 const GIB = 2 ** 30;
 
@@ -53,14 +54,24 @@ const EDGES: Row[] = [
     capacity: 11.60 * GIB, backing: "", state: "PIN_MISMATCH", detail: "" },
 ];
 
-function Gallery({ title, note, rows }:
-                 { title: string; note: string; rows: Row[] }) {
+function Gallery({ title, note, rows, share }:
+                 { title: string; note: string; rows: Row[];
+                   share?: boolean }) {
   const [on, setOn] = useState<Record<string, boolean>>({});
   const [caps, setCaps] = useState<Record<string, number | null>>({});
+  const live = rows.filter((r) => on[r.name] ?? true);
+  const spill = live.filter((r) => r.backing === "SSD via mmap")
+                    .reduce((n, r) => n + r.committed, 0);
   return (
     <div class="widget">
       <div class="label"><span>{title}</span></div>
       <p class="sub">{note}</p>
+      {share
+        ? <ModelShare spill={spill}
+                      shares={live.map((r) => ({ name: r.name,
+                                                 bytes: r.committed,
+                                                 backing: r.backing }))} />
+        : null}
       {rows.map((r) => (
         <DeviceRow key={r.name} {...r}
                    on={on[r.name] ?? true}
@@ -81,14 +92,14 @@ export function ProbeBars() {
               + "switch it off. The dashed line is where the planner's budget "
               + "ends — everything right of it is hardware the policy is "
               + "withholding."}
-        rows={LIVE} />
+        rows={LIVE} share />
       <Gallery
         title="the states that have to survive a bad day"
         note={"Over its budget and streaming from disk; a node nobody can "
               + "reach; a node that is up but built from a different commit. "
               + "None of them vanishes — an unreachable device keeps its row "
               + "and the room it offers."}
-        rows={EDGES} />
+        rows={EDGES} share />
     </>
   );
 }

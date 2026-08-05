@@ -546,3 +546,53 @@ button.busy { opacity: .6; cursor: progress; }
    the device offers, because a closed laptop has not stopped having a
    GPU. */
 .dev-absent .dev-track { opacity: .55; }
+
+/* ---- where the model lives, as one bar -------------------------------
+   The per-device rows say how full each device is. This says where the
+   MODEL is, which is the question the screen exists for -- five separate
+   tracks make you add them up yourself.
+
+   The ramp is the meaning, not decoration: hot rust for VRAM, cooling
+   through remote and RAM, grey for anything addressed off the disk. A
+   layout that has gone wrong looks wrong before you read a number. */
+
+.share { margin: .2rem 0 .9rem; }
+.share-head {
+  display: flex; align-items: baseline; gap: .55rem; flex-wrap: wrap;
+  margin-bottom: .5rem;
+}
+.share-total {
+  font-family: var(--serif); font-size: 1.5rem; letter-spacing: .01em;
+}
+.share-spill { color: var(--err); font-size: .84rem; margin-left: auto; }
+.share-ok { color: var(--ok); font-size: .84rem; margin-left: auto; }
+
+.share-bar {
+  display: flex; height: 40px; border-radius: var(--radius);
+  overflow: hidden; background: var(--bg-inset);
+}
+.share-seg {
+  min-width: 2px; transition: flex-grow .18s linear;
+  /* Two devices on the same rung share a colour, so without a rule
+     between them five segments read as three blocks. */
+  box-shadow: inset -1px 0 0 var(--bg);
+}
+.share-seg:last-child { box-shadow: none; }
+
+/* Fastest to slowest. Not a categorical palette -- the sequence is the
+   information. */
+.share-seg-0 { background: #b1470f; }              /* VRAM, local     */
+.share-seg-1 { background: #c9722f; }              /* over RPC        */
+.share-seg-2 { background: #a08765; }              /* RAM             */
+.share-seg-3 { background: #7b7364; }            /* SSD via mmap    */
+
+.share-legend {
+  display: flex; flex-wrap: wrap; gap: .3rem .95rem; margin-top: .5rem;
+  font-size: .78rem;
+}
+.share-key { display: inline-flex; align-items: center; gap: .35rem; }
+.share-swatch {
+  width: .6rem; height: .6rem; border-radius: 2px; display: inline-block;
+}
+.share-key-name { font-family: var(--mono); font-size: .76rem; }
+.share-warn { color: var(--warn); font-size: .8rem; margin: .5rem 0 0; }
