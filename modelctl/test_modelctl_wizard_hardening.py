@@ -489,8 +489,20 @@ class TestAcquisitionIsConsolidatedOnAdd(WizardWebBase):
         # The nav moved into the SPA shell at the phase-3 cutover, so the
         # assertion follows it: the shell is where a second acquisition
         # entry would reappear.
+        #
+        # The console surface was demolished 2026-08-04 and is being
+        # rebuilt one screen at a time, so right now there is no
+        # navigation to check. The guard is kept rather than deleted, and
+        # re-arms itself the moment a nav exists again -- what it prevents
+        # is /pull and /import creeping back in beside /v2/add, and that
+        # is likeliest while the nav is being rebuilt from scratch, which
+        # is exactly when a deleted test would be missed.
         shell = (Path(__file__).resolve().parent / "console" / "src"
                  / "app.tsx").read_text()
+        if '<aside class="side">' not in shell:
+            self.skipTest("console shell has no navigation yet (surface "
+                          "demolished 2026-08-04); this test re-arms as "
+                          "soon as one is rebuilt")
         nav = shell.split('<aside class="side">')[1].split("</aside>")[0]
         self.assertIn('href="/v2/add"', nav)
         self.assertNotIn('href="/pull"', nav)

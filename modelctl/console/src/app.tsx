@@ -1,18 +1,27 @@
-import { LocationProvider, Router, Route, useLocation, useRoute } from "preact-iso";
-import type { ComponentChildren } from "preact";
+/* The console shell, after the 2026-08-04 demolition.
+
+   The previous surface -- sidebar, nine pages, ~5.5k lines -- was taken
+   down deliberately. It was not being used and was not considered
+   usable, and the defects behind that decision were mostly not in the
+   pages: an infinity taken on trust from a worker took the whole console
+   down, a probe reported "absent" when it meant "busy", presence had two
+   states for four situations, values arrived with no indication of which
+   machine or which moment they described. A repaint would have inherited
+   every one of those.
+
+   So the mechanisms stayed and the surface went. What is kept here is
+   binding, not layout: lib/api.ts and lib/types.ts describe what the
+   backend actually returns, lib/stream.ts is the SSE client, theme.ts
+   and tokens.css are the warm-ink sheet (the look was never the
+   complaint). Everything visual gets rebuilt one screen at a time, each
+   against a contract that can be checked.
+
+   This file stays small on purpose. Routing and navigation are IA, and
+   IA is exactly what is being redesigned -- there is nothing yet to
+   navigate between. */
 import { useEffect, useState } from "preact/hooks";
 import { effectiveTheme, onSystemThemeChange, toggleTheme } from "./theme";
-import { useStream } from "./lib/stream";
-import { fmtClock } from "./lib/api";
 import { ToastHost } from "./lib/toasts";
-import { Operate } from "./pages/operate";
-import { Fleet } from "./pages/fleet";
-import { Job, Jobs } from "./pages/jobs";
-import { Models } from "./pages/models";
-import { Model } from "./pages/model";
-import { Add } from "./pages/add";
-import { Wizard } from "./pages/wizard";
-import { Settings } from "./pages/settings";
 
 function ThemeButton() {
   const [, bump] = useState(0);
@@ -33,144 +42,24 @@ function ThemeButton() {
   );
 }
 
-function Side() {
-  const { path } = useLocation();
-  const { tick } = useStream();
-  const running = tick ? tick.jobs.filter((j) => j.status === "running").length : 0;
-  /* preact-iso strips trailing slashes before it hands `path` over
-     (router.js: `u.pathname.replace(/\/+$/g, '') || '/'`), so on /v2/ it
-     reports "/v2". An exact match against "/v2/" therefore never fired
-     and the operate item never highlighted. Match both spellings. */
-  const same = (p: string) => path === p || path === p.replace(/\/+$/, "");
-  const here = (p: string) => (same(p) ? "item here" : "item");
-  const under = (p: string) =>
-    (same(p) || path.startsWith(p + "/") ? "item here" : "item");
-  /* aria-current marks the active item as the current page rather than
-     leaving the distinction to background colour alone. */
-  const cur = (p: string, fn: (s: string) => string) =>
-    (fn(p) === "item here" ? "page" : undefined);
-  return (
-    <aside class="side">
-      <div class="brand">modelctl</div>
-      <a class={here("/v2/")} aria-current={cur("/v2/", here)} href="/v2/">
-        overview</a>
-      {/* next to operate, not under settings: where a model can run is an
-          operational question, and the rig is one of the nodes on it */}
-      <a class={under("/v2/fleet")} aria-current={cur("/v2/fleet", under)}
-         href="/v2/fleet">fleet</a>
-      <a class={under("/v2/models")} aria-current={cur("/v2/models", under)}
-         href="/v2/models">models</a>
-      <a class={under("/v2/add")} aria-current={cur("/v2/add", under)}
-         href="/v2/add">add</a>
-      {/* `under`, not `here`: a per-job page is still the jobs section */}
-      <a class={under("/v2/jobs")} aria-current={cur("/v2/jobs", under)}
-         href="/v2/jobs">
-        jobs{running > 0 && <span class="badge">{running}</span>}
-      </a>
-      <span class="spacer"></span>
-      <a class={here("/v2/settings")} aria-current={cur("/v2/settings", here)}
-         href="/v2/settings">settings</a>
-    </aside>
-  );
-}
-
-export function LiveBadge({ label }: { label: string }) {
-  const { stale, retryIn, lastAt } = useStream();
-  if (!stale) {
-    return (
-      <span class="live"><span class="dot"></span>{label}</span>
-    );
-  }
-  return (
-    <span class="live stale"><span class="dot"></span>
-      stream dropped
-      {lastAt != null ? ` · last known ${fmtClock(lastAt)}` : ""}
-      {retryIn != null ? ` · retrying in ${retryIn}s` : " · reconnecting…"}
-    </span>
-  );
-}
-
-function Shell({ title, live, children }:
-               { title: string; live: string; children: ComponentChildren }) {
-  return (
-    <div class="frame">
-      <header class="top">
-        <h1>{title}</h1>
-        <span class="grow"></span>
-        <LiveBadge label={live} />
-        <ThemeButton />
-      </header>
-      <main>{children}</main>
-    </div>
-  );
-}
-
-function ModelShell() {
-  // preact-iso already URL-decodes params.
-  const { params } = useRoute();
-  const name = params.name ?? "";
-  return (
-    <Shell title={`models · ${name}`} live="updating live">
-      <Model name={name} />
-    </Shell>
-  );
-}
-
-function JobShell() {
-  const { params } = useRoute();
-  const id = params.id ?? "";
-  return (
-    <Shell title={`job · ${id.slice(0, 12)}`} live="updating live">
-      <Job id={id} />
-    </Shell>
-  );
-}
-
-function WizardShell() {
-  const { params } = useRoute();
-  const id = params.id ?? "";
-  return (
-    <Shell title="add model" live="updating live">
-      <Wizard id={id} />
-    </Shell>
-  );
-}
-
 export function App() {
   return (
-    <LocationProvider scope="/v2">
-      <Side />
-      <Router>
-        <Route path="/v2/" component={() => (
-          <Shell title="overview" live="updating live"><Operate /></Shell>
-        )} />
-        <Route path="/v2/fleet" component={() => (
-          <Shell title="fleet" live="updating live"><Fleet /></Shell>
-        )} />
-        <Route path="/v2/jobs" component={() => (
-          <Shell title="jobs" live="updating live"><Jobs /></Shell>
-        )} />
-        <Route path="/v2/jobs/:id" component={JobShell} />
-        <Route path="/v2/models" component={() => (
-          <Shell title="models" live="updating live"><Models /></Shell>
-        )} />
-        <Route path="/v2/models/:name" component={ModelShell} />
-        <Route path="/v2/add" component={() => (
-          <Shell title="add model" live="updating live"><Add /></Shell>
-        )} />
-        <Route path="/v2/add/:id" component={WizardShell} />
-        <Route path="/v2/settings" component={() => (
-          <Shell title="settings" live="updating live"><Settings /></Shell>
-        )} />
-        <Route default component={() => (
-          <Shell title="not found" live="">
-            <div class="widget">
-              <p>Nothing at this address. <a href="/v2/">Back to operate.</a></p>
-            </div>
-          </Shell>
-        )} />
-      </Router>
+    <>
       <ToastHost />
-    </LocationProvider>
+      <main class="shell">
+        <header class="shell-head">
+          <h1>modelctl<span class="dot-accent">.</span></h1>
+          <ThemeButton />
+        </header>
+        <div class="widget">
+          <p>The console surface is being rebuilt, one screen at a time.</p>
+          <p class="sub">
+            The API, the planner, the job lanes and the fleet are
+            untouched and still serving. Nothing here stands in for a
+            screen that exists elsewhere — there is no other screen yet.
+          </p>
+        </div>
+      </main>
+    </>
   );
 }

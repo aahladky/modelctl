@@ -422,123 +422,20 @@ button.busy { opacity: .6; cursor: progress; }
 /* columns that yield on phones: identity and action stay, detail goes */
 @media (max-width: 700px) { .opt { display: none; } }
 
-/* ---- where it runs (model placement) ----
-   Memory reads first and throughput second: the machines and their bars
-   own the top of the screen, the speed number sits under them as the
-   consequence. One bar colour throughout -- tightness is said in words,
-   not in a second hue -- and every value here is an existing token, so
-   both themes follow without a new colour being introduced. */
-
-.machines { display: grid; gap: .7rem; margin-bottom: .7rem; }
-@media (min-width: 820px) {
-  .machines { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+/* ---- shell ----
+   Deliberately thin. The console's information architecture is being
+   redesigned, so there is no navigation to style yet -- only a header
+   and a page well, sized to the same measure every widget already uses. */
+.shell {
+  max-width: var(--measure); margin: 0 auto; padding: 1.5rem 1.25rem;
+  display: flex; flex-direction: column; gap: 1rem;
 }
-
-.mach {
-  background: var(--bg-raised); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: .8rem .9rem; min-width: 0;
+.shell-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 1rem; flex-wrap: wrap;
 }
-.mach-head {
-  display: flex; align-items: baseline; gap: .5rem;
-  margin-bottom: .6rem; flex-wrap: wrap;
+.shell-head h1 {
+  font-family: var(--serif); font-size: 1.3rem; font-weight: 600;
+  letter-spacing: .01em; margin: 0;
 }
-.mach-head h2 { font-size: .95rem; font-weight: 650; margin: 0; }
-
-/* one device: the tick, then everything about it in a column */
-.dev {
-  display: grid; grid-template-columns: auto 1fr; gap: .55rem;
-  align-items: start; padding: .4rem 0;
-}
-.dev + .dev { border-top: 1px solid var(--border); }
-
-/* The tick is a real button, so it is reachable by keyboard and reads as
-   pressed to a screen reader through aria-pressed on the row. */
-.dev .box {
-  width: 1.05rem; height: 1.05rem; padding: 0; margin-top: .15rem;
-  border: 1px solid var(--border-strong); border-radius: 4px;
-  background: var(--bg-inset);
-}
-.dev[aria-pressed="true"] .box {
-  background: var(--accent); border-color: var(--accent);
-}
-.dev[aria-pressed="true"] .box::after {
-  content: "✓"; display: block; color: var(--accent-contrast);
-  font-size: .7rem; line-height: 1.05rem; text-align: center;
-}
-.dev .box:disabled { opacity: .4; cursor: not-allowed; }
-
-.drow { display: flex; justify-content: space-between; gap: .5rem; }
-.dname { font-weight: 550; }
-.dgb {
-  font-family: var(--mono); font-size: .8rem;
-  font-variant-numeric: tabular-nums; color: var(--muted);
-}
-
-/* The picture IS the control: the range input lies over the fill at the
-   same size, invisible except for its thumb, so dragging the bar sets
-   the ceiling and the keyboard gets it for free. */
-.bar {
-  display: block; position: relative; height: 10px; margin: .3rem 0 .25rem;
-  background: var(--bg-inset); border-radius: 5px; overflow: hidden;
-}
-.bar i {
-  display: block; height: 100%; background: var(--accent);
-  border-radius: 5px; transition: width .25s ease;
-}
-.bar input[type="range"] {
-  position: absolute; inset: 0; width: 100%; height: 100%;
-  margin: 0; padding: 0; background: none; border: none;
-  -webkit-appearance: none; appearance: none; cursor: ew-resize;
-}
-.bar input[type="range"]::-webkit-slider-thumb {
-  -webkit-appearance: none; appearance: none;
-  width: 4px; height: 16px; margin-top: -3px; border-radius: 2px;
-  background: var(--text); border: 1px solid var(--bg-raised);
-}
-.bar input[type="range"]::-moz-range-thumb {
-  width: 4px; height: 16px; border-radius: 2px;
-  background: var(--text); border: 1px solid var(--bg-raised);
-}
-.bar input[type="range"]:focus-visible {
-  outline: 2px solid var(--accent); outline-offset: 1px;
-}
-
-.capnote, .dnote {
-  display: block; font-size: .76rem; color: var(--muted);
-}
-.warnnote { color: var(--warn); }
-
-/* The two banners under the machines. .spill is the one that explains
-   slowness, so it carries the heavier treatment. */
-.spill, .watch {
-  display: flex; gap: .55rem; align-items: flex-start;
-  border-radius: var(--radius); padding: .6rem .8rem; margin-bottom: .7rem;
-  font-size: .86rem;
-}
-.spill { background: var(--err-wash); border: 1px solid var(--err); }
-.watch { background: var(--warn-wash); border: 1px solid var(--warn); }
-.spill ul, .watch ul { margin: .35rem 0 .5rem; padding-left: 1.1rem; }
-.spill .btn-primary { margin-top: .2rem; }
-
-/* the consequence line: speed, how it is known, and the two decisions */
-.result {
-  display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
-  background: var(--bg-raised); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: .7rem .9rem;
-}
-.rspeed { display: flex; align-items: baseline; gap: .35rem; }
-.rspeed .v {
-  font: 650 1.6rem var(--mono); font-variant-numeric: tabular-nums;
-}
-.rspeed .v.unk { font-size: 1rem; color: var(--muted); font-weight: 550; }
-.rspeed .u { font-size: .68rem; line-height: 1.1; color: var(--muted); }
-.rgrow { flex: 1 1 auto; }
-.rnote { font-size: .8rem; color: var(--muted); }
-
-/* The line between the machines and the consequence: how this model is
-   placed, and which picture of the machine the fills above came from.
-   Quiet by default -- it is orientation, not an alarm. */
-.placeline {
-  display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
-  padding: .45rem .2rem .7rem; font-size: .82rem;
-}
+.dot-accent { color: var(--accent); }
