@@ -23,6 +23,7 @@ import { useEffect, useState } from "preact/hooks";
 import { effectiveTheme, onSystemThemeChange, toggleTheme } from "./theme";
 import { ToastHost } from "./lib/toasts";
 import { ProbeBars } from "./probe-bars";
+import { Home } from "./home";
 
 function ThemeButton() {
   const [, bump] = useState(0);
@@ -58,7 +59,7 @@ export function App() {
           <h1>modelctl<span class="dot-accent">.</span></h1>
           <ThemeButton />
         </header>
-        {probing ? <ProbeBars /> : null}
+        {probing ? <ProbeBars /> : <Home />}
         <div class="widget">
           <p>The console surface is being rebuilt, one screen at a time.</p>
           <p class="sub">
