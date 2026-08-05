@@ -22,6 +22,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { effectiveTheme, onSystemThemeChange, toggleTheme } from "./theme";
 import { ToastHost } from "./lib/toasts";
+import { ProbeBars } from "./probe-bars";
 
 function ThemeButton() {
   const [, bump] = useState(0);
@@ -43,6 +44,12 @@ function ThemeButton() {
 }
 
 export function App() {
+  /* ?bars renders the device primitive on its own, before any screen
+     composes it. Not routing -- routing is IA and IA is what is being
+     redesigned -- just a way to look at one control while it is being
+     built. It goes when the placement surface lands. */
+  const probing = typeof location !== "undefined"
+    && new URLSearchParams(location.search).has("bars");
   return (
     <>
       <ToastHost />
@@ -51,6 +58,7 @@ export function App() {
           <h1>modelctl<span class="dot-accent">.</span></h1>
           <ThemeButton />
         </header>
+        {probing ? <ProbeBars /> : null}
         <div class="widget">
           <p>The console surface is being rebuilt, one screen at a time.</p>
           <p class="sub">

@@ -439,3 +439,96 @@ button.busy { opacity: .6; cursor: progress; }
   letter-spacing: .01em; margin: 0;
 }
 .dot-accent { color: var(--accent); }
+
+/* ---- the device row --------------------------------------------------
+   One device as a bar you drag: capacity is the track, what the planner
+   committed is the fill, and the ceiling is the thumb. Mouse first --
+   there is no number field anywhere in this control, and the range's
+   bounds come from the machine so an impossible value cannot be
+   expressed. */
+
+.dev { padding: .55rem 0; border-bottom: 1px solid var(--border); }
+.dev:last-child { border-bottom: 0; }
+.dev-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: .75rem;
+}
+
+/* The whole name is the switch: a tick box beside a label makes the
+   operator aim at the smaller of two targets. */
+.dev-toggle {
+  display: inline-flex; align-items: center; gap: .45rem;
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--text); font: inherit;
+}
+.dev-dot {
+  width: .6rem; height: .6rem; border-radius: 50%;
+  background: var(--accent); border: 1px solid var(--accent);
+}
+.dev-name { font-family: var(--mono); font-size: .82rem; }
+.dev-note { color: var(--muted); font-size: .78rem; }
+.dev-note-absent { color: var(--warn); }
+
+.dev-track {
+  position: relative; height: 26px; margin: .4rem 0 .25rem;
+  background: var(--bg-inset); border-radius: var(--radius);
+  overflow: hidden;
+}
+.dev-fill {
+  position: absolute; inset: 0 auto 0 0;
+  background: var(--accent-wash); border-right: 2px solid var(--accent);
+  transition: width .12s linear;
+}
+.dev-fill-over { background: var(--err-wash); border-right-color: var(--err); }
+
+/* Where the planner's budget ends. Everything right of it is hardware
+   the policy is withholding -- a fact worth seeing, rather than a bar
+   that simply stops. */
+.dev-limit {
+  position: absolute; top: 0; bottom: 0; width: 0;
+  border-left: 1px dashed var(--border-strong);
+}
+
+/* The range IS the picture: transparent track, visible thumb sitting on
+   the bar. Not a control beside a readout. */
+.dev-ceiling {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  margin: 0; padding: 0; background: transparent;
+  -webkit-appearance: none; appearance: none; cursor: ew-resize;
+}
+.dev-ceiling::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 10px; height: 26px; border-radius: 3px;
+  background: var(--text); border: 1px solid var(--bg-raised);
+  cursor: ew-resize;
+}
+.dev-ceiling::-moz-range-thumb {
+  width: 10px; height: 26px; border-radius: 3px;
+  background: var(--text); border: 1px solid var(--bg-raised);
+  cursor: ew-resize;
+}
+.dev-ceiling:disabled { cursor: default; }
+.dev-ceiling:disabled::-webkit-slider-thumb { display: none; }
+.dev-ceiling:disabled::-moz-range-thumb { width: 0; border: 0; }
+
+.dev-figures {
+  display: flex; align-items: baseline; gap: .5rem;
+  font-size: .82rem; font-family: var(--mono);
+}
+.dev-fig-over { color: var(--err); }
+.dev-clear {
+  margin-left: auto; background: none; border: 0; padding: 0;
+  color: var(--accent); font: inherit; font-size: .76rem; cursor: pointer;
+  text-decoration: underline;
+}
+
+/* A device switched off keeps its row and its numbers -- it is a choice
+   with a consequence, not an absence. */
+.dev-off .dev-dot { background: transparent; border-color: var(--faint); }
+.dev-off .dev-name, .dev-off .dev-figures { color: var(--faint); }
+.dev-off .dev-fill { background: var(--bg-inset); border-right-color: var(--faint); }
+
+/* Not reachable is a state, not a deletion: the bar still shows the room
+   the device offers, because a closed laptop has not stopped having a
+   GPU. */
+.dev-absent .dev-track { opacity: .55; }
