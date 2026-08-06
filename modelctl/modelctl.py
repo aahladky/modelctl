@@ -1556,6 +1556,7 @@ def pull_model(repo_id, quant_label=None, want_mtp=True, resync=True,
         "config": config,
         "env": env,
         "enabled": True,
+        "runtime": default_runtime(),
     }
     save_profile(profile)
     generate_artifacts(profile)
@@ -1696,6 +1697,7 @@ def import_local(file_path: str, name: str | None = None, copy: bool = False,
         "config": config,
         "env": env,
         "enabled": True,
+        "runtime": default_runtime(),
     }
     save_profile(profile)
     generate_artifacts(profile)
@@ -1704,6 +1706,32 @@ def import_local(file_path: str, name: str | None = None, copy: bool = False,
     if resync:
         sync_all_backends(restart_router=True, restart_openarc=True)
     return profile
+
+
+def default_runtime() -> dict:
+    """The runtime section a new profile is born with: managed.
+
+    API-triggered loads through llama-swap are the primary launch method
+    (Aaron 2026-08-05), and only a managed launch -- llama-swap invoking
+    `modelctl _worker`, which acquires the reservation and supervises
+    the same server -- writes the record that lets a memory surface name
+    the model holding it. A profile born fixed repeats the laguna blind
+    spot: loaded, cards full, no bar able to say so.
+
+    Same shape the runtime-policy endpoint stores, so a profile born
+    managed and one flipped later are indistinguishable.
+    """
+    return {
+        "mode": "managed",
+        "objective": "balanced",
+        "pinned_plan_id": None,
+        "allow_fallback": True,
+        "allow_untested": False,
+        "minimum_context": None,
+        "maximum_cpu_bytes": None,
+        "maximum_storage_tier": 3,
+        "disabled_plan_ids": [],
+    }
 
 
 def _default_config() -> dict:
@@ -1858,6 +1886,7 @@ def cmd_pull(args):
             "config": config,
             "env": env,
             "enabled": True,
+            "runtime": default_runtime(),
         }
         save_profile(profile)
         generate_artifacts(profile)

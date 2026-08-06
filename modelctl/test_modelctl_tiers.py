@@ -947,6 +947,55 @@ class TestSelectionLaunchLadder(unittest.TestCase):
             remote_rungs=[], log=logged.append)
         return plans, logged
 
+    def test_the_ladder_carries_the_binarys_live_capabilities(self):
+        """Capabilities describe the BINARY this launch will exec, not
+        the machine: the stored snapshot's copy can predate a binary
+        change, and build_server_args fails experimental flags closed on
+        it -- live on 2026-08-05, managed laguna would have launched
+        without the expert-cache flags its direct artifact carries."""
+        import modelctl
+        import modelctl_plans
+        caps = {"features": {"moe_weight_transfer_cache": True}}
+        received = []
+
+        def fake(_profile, _selection, **kw):
+            received.append(kw.get("capabilities"))
+            return self._plan("stored")
+        with mock.patch.object(modelctl, "_capabilities_for_profile",
+                               return_value=caps) as probe:
+            with mock.patch.object(modelctl_plans,
+                                   "launch_plan_for_selection",
+                                   side_effect=fake):
+                self._ladder()
+        self.assertTrue(received)
+        self.assertTrue(all(c is caps for c in received), received)
+        # probe=True, not the cache-only default: the cache is keyed by
+        # the binary's content hash, so a fresh rebuild is cold exactly
+        # when this path needs the truth.
+        self.assertTrue(probe.call_args.kwargs.get("probe"),
+                        probe.call_args)
+
+    def test_a_failed_probe_degrades_to_the_snapshots_capabilities(self):
+        """A binary that cannot be probed must not kill the launch; the
+        probe itself never raises (its contract is None on failure), the
+        stored copy is the honest fallback, and the log says so."""
+        import modelctl
+        import modelctl_plans
+        received = []
+
+        def fake(_profile, _selection, **kw):
+            received.append(kw.get("capabilities"))
+            return self._plan("stored")
+        with mock.patch.object(modelctl, "_capabilities_for_profile",
+                               return_value=None):
+            with mock.patch.object(modelctl_plans,
+                                   "launch_plan_for_selection",
+                                   side_effect=fake):
+                _plans, logged = self._ladder()
+        self.assertTrue(received)
+        self.assertTrue(all(c is None for c in received), received)
+        self.assertTrue(any("capabilities" in m for m in logged), logged)
+
     def test_the_stored_selection_is_tried_first(self):
         with self._stub_plans(self._plan("stored"), self._plan("degraded")):
             plans, _ = self._ladder()

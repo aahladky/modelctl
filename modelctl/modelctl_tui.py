@@ -524,6 +524,11 @@ class SummaryScreen(Screen):
             "mtp_path": (state.mtp_choice or {}).get("local_path"),
             "config": state.config,
             "env": modelctl.capture_env_passthrough(),
+            "enabled": True,
+            # The fourth profile-birth site (review, 2026-08-05): every
+            # new profile launches managed, or an API-triggered load
+            # writes no reservation and no bar can name it.
+            "runtime": modelctl.default_runtime(),
         }
         captured = io.StringIO()
         saved = False

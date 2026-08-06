@@ -33,6 +33,22 @@ class ImportLocalBase(unittest.TestCase):
             self.addCleanup(p.stop)
 
 
+class TestNewProfilesAreBornManaged(ImportLocalBase):
+    def test_an_imported_profile_launches_through_the_worker(self):
+        """API-triggered loads through llama-swap are the primary launch
+        method (Aaron 2026-08-05), and only a managed launch writes the
+        reservation that lets a memory surface name the model holding
+        it. A profile born fixed repeats the laguna blind spot."""
+        d = self.root / "downloads"
+        model = _gguf(d / "llama-3-8b-Q4_K_M.gguf")
+        profile = modelctl.import_local(str(model), name="mgd", resync=False)
+        self.assertEqual(profile["runtime"]["mode"], "managed")
+        # The same shape the runtime-policy endpoint stores, so a profile
+        # born managed and one flipped later are indistinguishable.
+        self.assertEqual(profile["runtime"]["maximum_storage_tier"], 3)
+        self.assertTrue(profile["runtime"]["allow_fallback"])
+
+
 class TestCompanionOwnership(ImportLocalBase):
     def test_foreign_mmproj_is_not_adopted(self):
         # A flat downloads directory holding two unrelated models.

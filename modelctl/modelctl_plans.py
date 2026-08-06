@@ -1108,6 +1108,32 @@ def plans_for_selection_launch(profile, selection, policy, hardware=None,
     log = log or (lambda _message: None)
     resolve = resolve_inputs or modelctl.resolve_planning_inputs
     name = profile.get("name", "this model")
+    # Capabilities describe the BINARY this launch is about to exec, not
+    # the machine, so they are the one input that must NOT come from the
+    # stored snapshot: laguna's build-sycl-rpc supports the expert cache
+    # while its snapshot's copy said nothing did, and build_server_args
+    # fails experimental flags closed -- a managed launch would silently
+    # drop the cache flags the direct artifact carries (2026-08-05).
+    #
+    # probe=True, not the cache-only default: the cache is keyed by the
+    # binary's content hash, so a freshly rebuilt binary is exactly the
+    # launch whose cache entry is cold -- reading only the cache would
+    # silently fall back to the stale snapshot on the case this exists
+    # for (review, 2026-08-05). This is a launch-artifact path, which is
+    # what the probe's own contract says probe=True is for; the result
+    # is cached for every later read. None (unprobeable binary) falls
+    # back to the snapshot's copy inside launch_plan_for_selection.
+    #
+    # Deliberate split, not an oversight: the TIER plan underneath still
+    # spends the stored snapshot's capabilities (placement must not
+    # drift with a probe), while the claim and argv spend the live ones.
+    # The admission/degradation loop in _make_plan re-derives the claim
+    # under the live copy and shrinks to fit, so the split cannot
+    # over-admit; it can only size the cache more honestly.
+    live_caps = modelctl._capabilities_for_profile(profile, probe=True)
+    if live_caps is None:
+        log("the binary's capabilities could not be probed; "
+            "experimental flags follow the recorded snapshot")
     plans, seen = [], set()
     for refresh in (False, True):
         if refresh and not policy.allow_fallback:
@@ -1120,7 +1146,8 @@ def plans_for_selection_launch(profile, selection, policy, hardware=None,
         plan = launch_plan_for_selection(profile, selection, hardware=hardware,
                                          inputs=inputs,
                                          remote_rungs=remote_rungs,
-                                         layout=layout)
+                                         layout=layout,
+                                         capabilities=live_caps)
         if plan is None:
             continue
         # The same layout twice is a wasted launch attempt, not a rung: it

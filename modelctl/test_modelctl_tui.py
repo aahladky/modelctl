@@ -779,6 +779,33 @@ class TestSummaryScreen(unittest.IsolatedAsyncioTestCase):
                 status = app.screen.query_one("#summary-status", Static)
                 self.assertIn("model", str(status.render()))
 
+    async def test_the_wizard_births_a_managed_profile(self):
+        """The fourth profile-birth site (review, 2026-08-05): a profile
+        born fixed launches without a reservation and repeats the laguna
+        blind spot. The wizard must match the other three sites."""
+        app = PullWizardApp()
+        with mock.patch("modelctl_tui.modelctl.save_profile") as mock_save, \
+             mock.patch("modelctl_tui.modelctl.generate_artifacts", return_value=True), \
+             mock.patch("modelctl_tui.modelctl.sync_all_backends"), \
+             mock.patch("modelctl_tui.modelctl.sync_hermes_custom_providers"), \
+             mock.patch("modelctl_tui.modelctl.capture_env_passthrough", return_value=[]):
+            async with app.run_test() as pilot:
+                app.state = WizardState(
+                    repo_id="repo/x",
+                    quant_group={"label": "model-Q4_K_M",
+                                 "files": ["model-Q4_K_M.gguf"]},
+                    profile_name="model",
+                    model_path="/models/model-Q4_K_M.gguf",
+                    config={"ctx": "32768"},
+                )
+                await app.push_screen(SummaryScreen())
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                profile = mock_save.call_args.args[0]
+                self.assertEqual(profile["runtime"]["mode"], "managed")
+                self.assertTrue(profile["enabled"])
+
     async def test_shows_warnings_if_any_were_collected(self):
         app = PullWizardApp()
         with mock.patch("modelctl_tui.modelctl.save_profile"), \
@@ -805,9 +832,9 @@ class TestSummaryScreen(unittest.IsolatedAsyncioTestCase):
     async def test_profile_dict_matches_cmd_pull_shape(self):
         # Regression guard for the profile assembly itself: same field set
         # cmd_pull builds (name, repo_id, file, model_path, mmproj_path,
-        # mtp_path, config, env), with mmproj/mtp local_path pulled from
-        # DownloadScreen's mmproj_choice/mtp_choice (Task 9), not the bare
-        # repo filename.
+        # mtp_path, config, env, enabled, runtime), with mmproj/mtp
+        # local_path pulled from DownloadScreen's mmproj_choice/mtp_choice
+        # (Task 9), not the bare repo filename.
         app = PullWizardApp()
         captured = {}
 
@@ -844,6 +871,8 @@ class TestSummaryScreen(unittest.IsolatedAsyncioTestCase):
                         "mtp_path": "/models/model-mtp.gguf",
                         "config": {"ctx": "32768"},
                         "env": ["FOO=bar"],
+                        "enabled": True,
+                        "runtime": modelctl.default_runtime(),
                     },
                 )
 
