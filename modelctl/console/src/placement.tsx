@@ -20,7 +20,8 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 
 import {
-  ApiError, applyPlacement, fetchAdoptPin, fetchPlacement, fmtGiB,
+  ApiError, applyPlacement, fetchAdoptPin, fetchJob, fetchPlacement,
+  fmtGiB,
 } from "./lib/api";
 import { DeviceRow } from "./lib/devicebar";
 import { ModelShare } from "./lib/modelshare";
@@ -122,13 +123,54 @@ export function Placement({ name }: { name: string }) {
     preview(updateChoice(sel, key, patch));
   }
 
+  /* The apply is a job; "applied" is only true once it lands. Watch the
+     one job to its end and then re-read, so the screen's "this is what
+     is applied" claim comes back true on its own instead of waiting for
+     a page reload (review, 2026-08-05). Bounded: a job that is still
+     running after a minute keeps its toast promise and the screen keeps
+     saying "previewing". */
+  async function watchApply(jobId: string) {
+    for (let i = 0; i < 30 && alive.current; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      if (!alive.current) return;
+      let status = "";
+      try {
+        status = (await fetchJob(jobId)).status;
+      } catch {
+        continue;
+      }
+      if (status === "queued" || status === "running") continue;
+      if (!alive.current) return;
+      if (status !== "done") {
+        toast("err", `the apply ${status}`,
+              `job ${jobId} — the record is on jobs & logs`);
+        return;
+      }
+      try {
+        const bare = await fetchPlacement(name, {});
+        if (!alive.current) return;
+        const applied = bare.applied_selection ?? {};
+        setSel(applied);
+        setView(Object.keys(applied).length
+          ? await fetchPlacement(name, applied)
+          : bare);
+        toast("ok", "placement applied", "this is what runs now");
+      } catch {
+        toast("ok", "placement applied",
+              "re-open the screen to see it as applied");
+      }
+      return;
+    }
+  }
+
   async function apply(accept: boolean) {
     setApplying(true);
     try {
       const r = await applyPlacement(name, sel, accept, fresh.current);
       setGate(null);
       toast("ok", "placement queued",
-            `job ${r.job_id} — the applied selection updates when it lands`);
+            `job ${r.job_id} — this screen updates when it lands`);
+      void watchApply(r.job_id);
     } catch (e) {
       const gated = e instanceof ApiError && e.status === 409
         && (e.body as { gate?: Gate }).gate;

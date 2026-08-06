@@ -30,6 +30,7 @@ import { pct } from "./lib/device";
 import { ModelShare } from "./lib/modelshare";
 import { modelShares, stackBars } from "./lib/stack";
 import type { StackBar } from "./lib/stack";
+import { useStream } from "./lib/stream";
 import { troubles } from "./lib/troubles";
 import type { TroubleItem } from "./lib/troubles";
 import type { FleetView, JobRow, ModelRow } from "./lib/types";
@@ -267,17 +268,33 @@ export function Home() {
   const [jobs, setJobs] = useState<JobRow[]>([]);
   const [fleet, setFleet] = useState<FleetView | null>(null);
   const [failed, setFailed] = useState<string>("");
+  const { tick, stale, lastAt, retryIn } = useStream();
 
   useEffect(() => {
     let live = true;
     /* Each source is awaited on its own: one that is down must not blank
-       the two that are up. */
+       the two that are up. The first paint comes from these; every
+       paint after comes from the tick below. */
     fetchModels().then((m) => { if (live) setModels(m); })
                  .catch((e) => { if (live) setFailed(String(e)); });
     fetchJobs().then((j) => { if (live) setJobs(j); }).catch(() => {});
     fetchFleet().then((f) => { if (live) setFleet(f); }).catch(() => {});
     return () => { live = false; };
   }, []);
+
+  /* The tick already carries every model and job row, pushed; the fleet
+     (held bytes, holder names, presence) is not on it, so that one is
+     re-read per tick -- a local read that opens no socket. While the
+     stream is down nothing overwrites the last-known picture; the
+     staleness band below says how old it is instead. */
+  useEffect(() => {
+    if (!tick) return;
+    let live = true;
+    setModels(tick.models);
+    setJobs(tick.jobs);
+    fetchFleet().then((f) => { if (live) setFleet(f); }).catch(() => {});
+    return () => { live = false; };
+  }, [tick]);
 
   if (failed) {
     return (
@@ -291,8 +308,21 @@ export function Home() {
   }
   const bars = fleet ? stackBars(fleet) : [];
   const holdingsError = String(fleet?.errors?.holdings ?? "");
+  const asOf = lastAt
+    ? new Date(lastAt).toLocaleTimeString([], { hour: "2-digit",
+                                                minute: "2-digit" })
+    : "";
   return (
     <>
+      {stale
+        ? <div class="widget warnband">
+            <p class="sub">
+              live updates dropped — showing the stack
+              {asOf ? ` as of ${asOf}` : " from page open"};{" "}
+              {retryIn ? `retrying in ${retryIn}s` : "reconnecting…"}
+            </p>
+          </div>
+        : null}
       <Trouble items={troubles(models, jobs, fleet, Date.now() / 1000)} />
       <Machine bars={bars} holdingsError={holdingsError} />
       <Serving models={models} bars={bars} fleetReady={fleet != null} />
