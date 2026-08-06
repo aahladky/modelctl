@@ -20,7 +20,9 @@
  * runtime DB answered, null when it could not be read. Null renders as
  * "unknown", never as zero -- zero is a claim.
  */
-import type { FleetDeviceRow, FleetNodeRow, FleetView } from "./types";
+import type {
+  FleetDeviceRow, FleetNodeRow, FleetView, GpuRow, RamRow,
+} from "./types";
 import type { Share } from "./modelshare";
 
 export interface Holder {
@@ -46,6 +48,12 @@ export interface StackBar {
   usable: number;
   /* What the hardware has. */
   capacity: number;
+  /* Driver-reported bytes in use right now, from the telemetry tick.
+     A MEASUREMENT, not an attribution: it includes the desktop, and it
+     includes a model that wrote no reservation -- which is exactly why
+     it exists (laguna, 2026-08-05: loaded, card full, holdings empty).
+     null = no reading for this device (remote, or no tick yet). */
+  usedBytes: number | null;
   state: string;
   detail: string;
 }
@@ -85,6 +93,7 @@ function barOf(node: FleetNodeRow, row: FleetDeviceRow): StackBar {
     freeBytes: freeOf(row, heldBytes),
     usable: row.budget_bytes,
     capacity: row.total_bytes || row.ceiling_bytes,
+    usedBytes: null,
     state: node.presence.state,
     detail: node.presence.detail,
   };
@@ -99,6 +108,32 @@ export function stackBars(fleet: FleetView): StackBar[] {
   return fleet.nodes
     .filter((n) => n.enabled)
     .flatMap((n) => n.devices.map((d) => barOf(n, d)));
+}
+
+/* The telemetry tick's driver readings, written onto the local bars
+   that match by device name. Remote devices have no local driver and
+   stay null -- unknown, not zero. Returns new bars; never mutates.
+
+   A GPU's free-to-plan is also CLAMPED by the driver's free bytes: the
+   budget is a policy bound (limit_pct minus reserve) that knows nothing
+   about a launch that wrote no reservation, so with laguna filling the
+   card it read "28.7 free" over a strip showing 4 left (live,
+   2026-08-05). The gate admits against driver-free; the bar must not
+   promise more than the gate would. RAM needs no clamp -- its budget
+   is already live free-minus-reserve. */
+export function withUsage(bars: StackBar[], gpus: GpuRow[] | null,
+                          ram: RamRow | null): StackBar[] {
+  return bars.map((bar) => {
+    if (!bar.local) return bar;
+    if (bar.kind === "ram") {
+      return ram == null ? bar : { ...bar, usedBytes: ram.used_bytes };
+    }
+    const gpu = (gpus ?? []).find((g) => g.device === bar.key);
+    if (gpu == null) return bar;
+    const freeBytes = Math.max(0, Math.min(
+      bar.freeBytes ?? Number.POSITIVE_INFINITY, gpu.free_bytes));
+    return { ...bar, usedBytes: gpu.used_bytes, freeBytes };
+  });
 }
 
 export interface ModelSharesView {

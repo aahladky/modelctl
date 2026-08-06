@@ -665,6 +665,18 @@ button.busy { opacity: .6; cursor: progress; }
 .bar-swatch-withheld {
   background: var(--bg-inset); border: 1px solid var(--faint);
 }
+.bar-swatch-used {
+  background: transparent; border-bottom: 3px solid var(--faint);
+  border-radius: 0; height: 7px;
+}
+
+/* The driver's reading, along the base of the track: a measurement of
+   the whole machine, deliberately NOT the held fill's substance -- it
+   includes the desktop and any launch that wrote no reservation. */
+.stack-used {
+  position: absolute; bottom: 0; left: 0; height: 4px;
+  background: var(--faint); opacity: .8;
+}
 
 /* The accessible text for a bar whose visuals are aria-hidden. */
 .sr-only {

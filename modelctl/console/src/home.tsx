@@ -28,11 +28,12 @@ import {
 } from "./lib/api";
 import { pct } from "./lib/device";
 import { ModelShare } from "./lib/modelshare";
-import { modelShares, stackBars } from "./lib/stack";
+import { modelShares, stackBars, withUsage } from "./lib/stack";
 import type { StackBar } from "./lib/stack";
 import { useStream } from "./lib/stream";
 import { troubles } from "./lib/troubles";
 import type { TroubleItem } from "./lib/troubles";
+import { PlacementChips } from "./lib/ui";
 import type { FleetView, JobRow, ModelRow } from "./lib/types";
 
 function Trouble({ items }: { items: TroubleItem[] }) {
@@ -88,6 +89,9 @@ function StackRow({ bar }: { bar: StackBar }) {
     .map((h) => `${h.profile} ${fmtGiB(h.bytes)}`)
     .join(", ");
   const withheld = bar.capacity - (held ?? 0) - (free ?? 0);
+  const usedNote = bar.usedBytes != null
+    ? `; ${fmtGiB(bar.usedBytes)} GiB in use by the machine as a whole`
+    : "";
   const spoken = (held == null
     ? `what is held could not be read; ${free == null
         ? "" : `${fmtGiB(free)} GiB free to plan, `}${fmtGiB(bar.capacity)} GiB fitted`
@@ -96,7 +100,8 @@ function StackRow({ bar }: { bar: StackBar }) {
       + `${fmtGiB(bar.capacity)} GiB fitted`)
     /* The legend names "withheld" for sighted users; the spoken row
        must not know less. */
-    + (withheld > 0 ? `; ${fmtGiB(withheld)} GiB withheld by policy` : "");
+    + (withheld > 0 ? `; ${fmtGiB(withheld)} GiB withheld by policy` : "")
+    + usedNote;
   /* The right edge only IS capacity when nothing overflows past it, and
      the number only fits when some withheld region exists to hold it --
      drawn over a labeled segment it collides and lies. */
@@ -117,6 +122,14 @@ function StackRow({ bar }: { bar: StackBar }) {
       </div>
       <span class="sr-only">{spoken}</span>
       <div class="dev-track" aria-hidden="true" title={spoken}>
+        {/* The driver's own reading, as a strip along the base: a
+            measurement that includes the desktop and any launch that
+            wrote no reservation. It shows a full card even when nothing
+            attributes the fullness -- the laguna case. */}
+        {bar.usedBytes != null && bar.usedBytes > 0
+          ? <div class="stack-used"
+                 style={`width:${pct(bar.usedBytes, span)}%`} />
+          : null}
         {held != null && held > 0
           ? <div class="stack-held" style={`width:${heldPct}%`}>
               <span class="bar-num bar-num-held">
@@ -147,8 +160,9 @@ function StackRow({ bar }: { bar: StackBar }) {
   );
 }
 
-function Machine({ bars, holdingsError }:
-                 { bars: StackBar[]; holdingsError: string }) {
+function Machine({ bars, holdingsError, unattributed }:
+                 { bars: StackBar[]; holdingsError: string;
+                   unattributed: string[] }) {
   if (!bars.length) return null;
   return (
     <div class="widget">
@@ -163,10 +177,25 @@ function Machine({ bars, holdingsError }:
             <span class="bar-swatch bar-swatch-free" />free to plan</span>
           <span class="bar-key">
             <span class="bar-swatch bar-swatch-withheld" />withheld</span>
+          <span class="bar-key">
+            <span class="bar-swatch bar-swatch-used" />in use (driver)</span>
         </span>
       </div>
       {holdingsError
         ? <p class="sub">what is held could not be read — {holdingsError}</p>
+        : null}
+      {unattributed.length
+        /* The one sentence that connects a full card to its cause when
+           holdings cannot: an unmanaged launch (llama-swap invoking
+           llama-server directly) writes no reservation, so the "in
+           use" strip includes it but no bar can put its name on it. */
+        ? <p class="sub">
+            {unattributed.join(", ")} {unattributed.length === 1
+              ? "is running without a reservation — the driver's "
+              : "are running without reservations — the driver's "}
+            "in use" includes {unattributed.length === 1 ? "it" : "them"},
+            but no bar can name {unattributed.length === 1 ? "it" : "them"}
+          </p>
         : null}
       {bars.map((b) => <StackRow key={b.key} bar={b} />)}
     </div>
@@ -200,11 +229,14 @@ function ShareOrWhy({ m, bars, fleetReady }:
     return <p class="sub">its memory cannot be attributed — what models
                           hold could not be read</p>;
   }
+  /* Where its config puts it, as chips -- intent, clearly not
+     measurement; the machine section's note says why no bar names it. */
   return (
-    <p class="sub">
-      where it sits: {m.placement || "not recorded"} — this launch wrote
-      no reservation, so its memory cannot be attributed here
-    </p>
+    <>
+      <PlacementChips summary={m.placement_summary}
+                      fallback={m.placement || "placement not recorded"} />
+      <p class="sub">runs without a reservation, so no bar names it</p>
+    </>
   );
 }
 
@@ -306,8 +338,19 @@ export function Home() {
       </div>
     );
   }
-  const bars = fleet ? stackBars(fleet) : [];
+  const bars = withUsage(fleet ? stackBars(fleet) : [],
+                         tick?.gpus ?? null, tick?.ram ?? null);
   const holdingsError = String(fleet?.errors?.holdings ?? "");
+  /* Running models whose holdings answer is a readable, complete zero:
+     those genuinely wrote no reservation. A partial read must not make
+     that claim. */
+  const unattributed = fleet
+    ? models.filter((m) => {
+        if (!m.running) return false;
+        const view = modelShares(m.name, bars);
+        return view.shares.length === 0 && !view.partial;
+      }).map((m) => m.name)
+    : [];
   const asOf = lastAt
     ? new Date(lastAt).toLocaleTimeString([], { hour: "2-digit",
                                                 minute: "2-digit" })
@@ -324,7 +367,8 @@ export function Home() {
           </div>
         : null}
       <Trouble items={troubles(models, jobs, fleet, Date.now() / 1000)} />
-      <Machine bars={bars} holdingsError={holdingsError} />
+      <Machine bars={bars} holdingsError={holdingsError}
+               unattributed={unattributed} />
       <Serving models={models} bars={bars} fleetReady={fleet != null} />
       <Ready models={models} />
     </>

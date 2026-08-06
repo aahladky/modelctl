@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { modelShares, stackBars } from "./stack.ts";
+import { modelShares, stackBars, withUsage } from "./stack.ts";
 import type { FleetView } from "./types.ts";
 
 const GIB = 2 ** 30;
@@ -167,6 +167,70 @@ test("an unreadable device makes the share view partial, not smaller", () => {
   const view = modelShares("q122b", stackBars(f));
   assert.equal(view.partial, true);
   assert.equal(view.shares.length, 1);
+});
+
+test("driver usage lands on the matching local bar, by its own name", () => {
+  /* The laguna case (2026-08-05): an unmanaged launch writes no
+     reservation, so holdings are empty while the card is visibly full.
+     The driver's used bytes are the fact that fills that blind spot --
+     as usage, never as attribution. */
+  const f = fleet([node({ devices: [
+    device(),
+    device({ name: "RAM", kind: "ram", admission_key: "RAM",
+             budget_bytes: 15 * GIB }),
+  ] })]);
+  const bars = withUsage(stackBars(f),
+                         [{ device: "SYCL0", name: "B70",
+                            total_bytes: 32 * GIB, free_bytes: 4 * GIB,
+                            used_bytes: 28 * GIB }],
+                         { total_bytes: 31 * GIB,
+                           available_bytes: 16 * GIB,
+                           used_bytes: 15 * GIB });
+  assert.equal(bars[0].usedBytes, 28 * GIB);
+  assert.equal(bars[1].usedBytes, 15 * GIB);
+});
+
+test("a gpu's free-to-plan never promises more than the driver's free", () => {
+  /* The budget is policy; an unmanaged launch is invisible to it. The
+     gate admits against driver-free, so the bar must not offer room
+     the gate would refuse. */
+  const f = fleet([node()]);
+  const bars = withUsage(stackBars(f),
+                         [{ device: "SYCL0", name: "B70",
+                            total_bytes: 32 * GIB,
+                            free_bytes: 4 * GIB,
+                            used_bytes: 28 * GIB }], null);
+  assert.equal(bars[0].freeBytes, 4 * GIB);
+});
+
+test("a gpu with unknown held still gets the driver's free as its bound", () => {
+  const f = fleet([node({ devices: [device({
+    held: undefined, held_bytes: undefined,
+  })] })]);
+  const bars = withUsage(stackBars(f),
+                         [{ device: "SYCL0", name: "B70",
+                            total_bytes: 32 * GIB,
+                            free_bytes: 4 * GIB,
+                            used_bytes: 28 * GIB }], null);
+  assert.equal(bars[0].freeBytes, 4 * GIB);
+});
+
+test("a device the driver did not report reads unknown usage, not zero", () => {
+  const f = fleet([
+    node(),
+    node({ name: "ph16-71-cpu0", location: "remote" as const,
+           devices: [device({ name: "CPU",
+                              admission_key: "RPC:ph16-71-cpu0:CPU" })] }),
+  ]);
+  const bars = withUsage(stackBars(f), [], null);
+  assert.equal(bars[0].usedBytes, null);
+  assert.equal(bars[1].usedBytes, null);
+});
+
+test("no tick at all leaves usage unknown everywhere", () => {
+  const f = fleet([node()]);
+  const bars = withUsage(stackBars(f), null, null);
+  assert.equal(bars[0].usedBytes, null);
 });
 
 test("a model holding nothing has no shares, and unknown is not a share", () => {
