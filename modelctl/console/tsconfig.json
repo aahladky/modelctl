@@ -10,6 +10,12 @@
     "noUnusedParameters": true,
     "noEmit": true,
     "isolatedModules": true,
+    // So a lib module a test loads directly can name its imports the way
+    // node resolves them: `node --test` runs these files raw, with no
+    // bundler to guess an extension, so an extensionless RUNTIME import
+    // inside a tested module fails at resolve time. Legal under noEmit,
+    // and vite resolves an explicit .ts either way.
+    "allowImportingTsExtensions": true,
     "skipLibCheck": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"]
   },

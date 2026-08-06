@@ -2,8 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  CEILING_STEP_BYTES, barMarks, ceilingFromFraction, clampCeiling,
-  deviceNote, isOver, pct, trackSpan,
+  CEILING_STEP_BYTES, barMarks, ceilingFromFraction, ceilingMax,
+  clampCeiling, deviceNote, isOver, pct, trackSpan,
 } from "./device.ts";
 
 const GIB = 2 ** 30;
@@ -42,7 +42,8 @@ test("a device with no budget is never reported as over", () => {
 
 test("a device with nothing to draw yields zeros, not NaN", () => {
   const marks = barMarks({ committed: 0, usable: 0, capacity: 0 }, null);
-  assert.deepEqual(marks, { committed: 0, usable: 0, ceiling: null });
+  assert.deepEqual(marks,
+                   { committed: 0, usable: 0, handle: 0, ceiling: null });
   assert.equal(pct(1, 0), 0);
 });
 
@@ -103,4 +104,63 @@ test("a pin mismatch reads as up-but-wrong, never as merely absent", () => {
      ggml builds gives wrong numbers rather than an error. */
   assert.equal(deviceNote("", "PIN_MISMATCH", ""),
                "up, but built from a different commit");
+});
+
+/* ---- the ceiling handle's own maximum ---- */
+
+test("the slider's declared maximum is a value the handle can land on", () => {
+  /* The bug: the range input took max={usable}, but a budget is almost
+     never a multiple of the step, so the browser stops the thumb at the
+     last reachable notch. Dragging fully right then read "capped at
+     28.5 of 28.7" -- the control at its maximum reporting less than its
+     own maximum. */
+  const usable = 30818068070;          // SYCL0's real budget, off-grid
+  const max = ceilingMax(usable);
+  assert.equal(clampCeiling(max, usable), max);   // already on the grid
+  assert.ok(max <= usable);
+});
+
+test("that maximum is the LARGEST reachable notch, not merely a safe one", () => {
+  const usable = 30818068070;
+  assert.ok(usable - ceilingMax(usable) < CEILING_STEP_BYTES);
+  assert.equal(ceilingMax(usable), 30601641984);  // 28.5 GiB exactly
+});
+
+test("a budget already on the grid is its own maximum", () => {
+  /* No silent step down: 28 GiB is expressible, so it must survive. */
+  assert.equal(ceilingMax(28 * GIB), 28 * GIB);
+});
+
+test("a device with no room has a maximum of nothing, not a negative", () => {
+  assert.equal(ceilingMax(0), 0);
+});
+
+test("the handle's track is exactly as wide as the values it can express", () => {
+  /* Width and value range have to describe the same quantity. Declaring
+     max=ceilingMax while still sizing the input to `usable` made the
+     thumb draw every ceiling further right than it sat -- at the top of
+     its travel it landed exactly ON the dashed limit line while reading
+     one step below it, which is the same lie the max was changed to
+     stop. */
+  const bar = { committed: 27.4 * GIB, usable: 30818068070,
+                capacity: 34242297856 };
+  const marks = barMarks(bar, null);
+  assert.equal(marks.handle, pct(ceilingMax(bar.usable), bar.capacity));
+  assert.ok(marks.handle < marks.usable);
+});
+
+test("a ceiling draws where it actually sits, right up to the last notch", () => {
+  const bar = { committed: 27.4 * GIB, usable: 30818068070,
+                capacity: 34242297856 };
+  const top = ceilingMax(bar.usable);
+  /* The handle at the end of its travel and the end of the track it was
+     given are the same place -- that is what "draws where it sits"
+     means at the only point the two could disagree. */
+  assert.equal(barMarks(bar, top).ceiling, barMarks(bar, null).handle);
+});
+
+test("a budget on the grid gives the handle the whole usable track", () => {
+  const bar = { committed: 4 * GIB, usable: 28 * GIB, capacity: 32 * GIB };
+  const marks = barMarks(bar, null);
+  assert.equal(marks.handle, marks.usable);
 });

@@ -268,6 +268,26 @@ test("a model's streamed bytes come back keyed by its own name", () => {
   assert.equal(streamedBytes(f, "laguna"), 18 * GIB);
 });
 
+test("a profile named after an Object member reads zero, not a function", () => {
+  /* The map arrives from JSON.parse, so it inherits Object.prototype
+     and a bare lookup on "constructor" answers with a function. That
+     then fails every `> 0` test silently and the model renders as
+     holding nothing on disk. Profile names are operator-chosen; the
+     lookup has to answer about the map's OWN keys only. */
+  const f = { ...fleet([node()]), mmap_bytes: { laguna: 18 * GIB } };
+  for (const name of ["constructor", "toString", "hasOwnProperty",
+                      "valueOf"]) {
+    assert.equal(streamedBytes(f, name), 0, name);
+  }
+});
+
+test("a malformed streamed value reads zero rather than reaching the bar", () => {
+  const f = { ...fleet([node()]),
+              mmap_bytes: { laguna: "lots" } as unknown as
+                          Record<string, number> };
+  assert.equal(streamedBytes(f, "laguna"), 0);
+});
+
 test("a known streamed share becomes the bar's SSD tail and its spill", () => {
   /* The laguna case: 25.1 held on a card, 18 GiB addressed off the SSD.
      Without the tail the bar accounts for a fraction of the model and

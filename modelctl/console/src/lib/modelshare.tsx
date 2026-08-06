@@ -14,34 +14,12 @@
  * difference between 10 tok/s and 0.4.
  */
 import { fmtGiB } from "./api";
+/* The arithmetic lives in sharemath.ts, where the test runner can reach
+   it. This file is the picture and nothing else. */
+import { orderShares, rankOf, shownTotal } from "./sharemath";
+import type { Share } from "./sharemath";
 
-export interface Share {
-  name: string;
-  bytes: number;
-  /* VRAM | over RPC | RAM | SSD via mmap -- decides the ramp position. */
-  backing: string;
-}
-
-/* Fastest first. The order is the point: the bar reads left to right as
-   memory getting further from the compute. */
-const RANK: Record<string, number> = {
-  "VRAM": 0, "over RPC": 1, "RAM": 2, "SSD via mmap": 3,
-};
-
-export function rankOf(backing: string): number {
-  return RANK[backing] ?? 2;
-}
-
-export function orderShares(shares: Share[]): Share[] {
-  return [...shares]
-    .filter((s) => s.bytes > 0)
-    .sort((a, b) => rankOf(a.backing) - rankOf(b.backing)
-                 || b.bytes - a.bytes);
-}
-
-export function totalBytes(shares: Share[]): number {
-  return shares.reduce((sum, s) => sum + Math.max(0, s.bytes), 0);
-}
+export type { Share };
 
 /* spill is tri-state: bytes when the caller knows (the placement answer
    computes it exactly), null when it does not (home draws from live
@@ -51,7 +29,11 @@ export function totalBytes(shares: Share[]): number {
 export function ModelShare({ shares, spill }:
                            { shares: Share[]; spill: number | null }) {
   const ordered = orderShares(shares);
-  const total = totalBytes(ordered);
+  /* The sum of the parts AS DRAWN, not the exact total rounded once --
+     see sharemath.shownTotal. A header that disagreed with its own
+     legend by a tenth is the same class of defect as the one this
+     screen was rebuilt to stop. */
+  const total = shownTotal(ordered);
   const streaming = ordered.filter((s) => rankOf(s.backing) === 3);
   /* The disk is not a device, and counting it as one turns "43.2 across
      3 devices" into "61.9 across 4" -- a sentence that reads as one more
@@ -62,7 +44,7 @@ export function ModelShare({ shares, spill }:
   return (
     <div class="share">
       <div class="share-head">
-        <span class="share-total">{fmtGiB(total)} GiB</span>
+        <span class="share-total">{total.toFixed(1)} GiB</span>
         {held.length
           ? <span class="sub">
               across {held.length} device{held.length === 1 ? "" : "s"}

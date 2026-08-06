@@ -23,7 +23,7 @@
 import type {
   FleetDeviceRow, FleetNodeRow, FleetView, GpuRow, RamRow,
 } from "./types";
-import type { Share } from "./modelshare";
+import type { Share } from "./sharemath";
 
 export interface Holder {
   profile: string;
@@ -165,7 +165,14 @@ export function streamedBytes(fleet: FleetView | null,
                               profile: string): number | null {
   const map = fleet?.mmap_bytes;
   if (map == null) return null;
-  return map[profile] ?? 0;
+  /* The map comes off JSON.parse, so it inherits Object.prototype and a
+     bare lookup answers for "constructor" or "toString" with a
+     function. Profile names are operator-chosen, and a function fails
+     every `> 0` test silently -- the model would render as holding
+     nothing on disk. Typing the value covers the prototype keys and a
+     malformed payload in one check. */
+  const bytes = map[profile];
+  return typeof bytes === "number" && bytes > 0 ? bytes : 0;
 }
 
 /* Where one model's bytes sit, as shares for the model bar.

@@ -51,11 +51,20 @@ export function trackSpan(bar: DeviceBar): number {
 /* Where each mark sits on the track, as percentages of the span.
    A device with no capacity yields zeros rather than NaN: the row still
    renders, it just has no bar to fill. */
-export function barMarks(bar: DeviceBar, ceiling: number | null) {
+export function barMarks(bar: DeviceBar, ceiling: number | null,
+                         step = CEILING_STEP_BYTES) {
   const span = trackSpan(bar);
   return {
     committed: pct(bar.committed, span),
     usable: pct(bar.usable, span),
+    /* How far the ceiling handle's own track reaches -- one notch short
+       of the budget whenever the budget is off the grid. The input has
+       to be sized to THIS and not to `usable`, because a range input
+       maps its value range across its width: given the wider track it
+       drew every ceiling further right than it sat, and at the top of
+       its travel landed exactly on the dashed limit line while reading
+       one step below it. */
+    handle: pct(ceilingMax(bar.usable, step), span),
     ceiling: ceiling == null ? null : pct(ceiling, span),
   };
 }
@@ -70,6 +79,20 @@ export function clampCeiling(bytes: number, usable: number,
   if (!Number.isFinite(bytes)) return usable;
   const bounded = Math.max(0, Math.min(bytes, usable));
   return Math.floor(bounded / step) * step;
+}
+
+/* The largest ceiling the handle can actually land on.
+ *
+ * A range input with a step cannot reach a max that is not on the grid:
+ * the browser stops at the last notch below it. The slider took
+ * max={usable}, and a budget is almost never a multiple of 256 MiB, so
+ * dragging fully right read "capped at 28.5 of 28.7" -- the control at
+ * its own maximum reporting less than its own maximum. Declaring the
+ * reachable value instead costs nothing in expressiveness: a ceiling of
+ * exactly `usable` is what "clear cap" already means. */
+export function ceilingMax(usable: number,
+                           step = CEILING_STEP_BYTES): number {
+  return clampCeiling(usable, usable, step);
 }
 
 /* Pointer position (0..1 along the track) to a ceiling in bytes. The

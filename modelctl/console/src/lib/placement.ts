@@ -12,7 +12,7 @@
 import type {
   DeviceChoice, PlacedDevice, PlacementSelection,
 } from "./types";
-import type { Share } from "./modelshare";
+import type { Share } from "./sharemath";
 
 function pruned(choice: DeviceChoice): DeviceChoice | null {
   const out: DeviceChoice = {};

@@ -17,7 +17,8 @@
  * can disagree with what runs.
  */
 import {
-  CEILING_STEP_BYTES, barMarks, clampCeiling, deviceNote, isOver,
+  CEILING_STEP_BYTES, barMarks, ceilingMax, clampCeiling, deviceNote,
+  isOver,
 } from "./device";
 import { fmtGiB } from "./api";
 
@@ -72,12 +73,16 @@ export function DeviceRow(p: DeviceRowProps) {
             address. At full width its scale was 0..usable drawn across
             0..capacity, so a ceiling of "all of the budget" put its
             handle out at the hardware's edge -- the control
-            misreporting its own range. Now the handle stops on the
-            dashed line, and the withheld hardware to the right of it is
-            visibly not draggable. */}
+            misreporting its own range.
+            Both numbers come from the machine now: the max is the last
+            value a stepped input can actually land on, and the width is
+            that same value as a share of the track, so every ceiling
+            draws where it sits. The handle stops just short of the
+            dashed line whenever the budget is off the 256 MiB grid, and
+            the hardware beyond it is visibly not draggable. */}
         <input class="dev-ceiling" type="range"
-               style={`width:${marks.usable}%`}
-               min={0} max={p.usable} step={CEILING_STEP_BYTES}
+               style={`width:${marks.handle}%`}
+               min={0} max={ceilingMax(p.usable)} step={CEILING_STEP_BYTES}
                value={ceiling}
                disabled={!p.on}
                aria-label={`${p.name} ceiling`}

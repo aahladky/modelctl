@@ -246,21 +246,6 @@ def create_app(store=None, runner=None, collector=None,
     def _runtime_state():
         return _swap_client().runtime_state()
 
-    def placement_summary(profile):
-        cfg = profile.get("config", {})
-        if cfg.get("split_mode") and cfg.get("tensor_split"):
-            base = f"split {cfg['tensor_split']} ({cfg['split_mode']})"
-        else:
-            base = cfg.get("device") or "(backend default)"
-        extras = []
-        if cfg.get("fit") == "on":
-            extras.append("fit")
-        if "exps=CPU" in (cfg.get("extra") or ""):
-            extras.append("CPU experts")
-        if "-ngl" in (cfg.get("extra") or ""):
-            extras.append("partial ngl")
-        return base + (f" +{','.join(extras)}" if extras else "")
-
     # ---- health ---------------------------------------------------------
     @app.get("/healthz", response_class=PlainTextResponse)
     def healthz():
