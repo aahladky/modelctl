@@ -53,14 +53,24 @@ export function ModelShare({ shares, spill }:
   const ordered = orderShares(shares);
   const total = totalBytes(ordered);
   const streaming = ordered.filter((s) => rankOf(s.backing) === 3);
+  /* The disk is not a device, and counting it as one turns "43.2 across
+     3 devices" into "61.9 across 4" -- a sentence that reads as one more
+     card in the machine. This count is of things that HOLD; the SSD
+     share is named by the badge and the warning instead. */
+  const held = ordered.filter((s) => rankOf(s.backing) !== 3);
 
   return (
     <div class="share">
       <div class="share-head">
         <span class="share-total">{fmtGiB(total)} GiB</span>
-        <span class="sub">
-          across {ordered.length} device{ordered.length === 1 ? "" : "s"}
-        </span>
+        {held.length
+          ? <span class="sub">
+              across {held.length} device{held.length === 1 ? "" : "s"}
+            </span>
+          /* Every byte on the disk and nothing holding any of it.
+             "across 0 devices" states that as an absence; the warning
+             below states it as the fact it is. */
+          : null}
         {spill == null
           ? null
           : spill > 0

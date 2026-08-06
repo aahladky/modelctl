@@ -18,6 +18,7 @@ Hermetic: every RuntimeDB here is a throwaway file, `_pid_alive` is
 mocked where a live PID would decide, and the fleet/placement cases
 stub `RuntimeDB` so no test reads the rig's real runtime.db.
 """
+import json
 import os
 import sqlite3
 import tempfile
@@ -42,11 +43,13 @@ class HoldingsBase(unittest.TestCase):
         self.budgets = {"SYCL0": 30 * GIB, "RAM": 30 * GIB,
                         "RPC:ph16-71-cpu0:CPU": 25 * GIB}
 
-    def _hold(self, vram, ram=0, state="active", pid=None, name="holder"):
+    def _hold(self, vram, ram=0, state="active", pid=None, name="holder",
+              mmap=0):
         with mock.patch.object(modelctl_runtime, "_pid_alive",
                                return_value=True):
             res = self.rdb.acquire_reservation(
-                name, "hp", {"vram_bytes": vram, "ram_bytes": ram},
+                name, "hp", {"vram_bytes": vram, "ram_bytes": ram,
+                             "mmap_bytes": mmap},
                 self.pid + 1 if pid is None else pid, budgets=self.budgets)
         self.assertIsNotNone(res)
         if state != "pending":
@@ -129,6 +132,88 @@ class TestLiveHoldingsNameTheHolder(HoldingsBase):
         self.assertEqual(holdings, [])
 
 
+class TestLiveHoldingsCarryTheStreamedShare(HoldingsBase):
+    """The bytes a model addresses off the SSD instead of holding.
+
+    A MoE served through mmap books its CPU-side experts to `mmap_bytes`
+    with `ram_resident_bytes` 0, deliberately (modelctl_plans.py: charging
+    them as resident refuses every oversized MoE). That is right for the
+    gate and leaves the display with a model whose reservations account
+    for a fraction of it and nothing saying where the rest is. The claim
+    has always known; this fold is what lets a screen say it.
+    """
+
+    def test_the_streamed_share_rides_along_with_the_devices(self):
+        self._hold({"SYCL0": 6 * GIB}, mmap=18 * GIB, name="laguna")
+        holding = self._holdings()[0]
+        self.assertEqual(holding["devices"], {"SYCL0": 6 * GIB})
+        self.assertEqual(holding["mmap_bytes"], 18 * GIB)
+
+    def test_a_claim_that_streams_nothing_reads_as_zero_not_missing(self):
+        # Zero here is a real reading, not an absence: this model holds
+        # everything it uses. The console renders "nothing on disk" on
+        # exactly this, so it must not be guessed.
+        self._hold({"SYCL0": 6 * GIB}, name="resident")
+        self.assertEqual(self._holdings()[0]["mmap_bytes"], 0)
+
+    def test_a_holder_of_nothing_but_streamed_bytes_still_counts(self):
+        # Every expert mmap'd and no device reservation at all. Before,
+        # the empty `devices` dropped the row -- so the one model whose
+        # bytes are entirely on disk was the one model no screen could
+        # name, which is precisely backwards.
+        self._hold({}, mmap=18 * GIB, name="allstream")
+        holdings = self._holdings()
+        self.assertEqual([h["profile"] for h in holdings], ["allstream"])
+        self.assertEqual(holdings[0]["devices"], {})
+        self.assertEqual(holdings[0]["mmap_bytes"], 18 * GIB)
+
+    def test_an_unpriceable_streamed_count_reads_as_zero(self):
+        self._hold({"SYCL0": 1 * GIB}, name="messy")
+        with sqlite3.connect(self.db_path) as c:
+            c.execute("UPDATE reservations SET claim_json=? "
+                      "WHERE profile_name='messy'",
+                      ('{"vram_bytes": {"SYCL0": 1073741824},'
+                       ' "mmap_bytes": "some"}',))
+        self.assertEqual(self._holdings()[0]["mmap_bytes"], 0)
+
+    def test_a_negative_streamed_count_reads_as_zero(self):
+        self._hold({"SYCL0": 1 * GIB}, mmap=-5, name="wrong")
+        self.assertEqual(self._holdings()[0]["mmap_bytes"], 0)
+
+    def test_a_dead_owners_streamed_bytes_go_with_it(self):
+        self._hold({}, mmap=18 * GIB, name="gone")
+        self.assertEqual(self._holdings(alive=False), [])
+
+    def test_a_real_launchs_claim_reads_the_way_the_screen_needs(self):
+        """Characterisation, from the reservation laguna-s2.1 actually
+        wrote on 2026-08-05 (copied byte-for-byte off runtime.db).
+
+        Pinned because the fold reads field NAMES off a dict the planner
+        writes: rename `mmap_bytes` upstream and every other test here
+        still passes while the console silently goes back to accounting
+        for 43.2 GiB of a 61.9 GiB model.
+        """
+        self._hold({}, name="laguna-s2.1")
+        with sqlite3.connect(self.db_path) as c:
+            c.execute("UPDATE reservations SET claim_json=? "
+                      "WHERE profile_name='laguna-s2.1'",
+                      (json.dumps({
+                          "vram_bytes": {
+                              "SYCL0": 26933517312,
+                              "SYCL1": 9170343936,
+                              "RPC:ph16-71-cuda0:CUDA0": 10305404928},
+                          "ram_bytes": 0,
+                          "storage_mode": "mmap",
+                          "vram_cache_bytes": {},
+                          "ram_resident_bytes": 0,
+                          "mmap_bytes": 20094910464}),))
+        holding = self._holdings()[0]
+        # The three bars the screen drew, and the share it could not.
+        self.assertEqual(sum(holding["devices"].values()), 46409266176)
+        self.assertNotIn("RAM", holding["devices"])
+        self.assertEqual(holding["mmap_bytes"], 20094910464)
+
+
 class TestFleetRowsCarryHeld(unittest.TestCase):
     """The fleet view writes holdings onto the device rows that hold them."""
 
@@ -195,6 +280,64 @@ class TestFleetRowsCarryHeld(unittest.TestCase):
         self.assertIn("holdings", errors)
         # The row survives without the fields rather than lying with 0.
         self.assertNotIn("held_bytes", nodes[0]["devices"][0])
+
+
+class TestFleetCarriesTheStreamedShare(unittest.TestCase):
+    """Streamed bytes are per-MODEL, not per-device, so they ride the view
+    itself rather than a bar. There is no device to put them on -- that is
+    the whole point of them."""
+
+    def _node(self, keys):
+        return {"name": "rig", "location": "local", "devices": [
+            {"name": k.split(":")[-1], "admission_key": k} for k in keys]}
+
+    def _attach(self, holdings, nodes):
+        from modelctl_web import fleet as fleetview
+        rdb = mock.Mock()
+        rdb.live_holdings.return_value = holdings
+        with mock.patch.object(modelctl_runtime, "RuntimeDB",
+                               return_value=rdb):
+            return fleetview._attach_holdings(nodes)
+
+    def test_the_map_is_keyed_by_profile(self):
+        nodes = [self._node(["SYCL0"])]
+        holdings = [{"profile": "laguna", "state": "active",
+                     "devices": {"SYCL0": 6 * GIB}, "mmap_bytes": 18 * GIB}]
+        self.assertEqual(self._attach(holdings, nodes),
+                         {"laguna": 18 * GIB})
+
+    def test_a_model_streaming_nothing_stays_out_of_the_map(self):
+        # Absent means "this model streams nothing", which the console
+        # reads as a known zero. Only an unreadable DB means unknown,
+        # and that drops the whole key.
+        nodes = [self._node(["SYCL0"])]
+        holdings = [{"profile": "resident", "state": "active",
+                     "devices": {"SYCL0": 6 * GIB}, "mmap_bytes": 0}]
+        self.assertEqual(self._attach(holdings, nodes), {})
+
+    def test_a_holding_with_no_streamed_field_is_not_an_error(self):
+        # Older reservation rows predate the field entirely.
+        nodes = [self._node(["SYCL0"])]
+        holdings = [{"profile": "old", "state": "active",
+                     "devices": {"SYCL0": 6 * GIB}}]
+        self.assertEqual(self._attach(holdings, nodes), {})
+
+    def test_two_models_each_keep_their_own(self):
+        nodes = [self._node(["SYCL0"])]
+        holdings = [
+            {"profile": "a", "state": "active", "devices": {},
+             "mmap_bytes": 4 * GIB},
+            {"profile": "b", "state": "active", "devices": {},
+             "mmap_bytes": 2 * GIB},
+        ]
+        self.assertEqual(self._attach(holdings, nodes),
+                         {"a": 4 * GIB, "b": 2 * GIB})
+
+    # The matching "an unreadable DB leaves the key absent, not empty"
+    # case lives in test_console_fleet.py: asserting it means calling
+    # the real fleet_view, and only that file's base redirects the state
+    # dir and stubs the local node. Calling it from here walked Aaron's
+    # real profiles and ran five llama-server probes per run.
 
 
 class TestPlacementRowsNameTheirOwnHolding(unittest.TestCase):

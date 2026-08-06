@@ -463,10 +463,28 @@ class RuntimeDB:
             ram = claim.get("ram_bytes", 0)
             if isinstance(ram, (int, float)) and ram > 0:
                 devices["RAM"] = devices.get("RAM", 0) + int(ram)
-            if not devices:
+            # What this model addresses off the SSD instead of holding.
+            # Deliberately NOT a device entry: mmap'd weights occupy no
+            # budget anywhere (plans.py books them outside
+            # `ram_admission_bytes`, because charging them as resident
+            # refuses every oversized MoE served through mmap), and the
+            # RAM row's free-minus-reserve budget already counts those
+            # pages as reclaimable. Folding them into `devices` would put
+            # a held figure next to a budget that disagrees with it.
+            # They ride separately so a screen can say where the rest of
+            # a model is without any bar claiming to hold it.
+            streamed = claim.get("mmap_bytes", 0)
+            streamed = (int(streamed)
+                        if isinstance(streamed, (int, float)) and streamed > 0
+                        else 0)
+            # A model served entirely through mmap reserves no device at
+            # all. Dropping it here made the one model whose bytes are
+            # all on disk the one model no screen could name.
+            if not devices and not streamed:
                 continue
             holdings.append({"profile": row["profile_name"],
-                             "state": row["state"], "devices": devices})
+                             "state": row["state"], "devices": devices,
+                             "mmap_bytes": streamed})
         return holdings
 
     def pending_claims(self, exclude_pid=None):

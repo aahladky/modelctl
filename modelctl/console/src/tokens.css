@@ -472,6 +472,15 @@ button.busy { opacity: .6; cursor: progress; }
 .dev-name { font-family: var(--mono); font-size: .82rem; }
 .dev-note { color: var(--muted); font-size: .78rem; }
 .dev-note-absent { color: var(--warn); }
+/* What the device has. Lives here rather than at the bar's right edge
+   so it never has to dodge a segment label -- the rule that made it
+   dodge silently hid it on any device whose budget ran past 90% of its
+   capacity. Last in the head, so margin-left pins it right whether or
+   not an absence note sits between it and the name. */
+.dev-cap {
+  font-family: var(--mono); font-size: .78rem; color: var(--faint);
+  margin-left: auto; white-space: nowrap;
+}
 
 .dev-track {
   position: relative; height: 26px; margin: .4rem 0 .25rem;
@@ -634,7 +643,6 @@ button.busy { opacity: .6; cursor: progress; }
 }
 .bar-num-held { color: var(--accent-contrast); }
 .bar-num-free { color: var(--muted); }
-.bar-num-cap { right: 0; color: var(--faint); }
 .bar-num-unknown { color: var(--warn); left: 0; }
 
 /* The held segment for READ-ONLY bars. Deliberately not .dev-fill: that

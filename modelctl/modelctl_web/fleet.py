@@ -205,6 +205,12 @@ def _attach_holdings(nodes):
     rendering identically. Remote rows get the same treatment: an
     active model's rungs show up on the laptop device they occupy.
 
+    Returns what each model streams off the SSD instead of holding,
+    keyed by profile. That one is per-MODEL, not per-device -- there is
+    no device to put it on, which is precisely what makes those bytes
+    invisible to every bar. A profile absent from the map streams
+    nothing; the map absent altogether means we could not look.
+
     Raises on a runtime DB it cannot read; fleet_view catches and files
     it under errors["holdings"], leaving the fields ABSENT -- a zero
     here would claim "nothing is held" on the strength of not having
@@ -212,15 +218,21 @@ def _attach_holdings(nodes):
     """
     import modelctl_runtime
     per_key = {}
+    streamed = {}
     for holding in modelctl_runtime.RuntimeDB().live_holdings():
         for key, held in holding["devices"].items():
             per_key.setdefault(key, []).append(
                 {"profile": holding["profile"], "bytes": int(held)})
+        mmap_bytes = int(holding.get("mmap_bytes") or 0)
+        if mmap_bytes > 0:
+            streamed[holding["profile"]] = (
+                streamed.get(holding["profile"], 0) + mmap_bytes)
     for node in nodes:
         for row in node.get("devices") or []:
             held = per_key.get(row.get("admission_key")) or []
             row["held"] = held
             row["held_bytes"] = sum(h["bytes"] for h in held)
+    return streamed
 
 
 def night_lane_rows():
@@ -277,8 +289,11 @@ def fleet_view(now=None):
         errors["nodes"] = str(e) or "the fleet registry could not be read"
     try:
         # After every node is assembled, so a holding lands on remote
-        # rows too. On failure the fields stay absent, not zero.
-        _attach_holdings(view["nodes"])
+        # rows too. On failure the fields stay absent, not zero -- and
+        # `mmap_bytes` is only set on success for the same reason: the
+        # console renders "nothing on disk" on a known zero, which is a
+        # lie to tell about a model we could not look up.
+        view["mmap_bytes"] = _attach_holdings(view["nodes"])
     except Exception as e:
         errors["holdings"] = str(e) or "live holdings could not be read"
     try:

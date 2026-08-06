@@ -28,6 +28,7 @@ import modelctl
 import modelctl_fleet as fleet
 import modelctl_fsutil
 import modelctl_nightlane
+import modelctl_runtime
 import modelctl_tiers
 from modelctl_web import fleet as fleetview
 from modelctl_web.app import create_app
@@ -376,6 +377,38 @@ class TestReadModel(FleetConsoleBase):
         self.fleet_path.write_text("{not json")
         view = fleetview.fleet_view()
         self.assertEqual([n["location"] for n in view["nodes"]], ["local"])
+
+    def test_the_view_carries_what_each_model_streams_off_the_disk(self):
+        """Bytes no bar can hold, so they ride the view itself.
+
+        A model's mmap'd experts occupy no budget on any device -- which
+        is exactly why the home screen accounted for 43.2 GiB of a
+        61.9 GiB model and said nothing about the rest.
+        """
+        rdb = mock.Mock()
+        rdb.live_holdings.return_value = [
+            {"profile": "laguna-s2.1", "state": "active",
+             "devices": {"SYCL0": 6 * GIB}, "mmap_bytes": 18 * GIB},
+            {"profile": "resident", "state": "active",
+             "devices": {"SYCL0": 2 * GIB}, "mmap_bytes": 0},
+        ]
+        with mock.patch.object(modelctl_runtime, "RuntimeDB",
+                               return_value=rdb):
+            view = fleetview.fleet_view()
+        # Absent from the map is a reading -- "this model streams
+        # nothing" -- which is what earns the green "nothing on disk".
+        self.assertEqual(view["mmap_bytes"], {"laguna-s2.1": 18 * GIB})
+
+    def test_unreadable_holdings_leave_the_streamed_key_absent(self):
+        """Absent, never {}. An empty map says "we looked and nothing
+        streams", so the console would print "nothing on disk" over a
+        model that is entirely on disk -- on the strength of not having
+        been able to look."""
+        with mock.patch.object(fleetview, "_attach_holdings",
+                               side_effect=OSError("locked")):
+            view = fleetview.fleet_view()
+        self.assertNotIn("mmap_bytes", view)
+        self.assertIn("holdings", view["errors"])
 
     def test_night_lane_rows_are_read_only_and_carry_enabled(self):
         self.night_path.write_text(json.dumps({"version": 1, "jobs": [

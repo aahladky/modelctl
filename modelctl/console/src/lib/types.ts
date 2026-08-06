@@ -785,6 +785,13 @@ export interface FleetView {
   stale_profiles: StaleProfileRow[];
   local_pin: string;
   errors: Record<string, string>;
+  /* profile -> bytes that model addresses off the SSD rather than
+     holding. Per-MODEL and not per-device on purpose: mmap'd weights
+     occupy no budget on any row, which is exactly why no bar could show
+     them. A profile absent from the map streams nothing; the map absent
+     ALTOGETHER means holdings were unreadable (errors.holdings says so)
+     and no screen may print "nothing on disk". */
+  mmap_bytes?: Record<string, number>;
 }
 
 export interface ProbeResult {

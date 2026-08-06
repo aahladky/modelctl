@@ -28,7 +28,9 @@ import {
 } from "./lib/api";
 import { pct } from "./lib/device";
 import { ModelShare } from "./lib/modelshare";
-import { modelShares, stackBars, withUsage } from "./lib/stack";
+import {
+  modelShares, stackBars, streamedBytes, withUsage,
+} from "./lib/stack";
 import type { StackBar } from "./lib/stack";
 import { useStream } from "./lib/stream";
 import { troubles } from "./lib/troubles";
@@ -102,10 +104,6 @@ function StackRow({ bar }: { bar: StackBar }) {
        must not know less. */
     + (withheld > 0 ? `; ${fmtGiB(withheld)} GiB withheld by policy` : "")
     + usedNote;
-  /* The right edge only IS capacity when nothing overflows past it, and
-     the number only fits when some withheld region exists to hold it --
-     drawn over a labeled segment it collides and lies. */
-  const showCap = span === bar.capacity && heldPct + freePct <= 90;
 
   return (
     <div class={`dev${absent ? " dev-absent" : ""}`}>
@@ -119,6 +117,17 @@ function StackRow({ bar }: { bar: StackBar }) {
               {bar.detail ? ` — ${bar.detail}` : ""}
             </span>
           : null}
+        {/* What the device has, in the head rather than at the bar's
+            right edge. Inside the track it had to dodge the segment
+            labels, and the test that made it dodge -- held+free within
+            90% of capacity -- is identically budget/capacity, a fixed
+            property of the device. So ph16-71-cuda0 (budget = ceiling
+            minus 100 MiB, 90.54%) showed no capacity on any model ever,
+            while SYCL0 and SYCL1 kept theirs by fractions of a byte and
+            would have lost them the moment the VRAM limit rose above
+            90%. Out here it collides with nothing and every row has
+            one. */}
+        <span class="dev-cap">{fmtGiB(bar.capacity)} GiB</span>
       </div>
       <span class="sr-only">{spoken}</span>
       <div class="dev-track" aria-hidden="true" title={spoken}>
@@ -152,9 +161,6 @@ function StackRow({ bar }: { bar: StackBar }) {
           ? <span class="bar-num bar-num-unknown">held unreadable</span>
           : null}
         <div class="dev-limit" style={`left:${heldPct + freePct}%`} />
-        {showCap
-          ? <span class="bar-num bar-num-cap">{fmtGiB(bar.capacity)}</span>
-          : null}
       </div>
     </div>
   );
@@ -207,14 +213,24 @@ function Machine({ bars, holdingsError, unattributed }:
    and its holdings were readable; asserting it while the fleet is still
    loading, or when holdings could not be read, is a confident lie about
    a gap in our own reading -- the exact failure the null-spill rule
-   above exists to prevent. */
-function ShareOrWhy({ m, bars, fleetReady }:
-                    { m: ModelRow; bars: StackBar[]; fleetReady: boolean }) {
-  const { shares, partial } = modelShares(m.name, bars);
+   above exists to prevent.
+
+   The spill is no longer hard-null. It was, while the only thing home
+   could see was holdings, and streamed bytes are precisely the ones
+   nothing holds -- so the screen accounted for 43.2 GiB of a model and
+   said nothing about the 18.7 GiB on the disk (Aaron, 2026-08-05:
+   "this doesn't add up"). The fleet now carries that figure per model,
+   and streamedBytes keeps it tri-state, so null still means "we did
+   not get to look" and never "there is nothing there". */
+function ShareOrWhy({ m, bars, fleet }:
+                    { m: ModelRow; bars: StackBar[];
+                      fleet: FleetView | null }) {
+  const { shares, partial, spill } =
+    modelShares(m.name, bars, streamedBytes(fleet, m.name));
   if (shares.length) {
     return (
       <>
-        <ModelShare shares={shares} spill={null} />
+        <ModelShare shares={shares} spill={spill} />
         {partial
           ? <p class="sub">may be incomplete — what is held on some
                            devices could not be read</p>
@@ -222,7 +238,7 @@ function ShareOrWhy({ m, bars, fleetReady }:
       </>
     );
   }
-  if (!fleetReady) {
+  if (fleet == null) {
     return <p class="sub">reading what it holds…</p>;
   }
   if (partial) {
@@ -240,9 +256,9 @@ function ShareOrWhy({ m, bars, fleetReady }:
   );
 }
 
-function Serving({ models, bars, fleetReady }:
+function Serving({ models, bars, fleet }:
                  { models: ModelRow[]; bars: StackBar[];
-                   fleetReady: boolean }) {
+                   fleet: FleetView | null }) {
   const live = models.filter((m) => m.running);
   return (
     <div class="widget">
@@ -257,10 +273,17 @@ function Serving({ models, bars, fleetReady }:
                 <span class="srv-state">{stateLabel(m.state)}</span>
                 <span class="sub">
                   {m.tok_s ? `${m.tok_s.toFixed(1)} tok/s` : ""}
-                  {m.size_bytes ? ` · ${fmtGiB(m.size_bytes)} GiB` : ""}
+                  {/* "on disk" is the whole fix here: this is the GGUF's
+                      file size, and printed bare above a bar totalling
+                      held bytes it invited a subtraction whose answer
+                      means nothing. Two facts, two axes, now both
+                      named. */}
+                  {m.size_bytes
+                    ? ` · ${fmtGiB(m.size_bytes)} GiB on disk`
+                    : ""}
                 </span>
               </p>
-              <ShareOrWhy m={m} bars={bars} fleetReady={fleetReady} />
+              <ShareOrWhy m={m} bars={bars} fleet={fleet} />
             </div>
           ))
         : <p class="sub"
@@ -347,7 +370,12 @@ export function Home() {
   const unattributed = fleet
     ? models.filter((m) => {
         if (!m.running) return false;
-        const view = modelShares(m.name, bars);
+        /* Streamed bytes count as attribution: a model whose experts
+           are all mmap'd holds no device but DID write a reservation,
+           and "runs without a reservation" is the most wrong thing the
+           screen could say about it. */
+        const view = modelShares(m.name, bars,
+                                 streamedBytes(fleet, m.name));
         return view.shares.length === 0 && !view.partial;
       }).map((m) => m.name)
     : [];
@@ -369,7 +397,7 @@ export function Home() {
       <Trouble items={troubles(models, jobs, fleet, Date.now() / 1000)} />
       <Machine bars={bars} holdingsError={holdingsError}
                unattributed={unattributed} />
-      <Serving models={models} bars={bars} fleetReady={fleet != null} />
+      <Serving models={models} bars={bars} fleet={fleet} />
       <Ready models={models} />
     </>
   );

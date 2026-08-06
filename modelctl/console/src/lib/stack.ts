@@ -142,14 +142,43 @@ export interface ModelSharesView {
      here are real, but the total may be missing devices. A bar drawn
      from a partial read must say so, or it under-reports the model. */
   partial: boolean;
+  /* Bytes addressed off the SSD, or null when the fleet has not said.
+     Passed straight to ModelShare, whose spill badge is tri-state for
+     the same reason: zero is a claim, and "nothing on disk" is the
+     worst thing to print about a model that is mostly on disk. */
+  spill: number | null;
 }
 
-/* Where one model's held bytes sit, as shares for the model bar.
-   Backing follows the bar, not the plan: these are bytes actually held
-   right now, so there is no SSD segment here -- streamed bytes are
-   precisely the ones nothing holds. */
-export function modelShares(profile: string,
-                            bars: StackBar[]): ModelSharesView {
+/* What one model streams off the SSD instead of holding.
+   Tri-state, and the three states are genuinely different:
+     null  the fleet has not answered, or its holdings threw -- the key
+           is absent and we never got to look
+     0     the fleet answered and this model streams nothing
+     n     this model addresses n bytes off the disk
+
+   These bytes have no device to sit on, which is exactly why no bar
+   could ever show them: an mmap'd expert occupies no budget anywhere
+   (the planner books it outside RAM admission, and the RAM row's
+   free-minus-reserve budget already counts those pages as reclaimable).
+   So they ride the view, not a row. */
+export function streamedBytes(fleet: FleetView | null,
+                              profile: string): number | null {
+  const map = fleet?.mmap_bytes;
+  if (map == null) return null;
+  return map[profile] ?? 0;
+}
+
+/* Where one model's bytes sit, as shares for the model bar.
+   Backing follows the bar, not the plan: the device shares are bytes
+   actually held right now. The SSD tail is the one share no bar can
+   carry -- streamed bytes are precisely the ones nothing holds -- so it
+   arrives separately and is appended last, where rankOf already sorts
+   it. Without it the bar accounted for a fraction of the model and said
+   nothing about the rest (laguna, 2026-08-05: 43.2 GiB of bars under a
+   54.7 GiB heading, with 18.7 GiB on a disk that nothing named). */
+export function modelShares(profile: string, bars: StackBar[],
+                            streaming: number | null = null):
+                            ModelSharesView {
   const shares: Share[] = [];
   let partial = false;
   for (const bar of bars) {
@@ -165,5 +194,9 @@ export function modelShares(profile: string,
       : bar.local ? "VRAM" : "over RPC";
     shares.push({ name: bar.name, bytes: mine, backing });
   }
-  return { shares, partial };
+  if (streaming != null && streaming > 0) {
+    shares.push({ name: "this machine's SSD", bytes: streaming,
+                  backing: "SSD via mmap" });
+  }
+  return { shares, partial, spill: streaming };
 }

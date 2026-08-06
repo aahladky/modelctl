@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { modelShares, stackBars, withUsage } from "./stack.ts";
+import {
+  modelShares, stackBars, streamedBytes, withUsage,
+} from "./stack.ts";
 import type { FleetView } from "./types.ts";
 
 const GIB = 2 ** 30;
@@ -242,4 +244,91 @@ test("a model holding nothing has no shares, and unknown is not a share", () => 
   const view = modelShares("q122b", stackBars(f));
   assert.deepEqual(view.shares, []);
   assert.equal(view.partial, true);
+});
+
+/* ---- what a model streams off the SSD instead of holding ---- */
+
+test("streamed bytes read as unknown until the fleet answers", () => {
+  /* Three different silences that must not collapse into zero: no fleet
+     yet, a fleet whose holdings threw (the key is absent), and both. */
+  assert.equal(streamedBytes(null, "laguna"), null);
+  assert.equal(streamedBytes(fleet([node()]), "laguna"), null);
+});
+
+test("a fleet that answered says zero for a model that streams nothing", () => {
+  /* The map is present, so we DID look. Absent from it is a reading,
+     not a gap -- this is what earns the "nothing on disk" badge. */
+  const f = { ...fleet([node()]), mmap_bytes: { other: 4 * GIB } };
+  assert.equal(streamedBytes(f, "laguna"), 0);
+});
+
+test("a model's streamed bytes come back keyed by its own name", () => {
+  const f = { ...fleet([node()]),
+              mmap_bytes: { laguna: 18 * GIB, other: 4 * GIB } };
+  assert.equal(streamedBytes(f, "laguna"), 18 * GIB);
+});
+
+test("a known streamed share becomes the bar's SSD tail and its spill", () => {
+  /* The laguna case: 25.1 held on a card, 18 GiB addressed off the SSD.
+     Without the tail the bar accounts for a fraction of the model and
+     says nothing about the rest -- the exact reading Aaron refused. */
+  const f = fleet([node({ devices: [
+    device({ held: [{ profile: "laguna", bytes: 25 * GIB }],
+             held_bytes: 25 * GIB }),
+  ] })]);
+  const view = modelShares("laguna", stackBars(f), 18 * GIB);
+  assert.deepEqual(view.shares, [
+    { name: "SYCL0", bytes: 25 * GIB, backing: "VRAM" },
+    { name: "this machine's SSD", bytes: 18 * GIB,
+      backing: "SSD via mmap" },
+  ]);
+  assert.equal(view.spill, 18 * GIB);
+});
+
+test("streaming nothing adds no segment but still reports a zero spill", () => {
+  const f = fleet([node({ devices: [
+    device({ held: [{ profile: "laguna", bytes: 25 * GIB }],
+             held_bytes: 25 * GIB }),
+  ] })]);
+  const view = modelShares("laguna", stackBars(f), 0);
+  assert.equal(view.shares.length, 1);
+  assert.equal(view.spill, 0);
+});
+
+test("unknown streaming adds no segment and refuses to claim zero", () => {
+  const f = fleet([node({ devices: [
+    device({ held: [{ profile: "laguna", bytes: 25 * GIB }],
+             held_bytes: 25 * GIB }),
+  ] })]);
+  const view = modelShares("laguna", stackBars(f), null);
+  assert.equal(view.shares.length, 1);
+  assert.equal(view.spill, null);
+});
+
+test("a model that only streams is still a model with a share", () => {
+  /* Every expert on disk, no device reservation. This is the shape the
+     runtime fold used to drop entirely, and the one where "runs without
+     a reservation" would be the most wrong thing to print. */
+  const f = fleet([node()]);
+  const view = modelShares("allstream", stackBars(f), 18 * GIB);
+  assert.deepEqual(view.shares, [
+    { name: "this machine's SSD", bytes: 18 * GIB,
+      backing: "SSD via mmap" },
+  ]);
+  assert.equal(view.partial, false);
+});
+
+test("the SSD tail sorts last, after the slowest real device", () => {
+  const f = fleet([
+    node({ devices: [device({ held: [{ profile: "laguna", bytes: 25 * GIB }],
+                              held_bytes: 25 * GIB })] }),
+    node({ name: "ph16-71-cpu0", location: "remote" as const,
+           devices: [device({ name: "CPU",
+                              admission_key: "RPC:ph16-71-cpu0:CPU",
+                              held: [{ profile: "laguna", bytes: 9 * GIB }],
+                              held_bytes: 9 * GIB })] }),
+  ]);
+  const view = modelShares("laguna", stackBars(f), 18 * GIB);
+  assert.deepEqual(view.shares.map((s) => s.backing),
+                   ["VRAM", "over RPC", "SSD via mmap"]);
 });
