@@ -202,12 +202,17 @@ else
     # From $REPO: CCACHE_BASEDIR rewrites to paths relative to the cwd,
     # so the cwd has to be the checkout root for a lane's entries and the
     # main checkout's to match.
+    # bench-moe-hybrid is built but never run: it is a benchmark, not a
+    # gate. It is here because a configured-but-unbuilt target rots --
+    # e1957ebed added five moe_cache_device_* entry points and updated
+    # test-moe-hybrid's stubs but not the bench's, and nothing noticed for
+    # four days because CI builds named targets and never `all`.
     if (cd "$REPO" && cmake -B "$BUILD" -S "$REPO/llama.cpp" -DGGML_SYCL=OFF \
             -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_TESTS=ON \
             -DLLAMA_BUILD_EXAMPLES=OFF -DCMAKE_BUILD_TYPE=Release \
             > "$LOGS/ci-cmake.log" 2>&1 \
        && cmake --build "$BUILD" --target llama-server test-moe-cache \
-            test-moe-hybrid -j"$(nproc)" > "$LOGS/ci-build.log" 2>&1); then
+            test-moe-hybrid bench-moe-hybrid -j"$(nproc)" > "$LOGS/ci-build.log" 2>&1); then
         pass "CPU-only build"
 
         if "$BUILD/bin/test-moe-cache" > /dev/null 2>&1; then
