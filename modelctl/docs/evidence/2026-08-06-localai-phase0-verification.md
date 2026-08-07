@@ -259,7 +259,45 @@ updated to "Add model" / `/app/add` rather than ignored. Confined to one test.
 
 Collection after the change: **308 tests in 57 files**, of which 8 are the new
 wizard specs and 0 are from the ignored nine (435 - 127 = 308, verified with
-`playwright test --list`).
+`playwright test --list`). The suite runs green in **45.8 s** where the
+unignored version spent half an hour accumulating 30-second timeouts.
+
+## The suite was writing to the live planning service
+
+Found by accident while cleaning up, which is the worrying part. After the
+first full run, live modelctl on :9293 held an acquisition wizard it had not
+held before -- `f875eae735e2`, `step=source`, created 22:15:24 -- and
+`/tmp/ui-test-server.log` records the test server fetching that exact id:
+
+```
+22:26:26  GET /api/modelctl/wizards            200
+22:26:26  GET /api/modelctl/wizard/f875eae735e2 200
+```
+
+The path: `ui-test-server` registers the modelctl proxy like any other LocalAI
+instance, and `sidecar.FromEnv()` falls back to `DefaultBaseURL` when
+`LOCALAI_MODELCTL_URL` is unset -- which on this machine is the real service.
+Every orphaned spec navigating to `/app/models` or `/app/import-model` now
+lands on `/app/add` through the redirect, and none of them stub
+`/api/modelctl/*`, so `AddModel` booted, found no open wizard, and POSTed one
+into production. Exactly one, because the boot logic resumes an open wizard
+rather than minting a second -- which is also why this was easy to miss.
+
+Ignoring those specs stopped it happening, but by accident: the next spec to
+reach `/app/add` unstubbed would do it again. The fix is a `webServer.env`
+entry pointing the test server's sidecar at port 9 (discard), so an unstubbed
+call fails as unreachable -- a state the UI already renders honestly -- instead
+of quietly succeeding against something it must never touch.
+
+The stray wizard was empty (no jobs, no profile) and was deleted through the
+documented abandon endpoint (`{"deleted":"f875eae735e2","cancelled_jobs":[]}`).
+Verified after the fix: a full guarded run leaves the live service at 0 wizards
+and 15 models, its `/api/modelctl/*` calls answer 503, and the suite is still
+304 passed / 4 skipped / 0 failed.
+
+This is the only contamination of the live install found in this phase, and it
+came from the test suite, not from the walk -- the walk was contained by
+design.
 
 ## Rendered, not just round-tripped
 
@@ -318,6 +356,10 @@ Containment verified after the walk:
 
 Nothing under `~/services/`, `~/models/` or the live state dir was written.
 Undo for everything in this section is deleting the scratch directory.
+
+The one thing that *did* touch the live install came from the opposite
+direction -- the e2e suite, not the walk. See "The suite was writing to the
+live planning service" above: found, fixed, and the stray record removed.
 
 ## Not covered
 
